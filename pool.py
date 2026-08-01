@@ -1,6 +1,8 @@
 import time
 import asyncio
 import json
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from dataclasses import dataclass, field
 from providers.openai_provider import OpenAIProvider, RateLimitError
@@ -30,8 +32,11 @@ class ModelEntry:
     billing_mode: str = "token"
     is_free: bool = False
     modality: str = "text"
+    provider_id: str = ""
+    expire_date: str = ""
     latency_ms: float | None = None
     cooldown_until: float = 0.0
+    one_time_created_at: float | None = None
     semaphore: asyncio.Semaphore = field(default=None, repr=False)
 
     def __post_init__(self):
@@ -55,17 +60,37 @@ class ModelPool:
         self.registry: dict[str, ModelEntry] = {}
         self.by_name: dict[str, list[ModelEntry]] = {}
         self.pools: dict[str, dict] = {}
+        self.providers: dict[str, dict] = {}
         self.providers_cache: dict[str, object] = {}
         self._load()
 
     def _load(self):
+        for p in self.config.get("providers", []):
+            self.providers[p["id"]] = {
+                "id": p["id"],
+                "name": p.get("name", p["id"]),
+                "protocol": p.get("protocol", "openai"),
+                "base_url": p.get("base_url", ""),
+                "api_key": p.get("api_key", ""),
+            }
+
         for m in self.config.get("models", []):
+            pid = m.get("provider_id", "")
+            prov = self.providers.get(pid)
+            if prov:
+                protocol = prov["protocol"]
+                base_url = prov["base_url"]
+                api_key = prov["api_key"]
+            else:
+                protocol = m.get("provider", "openai")
+                base_url = m.get("base_url", "")
+                api_key = m.get("api_key", "")
             entry = ModelEntry(
                 id=m["id"],
                 name=m["name"],
-                provider=m["provider"],
-                base_url=m["base_url"],
-                api_key=m["api_key"],
+                provider=protocol,
+                base_url=base_url,
+                api_key=api_key,
                 daily_token_limit=m.get("daily_token_limit", 0),
                 rpm_limit=m.get("rpm_limit", 0),
                 tpm_limit=m.get("tpm_limit", 0),
@@ -79,6 +104,8 @@ class ModelPool:
                 billing_mode=m.get("billing_mode", "token"),
                 is_free=m.get("is_free", False),
                 modality=m.get("modality", "text"),
+                provider_id=pid,
+                expire_date=m.get("expire_date", ""),
             )
             self.registry[entry.id] = entry
             self.by_name.setdefault(entry.name, []).append(entry)
@@ -96,6 +123,7 @@ class ModelPool:
         self.registry.clear()
         self.by_name.clear()
         self.pools.clear()
+        self.providers.clear()
         self._load()
         for mid, e in self.registry.items():
             if mid in old_latency:
@@ -144,17 +172,26 @@ class ModelPool:
 
         if entry.token_type == "one_time":
             state = await db.get_one_time_state(entry.id)
-            if state is not None:
-                if state["expired"]:
-                    return False, "one_time_expired"
-                if entry.ttl_seconds > 0 and (now - state["created_at"]) > entry.ttl_seconds:
-                    await db.expire_one_time(entry.id)
-                    return False, "one_time_expired"
-                if entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
-                    await db.expire_one_time(entry.id)
-                    return False, "one_time_expired"
-            else:
+            if state is None:
                 await db.init_one_time(entry.id)
+                state = {"used_tokens": 0, "created_at": now, "expired": 0}
+            entry.one_time_created_at = state["created_at"]  # cache for _time_to_expiry
+            if state["expired"]:
+                return False, "one_time_expired"
+            if entry.expire_date:
+                try:
+                    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+                    if today > datetime.strptime(entry.expire_date, "%Y-%m-%d").date():
+                        await db.expire_one_time(entry.id)
+                        return False, "one_time_expired"
+                except ValueError:
+                    pass
+            if entry.ttl_seconds > 0 and (now - state["created_at"]) > entry.ttl_seconds:
+                await db.expire_one_time(entry.id)
+                return False, "one_time_expired"
+            if entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
+                await db.expire_one_time(entry.id)
+                return False, "one_time_expired"
         elif entry.daily_token_limit > 0:
             used = await db.get_daily_usage(entry.id)
             if used >= entry.daily_token_limit:
@@ -181,10 +218,19 @@ class ModelPool:
 
         return True, "ok"
 
+    # Untested models get a moderate default so they still participate in
+    # auto-order selection instead of being pushed to infinity.
+    _UNTESTED_LATENCY = 1500.0
+
     def _unit_latency(self, kind: str, val, visiting: set) -> float:
         if kind == "model":
             lat = val.latency_ms
-            return lat if lat is not None else float("inf")
+            if lat is None:
+                return self._UNTESTED_LATENCY
+            # Hard deprioritize slow models (>3s) so the next model is preferred.
+            if lat > 3000:
+                return float("inf")
+            return lat
         name = val
         if name in visiting:
             return float("inf")
@@ -194,9 +240,65 @@ class ModelPool:
             if raw.startswith("pool:"):
                 best = min(best, self._unit_latency("pool", raw[5:], visiting | {name}))
             elif raw in self.registry:
-                lat = self.registry[raw].latency_ms
-                if lat is not None:
-                    best = min(best, lat)
+                best = min(best, self._unit_latency("model", self.registry[raw], visiting))
+        return best
+
+    def _time_to_expiry(self, entry: ModelEntry) -> float:
+        """Seconds until this model's quota is lost. Lower = more urgent (use it first).
+        inf = no meaningful expiry."""
+        now = time.time()
+        if entry.token_type == "one_time":
+            if entry.expire_date:
+                try:
+                    exp = datetime.strptime(entry.expire_date, "%Y-%m-%d").replace(
+                        hour=23, minute=59, second=59, tzinfo=ZoneInfo("Asia/Shanghai")
+                    )
+                    return max(0.0, exp.timestamp() - now)
+                except ValueError:
+                    pass
+            if entry.ttl_seconds > 0:
+                if entry.one_time_created_at is not None:
+                    return max(0.0, entry.one_time_created_at + entry.ttl_seconds - now)
+                return float(entry.ttl_seconds)  # not started yet — treat full TTL as remaining
+            return float("inf")
+        # daily model: quota is lost at the next refresh
+        if entry.refresh_time and entry.daily_token_limit > 0:
+            try:
+                h, m = map(int, entry.refresh_time.split(":"))
+                now_dt = datetime.now(ZoneInfo("Asia/Shanghai"))
+                refresh = now_dt.replace(hour=h, minute=m, second=0, microsecond=0)
+                if refresh <= now_dt:
+                    refresh += timedelta(days=1)
+                return (refresh - now_dt).total_seconds()
+            except (ValueError, IndexError):
+                pass
+        return float("inf")
+
+    def _auto_order_key(self, kind: str, val, visiting: set):
+        """Sort key for auto_order: (time-to-expiry, latency). Lower = chosen first.
+        Prefers models whose quota is about to be lost, then faster ones.
+        Untested models get a moderate default latency so they still participate."""
+        if kind == "model":
+            lat = val.latency_ms
+            if lat is None:
+                lat = self._UNTESTED_LATENCY
+            elif lat > 3000:
+                lat = float("inf")
+            return (self._time_to_expiry(val), lat)
+        name = val
+        if name in visiting:
+            return (float("inf"), float("inf"))
+        meta = self.pools.get(name) or {}
+        best = (float("inf"), float("inf"))
+        for raw in meta.get("model_ids", []):
+            if raw.startswith("pool:"):
+                child = self._auto_order_key("pool", raw[5:], visiting | {name})
+            elif raw in self.registry:
+                child = self._auto_order_key("model", self.registry[raw], visiting)
+            else:
+                continue
+            if child < best:
+                best = child
         return best
 
     async def _select_from_pool(self, pool_name: str, estimated_tokens: int = 0, exclude: set | None = None, has_images: bool = False, visiting: set | None = None):
@@ -215,7 +317,7 @@ class ModelPool:
                 units.append(("model", self.registry[raw]))
 
         if meta.get("auto_order"):
-            units = sorted(units, key=lambda u: self._unit_latency(u[0], u[1], visiting))
+            units = sorted(units, key=lambda u: self._auto_order_key(u[0], u[1], visiting))
 
         steps = []
         for kind, val in units:
@@ -293,36 +395,43 @@ class ModelPool:
 
     async def execute_stream(self, entry: ModelEntry, req):
         provider = self._get_provider(entry)
-        await db.log_request(entry.id, 0)
+        t0 = time.perf_counter()
+        # request_log is written after the stream completes so the real token count
+        # (input + output) lands in the RPM/TPM sliding window — logging 0 up front
+        # undercounted TPM for every streamed call.
         if entry.token_type == "daily" and entry.billing_mode == "request":
             await db.add_daily_usage(entry.id, 1)
         raw = provider.chat_stream(req, entry.name)
-        return self._wrap_stream(entry, raw)
+        return self._wrap_stream(entry, raw, t0)
 
-    async def _wrap_stream(self, entry: ModelEntry, raw):
+    async def _wrap_stream(self, entry: ModelEntry, raw, t0: float):
         captured = 0
-        async for chunk in raw:
-            if isinstance(chunk, str) and chunk.startswith("data: ") and "[DONE]" not in chunk:
-                try:
-                    obj = json.loads(chunk[6:].strip())
-                    usage = obj.get("usage")
-                    if usage and usage.get("total_tokens"):
-                        captured = usage["total_tokens"]
-                except Exception:
-                    pass
-            yield chunk
-        if captured > 0:
-            if entry.token_type == "one_time":
-                await db.add_one_time_usage(entry.id, captured)
-                state = await db.get_one_time_state(entry.id)
-                if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
-                    await db.expire_one_time(entry.id)
-            elif entry.billing_mode == "token":
-                await db.add_daily_usage(entry.id, captured)
+        try:
+            async for chunk in raw:
+                if isinstance(chunk, str) and chunk.startswith("data: ") and "[DONE]" not in chunk:
+                    try:
+                        obj = json.loads(chunk[6:].strip())
+                        usage = obj.get("usage")
+                        if usage and usage.get("total_tokens"):
+                            captured = usage["total_tokens"]
+                    except Exception:
+                        pass
+                yield chunk
+        finally:
+            self._record_latency(entry, (time.perf_counter() - t0) * 1000)
+            await db.log_request(entry.id, captured)
+            if captured > 0:
+                if entry.token_type == "one_time":
+                    await db.add_one_time_usage(entry.id, captured)
+                    state = await db.get_one_time_state(entry.id)
+                    if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
+                        await db.expire_one_time(entry.id)
+                elif entry.billing_mode == "token":
+                    await db.add_daily_usage(entry.id, captured)
 
     def failure_detail(self, steps: list[dict], has_images: bool) -> str:
-        selected_any = any(s.get("reason") == "selected" for s in steps)
-        if has_images and not selected_any:
+        attempted = any(s.get("reason") in ("selected", "switch_429", "switch_error") for s in steps)
+        if has_images and not attempted:
             return "请求包含图片，但池内没有可用的多模态模型（均为纯文本或不可用）"
         if not steps:
             return "池为空或无匹配模型"
@@ -333,58 +442,58 @@ class ModelPool:
         estimated = self._estimate_tokens(req)
         has_images = self._has_images(req)
         max_attempts = len(self.registry) + 1
-        all_steps: list[dict] = []
+        actual_calls: list[dict] = []
 
         for _ in range(max_attempts):
-            entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
-            all_steps.extend(steps)
+            entry, _ = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
             if entry is None:
                 break
             tried.add(entry.id)
 
             try:
                 response, tokens = await self.execute(entry, req)
-                await db.log_decision(pool_name, requested_model, entry.id, estimated, all_steps)
-                return response, tokens, all_steps
+                actual_calls.append({"model": entry.id, "reason": "selected"})
+                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls)
+                return response, tokens, actual_calls
             except RateLimitError:
-                all_steps.append({"model": entry.id, "reason": "switch_429"})
+                actual_calls.append({"model": entry.id, "reason": "switch_429"})
                 continue
             except Exception:
                 entry.cooldown_until = time.time() + 30
-                all_steps.append({"model": entry.id, "reason": "switch_error"})
+                actual_calls.append({"model": entry.id, "reason": "switch_error"})
                 continue
 
-        await db.log_decision(pool_name, requested_model, None, estimated, all_steps)
-        return None, 0, all_steps
+        await db.log_decision(pool_name, requested_model, None, estimated, actual_calls)
+        return None, 0, actual_calls
 
     async def execute_stream_with_fallback(self, pool_name: str, req, requested_model: str | None = None):
         tried: set[str] = set()
         estimated = self._estimate_tokens(req)
         has_images = self._has_images(req)
         max_attempts = len(self.registry) + 1
-        all_steps: list[dict] = []
+        actual_calls: list[dict] = []
 
         for _ in range(max_attempts):
-            entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
-            all_steps.extend(steps)
+            entry, _ = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
             if entry is None:
                 break
             tried.add(entry.id)
 
             try:
                 stream = await self.execute_stream(entry, req)
-                await db.log_decision(pool_name, requested_model, entry.id, estimated, all_steps)
-                return stream, entry, all_steps
+                actual_calls.append({"model": entry.id, "reason": "selected"})
+                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls)
+                return stream, entry, actual_calls
             except RateLimitError:
-                all_steps.append({"model": entry.id, "reason": "switch_429"})
+                actual_calls.append({"model": entry.id, "reason": "switch_429"})
                 continue
             except Exception:
                 entry.cooldown_until = time.time() + 30
-                all_steps.append({"model": entry.id, "reason": "switch_error"})
+                actual_calls.append({"model": entry.id, "reason": "switch_error"})
                 continue
 
-        await db.log_decision(pool_name, requested_model, None, estimated, all_steps)
-        return None, None, all_steps
+        await db.log_decision(pool_name, requested_model, None, estimated, actual_calls)
+        return None, None, actual_calls
 
     async def speedtest(self, model_ids: list[str] | None = None) -> list[dict]:
         targets = model_ids or list(self.registry.keys())

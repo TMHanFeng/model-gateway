@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 gateway.db
+gateway.db-shm
+gateway.db-wal
 *.log
 
 # Local user secrets & runtime configs (managed outside VCS)
@@ -13,3 +15,6 @@ config.yaml
 .omo/
 .vscode/
 .idea/
+
+# Playwright MCP debugging artifacts
+.playwright-mcp/

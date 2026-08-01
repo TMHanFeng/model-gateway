@@ -44,9 +44,98 @@ class AnthropicProvider:
                 blocks.append(part)
         return blocks
 
+    def _convert_message(self, msg):
+        """Convert one OpenAI-format message to Anthropic format."""
+        # Tool role messages (tool results from client)
+        if msg.role == "tool":
+            content = msg.content
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                # Client may pass list of tool_result blocks
+                blocks = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "tool_result":
+                        blocks.append(part)
+                    else:
+                        blocks.append({"type": "text", "text": str(part)})
+                text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text") or str(blocks)
+            else:
+                text = str(content)
+            return {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": msg.tool_call_id or "",
+                        "content": text,
+                    }
+                ],
+            }
+
+        # Assistant messages with tool_calls
+        if msg.role == "assistant" and msg.tool_calls:
+            content_blocks = []
+            if msg.content:
+                if isinstance(msg.content, str):
+                    if msg.content.strip():
+                        content_blocks.append({"type": "text", "text": msg.content})
+                elif isinstance(msg.content, list):
+                    text = self._convert_content(msg.content)
+                    if isinstance(text, str) and text:
+                        content_blocks.append({"type": "text", "text": text})
+                    elif isinstance(text, list):
+                        content_blocks.extend(text)
+            for tc in msg.tool_calls:
+                fn = tc.get("function", {}) or {}
+                args = fn.get("arguments", "")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args) if args else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", ""),
+                    "name": fn.get("name", ""),
+                    "input": args if isinstance(args, dict) else {},
+                })
+            return {"role": "assistant", "content": content_blocks}
+
+        # Regular user/assistant text/image content
+        return {
+            "role": msg.role,
+            "content": self._convert_content(msg.content) if msg.content is not None else "",
+        }
+
+    def _convert_tools(self, openai_tools):
+        """Convert OpenAI tools format to Anthropic tools format."""
+        if not openai_tools:
+            return None
+        anthropic_tools = []
+        for tool in openai_tools:
+            if not isinstance(tool, dict):
+                continue
+            if tool.get("type") == "function":
+                fn = tool.get("function", {}) or {}
+                anthropic_tools.append({
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", ""),
+                    "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+                })
+            elif "name" in tool:
+                # Already in Anthropic-like format
+                at = {"name": tool["name"]}
+                if "description" in tool: at["description"] = tool["description"]
+                if "input_schema" in tool: at["input_schema"] = tool["input_schema"]
+                anthropic_tools.append(at)
+        return anthropic_tools if anthropic_tools else None
+
     def _map_finish(self, stop_reason: str) -> str:
         if stop_reason == "max_tokens":
             return "length"
+        if stop_reason == "tool_use":
+            return "tool_calls"
         return "stop"
 
     def _build_payload(self, req: ChatCompletionRequest, model_name: str, stream: bool = False) -> dict:
@@ -61,7 +150,7 @@ class AnthropicProvider:
                         if isinstance(part, dict) and part.get("type") == "text":
                             system_msg += part.get("text", "") + "\n"
             else:
-                messages.append({"role": m.role, "content": self._convert_content(m.content)})
+                messages.append(self._convert_message(m))
 
         payload = {
             "model": model_name,
@@ -79,6 +168,23 @@ class AnthropicProvider:
             payload["stop_sequences"] = stops
         if stream:
             payload["stream"] = True
+        anthropic_tools = self._convert_tools(req.tools)
+        if anthropic_tools:
+            payload["tools"] = anthropic_tools
+        if req.tool_choice is not None:
+            tc = req.tool_choice
+            if isinstance(tc, str):
+                if tc == "any":
+                    payload["tool_choice"] = {"type": "any"}
+                elif tc == "auto":
+                    payload["tool_choice"] = {"type": "auto"}
+                elif tc == "none":
+                    payload.pop("tools", None)
+                # else: ignore unknown string
+            elif isinstance(tc, dict):
+                fn = tc.get("function", {}) or {}
+                if fn.get("name"):
+                    payload["tool_choice"] = {"type": "tool", "name": fn["name"]}
         return payload
 
     def _headers(self) -> dict:
@@ -103,6 +209,17 @@ class AnthropicProvider:
         usage = data.get("usage", {})
         content_blocks = data.get("content", [])
         text = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
+        tool_calls = []
+        for b in content_blocks:
+            if b.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": b.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": b.get("name", ""),
+                        "arguments": json.dumps(b.get("input", {}), ensure_ascii=False),
+                    },
+                })
 
         prompt_tokens = usage.get("input_tokens", 0)
         completion_tokens = usage.get("output_tokens", 0)
@@ -114,7 +231,11 @@ class AnthropicProvider:
             choices=[
                 Choice(
                     index=0,
-                    message=ChoiceMessage(role="assistant", content=text),
+                    message=ChoiceMessage(
+                        role="assistant",
+                        content=text,
+                        tool_calls=tool_calls if tool_calls else None,
+                    ),
                     finish_reason=self._map_finish(data.get("stop_reason", "end_turn")),
                 )
             ],
@@ -156,20 +277,66 @@ class AnthropicProvider:
                 event_type = event.get("type", "")
                 if event_type == "message_start":
                     in_tokens = event.get("message", {}).get("usage", {}).get("input_tokens", in_tokens)
+                elif event_type == "content_block_start":
+                    block = event.get("content_block", {}) or {}
+                    if block.get("type") == "tool_use":
+                        chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model_name,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [{
+                                        "index": event.get("index", 0),
+                                        "id": block.get("id", ""),
+                                        "type": "function",
+                                        "function": {
+                                            "name": block.get("name", ""),
+                                            "arguments": "",
+                                        },
+                                    }],
+                                },
+                                "finish_reason": None,
+                            }],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
                 elif event_type == "content_block_delta":
-                    delta_text = event.get("delta", {}).get("text", "")
-                    chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model_name,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"content": delta_text},
-                            "finish_reason": None,
-                        }],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    delta = event.get("delta", {}) or {}
+                    if delta.get("type") == "input_json_delta":
+                        chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model_name,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [{
+                                        "index": event.get("index", 0),
+                                        "function": {
+                                            "arguments": delta.get("partial_json", ""),
+                                        },
+                                    }],
+                                },
+                                "finish_reason": None,
+                            }],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                    elif "text" in delta:
+                        chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model_name,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": delta.get("text", "")},
+                                "finish_reason": None,
+                            }],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
                 elif event_type == "message_delta":
                     out_tokens = event.get("usage", {}).get("output_tokens", out_tokens)
                     stop_reason = event.get("delta", {}).get("stop_reason", stop_reason)

@@ -3,10 +3,18 @@ from fastapi.responses import HTMLResponse
 from pathlib import Path
 from pool import load_config, save_config
 from scheduler import restart_scheduler
+from providers.openai_provider import OpenAIProvider
+from providers.anthropic_provider import AnthropicProvider
 
 router = APIRouter(prefix="/admin")
 
 FRONTEND_PATH = Path(__file__).parent / "static" / "index.html"
+
+
+def _sync_pool():
+    """Reload in-memory pool after config changes so /v1/models stays current."""
+    from main import pool
+    pool.reload()
 
 
 def verify_admin(request: Request):
@@ -35,12 +43,23 @@ async def get_models(_=Depends(verify_admin)):
 @router.post("/models")
 async def add_model(request: Request, _=Depends(verify_admin)):
     body = await request.json()
-    required = ["id", "name", "provider", "base_url", "api_key"]
-    for field in required:
-        if not body.get(field):
-            raise HTTPException(status_code=400, detail=f"Missing field: {field}")
+    pid = (body.get("provider_id") or "").strip()
 
     config = load_config()
+    providers = config.get("providers", [])
+
+    if pid:
+        # provider-based model: protocol/base_url/api_key inherited from provider
+        if not body.get("id") or not body.get("name"):
+            raise HTTPException(status_code=400, detail="Missing field: id/name")
+        if not any(p["id"] == pid for p in providers):
+            raise HTTPException(status_code=400, detail=f"Provider '{pid}' not found")
+    else:
+        # legacy inline model: full connection info required
+        for field in ["id", "name", "provider", "base_url", "api_key"]:
+            if not body.get(field):
+                raise HTTPException(status_code=400, detail=f"Missing field: {field}")
+
     models = config.get("models", [])
     for m in models:
         if m["id"] == body["id"]:
@@ -49,9 +68,6 @@ async def add_model(request: Request, _=Depends(verify_admin)):
     entry = {
         "id": body["id"],
         "name": body["name"],
-        "provider": body["provider"],
-        "base_url": body["base_url"],
-        "api_key": body["api_key"],
         "daily_token_limit": body.get("daily_token_limit", 0),
         "rpm_limit": body.get("rpm_limit", 0),
         "tpm_limit": body.get("tpm_limit", 0),
@@ -64,9 +80,17 @@ async def add_model(request: Request, _=Depends(verify_admin)):
         "is_free": bool(body.get("is_free", False)),
         "modality": body.get("modality", "text"),
     }
+    if pid:
+        entry["provider_id"] = pid
+    else:
+        entry["provider"] = body["provider"]
+        entry["base_url"] = body["base_url"]
+        entry["api_key"] = body["api_key"]
     if body.get("token_type") == "one_time":
         entry["max_tokens"] = body.get("max_tokens", 0)
         entry["ttl_seconds"] = body.get("ttl_seconds", 0)
+        if body.get("expire_date"):
+            entry["expire_date"] = body["expire_date"]
 
     models.append(entry)
     config["models"] = models
@@ -89,6 +113,10 @@ async def update_model(model_id: str, request: Request, _=Depends(verify_admin))
     if idx is None:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
 
+    pid = body.get("provider_id")
+    if pid and not any(p["id"] == pid for p in config.get("providers", [])):
+        raise HTTPException(status_code=400, detail=f"Provider '{pid}' not found")
+
     for key, value in body.items():
         if key == "id":
             continue
@@ -98,6 +126,11 @@ async def update_model(model_id: str, request: Request, _=Depends(verify_admin))
             value = bool(value)
         models[idx][key] = value
     models[idx]["timezone"] = "Asia/Shanghai"
+
+    # provider-based and inline connection info are mutually exclusive
+    if models[idx].get("provider_id"):
+        for k in ("provider", "base_url", "api_key"):
+            models[idx].pop(k, None)
 
     config["models"] = models
     save_config(config)
@@ -122,6 +155,85 @@ async def delete_model(model_id: str, _=Depends(verify_admin)):
     return {"ok": True}
 
 
+@router.get("/providers")
+async def get_providers(_=Depends(verify_admin)):
+    config = load_config()
+    return {"providers": config.get("providers", [])}
+
+
+@router.post("/providers")
+async def add_provider(request: Request, _=Depends(verify_admin)):
+    body = await request.json()
+    for field in ["id", "name", "protocol", "base_url", "api_key"]:
+        if not body.get(field):
+            raise HTTPException(status_code=400, detail=f"Missing field: {field}")
+    if body["protocol"] not in ("openai", "anthropic"):
+        raise HTTPException(status_code=400, detail="protocol must be 'openai' or 'anthropic'")
+
+    config = load_config()
+    providers = config.setdefault("providers", [])
+    for p in providers:
+        if p["id"] == body["id"]:
+            raise HTTPException(status_code=409, detail=f"Provider id '{body['id']}' already exists")
+
+    entry = {
+        "id": body["id"],
+        "name": body["name"],
+        "protocol": body["protocol"],
+        "base_url": body["base_url"],
+        "api_key": body["api_key"],
+    }
+    providers.append(entry)
+    config["providers"] = providers
+    save_config(config)
+    restart_scheduler()
+    return {"ok": True, "provider": entry}
+
+
+@router.put("/providers/{provider_id:path}")
+async def update_provider(provider_id: str, request: Request, _=Depends(verify_admin)):
+    body = await request.json()
+    config = load_config()
+    providers = config.get("providers", [])
+    idx = None
+    for i, p in enumerate(providers):
+        if p["id"] == provider_id:
+            idx = i
+            break
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+
+    if "protocol" in body and body["protocol"] not in ("openai", "anthropic"):
+        raise HTTPException(status_code=400, detail="protocol must be 'openai' or 'anthropic'")
+    for key, value in body.items():
+        if key == "id":
+            continue
+        providers[idx][key] = value
+
+    config["providers"] = providers
+    save_config(config)
+    restart_scheduler()
+    return {"ok": True, "provider": providers[idx]}
+
+
+@router.delete("/providers/{provider_id:path}")
+async def delete_provider(provider_id: str, _=Depends(verify_admin)):
+    config = load_config()
+    providers = config.get("providers", [])
+    new_providers = [p for p in providers if p["id"] != provider_id]
+    if len(new_providers) == len(providers):
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+
+    refs = [m["id"] for m in config.get("models", []) if m.get("provider_id") == provider_id]
+    if refs:
+        raise HTTPException(status_code=400, detail=f"供应商下仍有模型：{', '.join(refs)}，请先删除或迁移这些模型")
+
+    config["providers"] = new_providers
+    save_config(config)
+    restart_scheduler()
+    return {"ok": True}
+
+
 @router.get("/pools")
 async def get_pools(_=Depends(verify_admin)):
     config = load_config()
@@ -134,6 +246,8 @@ async def create_pool(request: Request, _=Depends(verify_admin)):
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Missing pool name")
+    if "/" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="池名称不能包含 / 或 \\ 字符")
 
     config = load_config()
     pools = config.setdefault("pools", {})
@@ -147,10 +261,11 @@ async def create_pool(request: Request, _=Depends(verify_admin)):
     }
     save_config(config)
     restart_scheduler()
+    _sync_pool()
     return {"ok": True, "pool": pools[name]}
 
 
-@router.delete("/pools/{pool_name}")
+@router.delete("/pools/{pool_name:path}")
 async def delete_pool(pool_name: str, _=Depends(verify_admin)):
     if pool_name == "auto":
         raise HTTPException(status_code=400, detail="Auto pool cannot be deleted")
@@ -163,10 +278,11 @@ async def delete_pool(pool_name: str, _=Depends(verify_admin)):
     del pools[pool_name]
     save_config(config)
     restart_scheduler()
+    _sync_pool()
     return {"ok": True}
 
 
-@router.put("/pools/{pool_name}")
+@router.put("/pools/{pool_name:path}")
 async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin)):
     body = await request.json()
     model_ids = body.get("model_ids")
@@ -185,7 +301,43 @@ async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin))
 
     save_config(config)
     restart_scheduler()
+    _sync_pool()
     return {"ok": True, "pool": pools[pool_name]}
+
+
+@router.post("/pools/{pool_name:path}/rename")
+async def rename_pool(pool_name: str, request: Request, _=Depends(verify_admin)):
+    body = await request.json()
+    new_name = (body.get("new_name") or "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Missing new_name")
+    if "/" in new_name or "\\" in new_name:
+        raise HTTPException(status_code=400, detail="池名称不能包含 / 或 \\ 字符")
+    if new_name == pool_name:
+        return {"ok": True, "pool_name": pool_name}
+
+    config = load_config()
+    pools = config.get("pools", {})
+    if pool_name not in pools:
+        raise HTTPException(status_code=404, detail=f"Pool '{pool_name}' not found")
+    if new_name in pools:
+        raise HTTPException(status_code=409, detail=f"Pool '{new_name}' already exists")
+
+    # Move pool data to new key
+    pools[new_name] = pools.pop(pool_name)
+
+    # Migrate pool:old_name references in all other pools
+    old_ref = f"pool:{pool_name}"
+    new_ref = f"pool:{new_name}"
+    for pname, pcfg in pools.items():
+        ids = pcfg.get("model_ids", [])
+        if old_ref in ids:
+            pcfg["model_ids"] = [new_ref if x == old_ref else x for x in ids]
+
+    save_config(config)
+    restart_scheduler()
+    _sync_pool()
+    return {"ok": True, "pool_name": new_name}
 
 
 @router.post("/reload")
@@ -201,3 +353,27 @@ async def get_decisions(pool: str | None = None, limit: int = 100, _=Depends(ver
     import database as db
     rows = await db.get_decisions(pool_name=pool, limit=min(limit, 500))
     return {"decisions": rows}
+
+
+@router.post("/test_model")
+async def test_model(request: Request, _=Depends(verify_admin)):
+    """Lightweight connectivity test using the form's current values (not saved)."""
+    body = await request.json()
+    base_url = (body.get("base_url") or "").strip()
+    api_key = (body.get("api_key") or "").strip()
+    protocol = body.get("protocol") or body.get("provider") or "openai"
+    model_name = (body.get("model_name") or body.get("name") or "").strip()
+    if not base_url or not api_key or not model_name:
+        raise HTTPException(400, "缺少 base_url / api_key / model_name")
+    if protocol not in ("openai", "anthropic"):
+        raise HTTPException(400, "protocol 必须为 openai 或 anthropic")
+
+    if protocol == "anthropic":
+        provider = AnthropicProvider(base_url, api_key)
+    else:
+        provider = OpenAIProvider(base_url, api_key)
+    try:
+        result = await provider.speedtest(model_name)
+        return {"ok": True, "result": result}
+    finally:
+        await provider.close()

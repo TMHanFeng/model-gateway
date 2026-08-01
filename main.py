@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, RedirectResponse
 from models import ChatCompletionRequest
 from pool import ModelPool, load_config
-from database import init_db
+from database import init_db, close_db
 from scheduler import start_scheduler
 from admin import router as admin_router
 
@@ -18,6 +18,7 @@ async def lifespan(app: FastAPI):
     print(f"\n  后台管理地址:  {base}/admin/\n  API 服务地址:  {base}/v1\n")
     yield
     await pool.close_all()
+    await close_db()
 
 
 app = FastAPI(title="Model Gateway", lifespan=lifespan)
@@ -37,25 +38,27 @@ def verify_key(request: Request):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-def _resolve(model_field: str) -> tuple[str, str | None]:
+def _resolve(model_field: str) -> str | None:
+    # Externally only model pools are callable; individual models are not exposed.
     if not model_field or model_field == "auto":
-        return "auto", None
-    if ":" in model_field:
-        pname, _, mref = model_field.partition(":")
-        if pname in pool.pools:
-            return pname, (mref or None)
+        return "auto"
     if model_field in pool.pools:
-        return model_field, None
-    return "auto", model_field
+        return model_field
+    return None
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, _=Depends(verify_key)):
-    pool_name, requested_model = _resolve(req.model or "auto")
+    pool_name = _resolve(req.model or "auto")
+    if pool_name is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未知模型池 '{req.model}'：对外仅可调用模型池（如 auto），不能直接指定单个模型",
+        )
     has_images = pool._has_images(req)
 
     if req.stream:
-        stream, entry, steps = await pool.execute_stream_with_fallback(pool_name, req, requested_model)
+        stream, entry, steps = await pool.execute_stream_with_fallback(pool_name, req, None)
         if stream is None:
             raise HTTPException(status_code=503, detail=pool.failure_detail(steps, has_images))
 
@@ -65,7 +68,7 @@ async def chat_completions(req: ChatCompletionRequest, _=Depends(verify_key)):
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
-    response, tokens, steps = await pool.execute_with_fallback(pool_name, req, requested_model)
+    response, tokens, steps = await pool.execute_with_fallback(pool_name, req, None)
     if response is None:
         raise HTTPException(status_code=503, detail=pool.failure_detail(steps, has_images))
     return response
@@ -73,15 +76,10 @@ async def chat_completions(req: ChatCompletionRequest, _=Depends(verify_key)):
 
 @app.get("/v1/models")
 async def list_models(_=Depends(verify_key)):
-    models = pool.list_models()
     data = [
-        {"id": m["id"], "object": "model", "owned_by": m["provider"], "context_window": m["context_window"]}
-        for m in models
+        {"id": pname, "object": "model", "owned_by": "gateway-pool"}
+        for pname in pool.pool_names()
     ]
-    for name in pool.list_model_names():
-        data.append({"id": name, "object": "model", "owned_by": "gateway"})
-    for pname in pool.pool_names():
-        data.append({"id": pname, "object": "model", "owned_by": "gateway-pool"})
     return {"object": "list", "data": data}
 
 

@@ -1,10 +1,13 @@
 from pydantic import BaseModel
-from typing import Optional, Union
+from typing import Optional, Union, Any
 
 
 class ChatMessage(BaseModel):
     role: str
-    content: Union[str, list]
+    content: Optional[Union[str, list]] = None
+    name: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[list[dict]] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -17,6 +20,8 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[str | list[str]] = None
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
+    tools: Optional[list[dict]] = None
+    tool_choice: Optional[Union[str, dict]] = None
 
 
 class UsageInfo(BaseModel):
@@ -27,7 +32,8 @@ class UsageInfo(BaseModel):
 
 class ChoiceMessage(BaseModel):
     role: str = "assistant"
-    content: str = ""
+    content: Optional[str] = ""
+    tool_calls: Optional[list[dict]] = None
 
 
 class Choice(BaseModel):

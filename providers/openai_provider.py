@@ -23,9 +23,15 @@ class OpenAIProvider:
         await self.client.aclose()
 
     def _build_payload(self, req: ChatCompletionRequest, model_name: str, stream: bool = False) -> dict:
+        messages = []
+        for m in req.messages:
+            d = m.model_dump(exclude_none=True)
+            if m.content is None:
+                d.pop("content", None)
+            messages.append(d)
         payload = {
             "model": model_name,
-            "messages": [m.model_dump() for m in req.messages],
+            "messages": messages,
         }
         if req.temperature is not None:
             payload["temperature"] = req.temperature
@@ -39,6 +45,12 @@ class OpenAIProvider:
             payload["presence_penalty"] = req.presence_penalty
         if req.frequency_penalty is not None:
             payload["frequency_penalty"] = req.frequency_penalty
+        if req.tools:
+            payload["tools"] = req.tools
+        if req.tool_choice is not None:
+            if req.tool_choice == "none":
+                payload.pop("tools", None)
+            payload["tool_choice"] = req.tool_choice
         if stream:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
@@ -73,6 +85,7 @@ class OpenAIProvider:
                     message=ChoiceMessage(
                         role=c["message"]["role"],
                         content=c["message"].get("content") or "",
+                        tool_calls=c["message"].get("tool_calls"),
                     ),
                     finish_reason=c.get("finish_reason", "stop"),
                 )

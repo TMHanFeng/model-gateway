@@ -91,6 +91,15 @@ body {
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px 18px; font-size: 12.5px; color: var(--muted); }
 .grid b { color: var(--text); font-weight: 500; font-family: var(--mono); }
 
+/* ── 供应商卡片 / 模型行 ── */
+.provider-card { border-left-color: var(--teal); }
+.provider-id-tag { font-family: var(--mono); font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 6px; }
+.provider-models { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 4px; }
+.model-row { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; }
+.model-row:hover { border-color: var(--line-hi); }
+.model-row .card-title { font-size: 14px; }
+.section-title { font-family: var(--mono); font-size: 13px; color: var(--muted); margin: 18px 0 8px; letter-spacing: .5px; }
+
 /* ── 按钮 ── */
 .btn {
   padding: 7px 14px; border-radius: 6px; border: 1px solid transparent; cursor: pointer;
@@ -245,7 +254,7 @@ body {
 @keyframes fade { from { opacity: 0; } }
 .modal {
   background: var(--panel); border: 1px solid var(--line-hi); border-radius: 10px;
-  padding: 26px; width: 520px; max-height: 84vh; overflow-y: auto;
+  padding: 26px; width: 660px; max-width: calc(100vw - 32px); max-height: 84vh; overflow-y: auto;
   animation: pop .22s cubic-bezier(.22,1,.36,1);
 }
 @keyframes pop { from { opacity: 0; transform: translateY(14px) scale(.98); } }
@@ -253,13 +262,14 @@ body {
 .modal h3::before { content:''; width: 4px; height: 18px; background: var(--amber); border-radius: 2px; }
 .f2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .fg { margin-bottom: 13px; }
-.fg label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+.fg label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fg input, .fg select {
   width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line-hi);
   background: var(--bg); color: var(--text); font-size: 13px; font-family: var(--mono);
   transition: border-color .15s, box-shadow .15s;
 }
 .fg input:focus, .fg select:focus { outline: none; border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-dim); }
+.fg input:disabled { opacity: .55; cursor: not-allowed; background: var(--panel-2); }
 .modal-actions { display: flex; gap: 10px; margin-top: 20px; }
 
 /* ── Toast ── */
@@ -299,8 +309,11 @@ body {
 
   <div id="tab-models">
     <div class="toolbar">
-      <div class="hint">在此添加、编辑上游模型接口，同名模型会自动归入一个大池子供调用。</div>
-      <button class="btn btn-amber" onclick="showAdd()">＋ 添加模型</button>
+      <div class="hint">先添加供应商（共享 Base URL 与 API Key），再在供应商卡片内添加模型；模型池仍按单个模型加入。</div>
+      <div class="btn-row">
+        <button class="btn btn-amber" onclick="showAddProvider()">＋ 添加供应商</button>
+        <button class="btn btn-ghost" onclick="showAdd()">＋ 添加独立模型</button>
+      </div>
     </div>
     <div id="model-list"></div>
   </div>
@@ -348,20 +361,28 @@ body {
     <h3 id="modal-title">添加模型</h3>
     <form id="mform" onsubmit="submitModel(event)">
       <div class="f2">
-        <div class="fg"><label>模型 ID（唯一标识）</label><input name="id" required placeholder="openai/gpt-4o"></div>
-        <div class="fg"><label>模型名称</label><input name="name" required placeholder="gpt-4o"></div>
+        <div class="fg"><label>模型 ID（唯一标识，<span style="color:var(--amber)">编辑时不可修改</span>）</label><input name="id" id="f-model-id" required placeholder="openai/gpt-4o"></div>
+        <div class="fg"><label>模型名称</label><input name="name" id="f-model-name" required placeholder="gpt-4o"></div>
       </div>
-      <div class="f2">
+      <div class="fg"><label>所属供应商（共享其 Base URL 与 API Key）</label>
+        <select name="provider_id" id="f-provider-id" onchange="onProviderSelect()">
+          <option value="">— 独立模型（下方内联填写连接信息）—</option>
+        </select>
+      </div>
+      <div id="inline-conn">
         <div class="fg"><label>提供商协议</label><select name="provider"><option value="openai">openai（兼容格式）</option><option value="anthropic">anthropic</option></select></div>
+        <div class="fg"><label>Base URL</label><input name="base_url" id="f-base-url" required placeholder="https://api.openai.com/v1"></div>
+        <div class="fg"><label>API Key</label><input name="api_key" id="f-api-key" required placeholder="sk-..."></div>
+      </div>
+      <div id="inherit-note" class="auto-note" style="display:none">该模型继承所属供应商的协议 / Base URL / API Key，无需在此填写。</div>
+      <div class="f2">
         <div class="fg"><label>令牌类型</label><select name="token_type"><option value="daily">daily（每日刷新）</option><option value="one_time">one_time（一次性）</option></select></div>
+        <div class="fg"><label>计费模式</label><select name="billing_mode" onchange="onBillingChange()"><option value="token">按 Token 计费</option><option value="request">按请求次数计费</option></select></div>
       </div>
       <div class="f2">
-        <div class="fg"><label>计费模式</label><select name="billing_mode" onchange="onBillingChange()"><option value="token">按 Token 计费</option><option value="request">按请求次数计费</option></select></div>
         <div class="fg"><label>收费标注</label><select name="is_free"><option value="false">付费模型（红）</option><option value="true">免费模型（绿）</option></select></div>
+        <div class="fg"><label>模型模态</label><select name="modality"><option value="text">纯文本（不支持图片）</option><option value="vision">多模态（支持图片）</option></select></div>
       </div>
-      <div class="fg"><label>模型模态</label><select name="modality"><option value="text">纯文本（不支持图片）</option><option value="vision">多模态（支持图片）</option></select></div>
-      <div class="fg"><label>Base URL</label><input name="base_url" required placeholder="https://api.openai.com/v1"></div>
-      <div class="fg"><label>API Key</label><input name="api_key" required placeholder="sk-..."></div>
       <div class="f2">
         <div class="fg"><label id="limit-label">每日 Token 上限（0=不限）</label><input name="daily_token_limit" type="number" value="0"></div>
         <div class="fg"><label>上下文窗口（0=不校验）</label><input name="context_window" type="number" value="0"></div>
@@ -378,10 +399,33 @@ body {
         <div class="fg"><label>时区</label><input value="Asia/Shanghai（北京时间，固定）" disabled></div>
         <div class="fg"><label>一次性·最大 Token</label><input name="max_tokens" type="number" value="0"></div>
       </div>
-      <div class="fg"><label>一次性·存活时长（秒）</label><input name="ttl_seconds" type="number" value="0"></div>
+      <div class="f2">
+        <div class="fg"><label>一次性·存活时长（秒）</label><input name="ttl_seconds" type="number" value="0"></div>
+        <div class="fg"><label>一次性·过期日期（北京时间，到期次日失效）</label><input name="expire_date" id="f-expire-date" type="date"></div>
+      </div>
       <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="testConnectivity()" id="m-test-btn">⚡ 测试连通性</button>
         <button type="submit" class="btn btn-amber">保存</button>
         <button type="button" class="btn btn-ghost" onclick="closeModal()">取消</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="overlay" id="prov-overlay">
+  <div class="modal">
+    <h3 id="prov-modal-title">添加供应商</h3>
+    <form id="pform" onsubmit="submitProvider(event)">
+      <div class="f2">
+        <div class="fg"><label>供应商 ID（唯一标识）</label><input name="id" id="prov-id" required placeholder="my-openai"></div>
+        <div class="fg"><label>供应商名称</label><input name="name" required placeholder="我的 OpenAI"></div>
+      </div>
+      <div class="fg"><label>协议</label><select name="protocol"><option value="openai">openai（兼容格式）</option><option value="anthropic">anthropic</option></select></div>
+      <div class="fg"><label>Base URL（该供应商下所有模型共享）</label><input name="base_url" required placeholder="https://api.openai.com/v1"></div>
+      <div class="fg"><label>API Key（该供应商下所有模型共享）</label><input name="api_key" required placeholder="sk-..."></div>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-amber">保存</button>
+        <button type="button" class="btn btn-ghost" onclick="closeProvModal()">取消</button>
       </div>
     </form>
   </div>
@@ -435,37 +479,90 @@ function switchTab(name, el) {
 
 function provBadge(p) { return p === 'anthropic' ? '<span class="badge b-anthropic">anthropic</span>' : '<span class="badge b-openai">openai</span>'; }
 
+let providerLookup = {};
+
 async function loadModels() {
-  const data = await api('/admin/models');
-  if (!data) return;
-  document.getElementById('cnt-models').textContent = data.models.length;
-  document.getElementById('model-list').innerHTML = data.models.map((m, i) => `
-    <div class="card" style="animation-delay:${i * 40}ms">
+  const [mdata, provdata] = await Promise.all([api('/admin/models'), api('/admin/providers')]);
+  if (!mdata || !provdata) return;
+  const models = mdata.models;
+  const providers = provdata.providers;
+  providerLookup = {};
+  providers.forEach(p => providerLookup[p.id] = p);
+  document.getElementById('cnt-models').textContent = models.length;
+
+  let html = '';
+  providers.forEach((p, i) => {
+    const pmodels = models.filter(m => m.provider_id === p.id);
+    html += providerCardHTML(p, pmodels, i);
+  });
+  const standalone = models.filter(m => !m.provider_id);
+  if (standalone.length) {
+    html += '<div class="section-title">独立模型（内联连接，未归属供应商）</div>';
+    html += standalone.map((m, i) => modelRowHTML(m, i)).join('');
+  }
+  if (!providers.length && !standalone.length) {
+    html = '<div class="hint">暂无模型。点击右上角「添加供应商」后在其下添加模型，或「添加独立模型」。</div>';
+  }
+  document.getElementById('model-list').innerHTML = html;
+}
+
+function providerCardHTML(p, pmodels, i) {
+  const masked = p.api_key ? (esc(p.api_key.slice(0, 6)) + '****') : '—';
+  return `
+    <div class="card provider-card" style="animation-delay:${i * 40}ms">
+      <div class="card-head">
+        <div>
+          <div class="card-title">🔌 ${esc(p.name)}<span class="provider-id-tag">${esc(p.id)}</span></div>
+          <div class="card-sub">${esc(p.base_url)} · key: ${masked}</div>
+        </div>
+        <div class="btn-row">
+          ${provBadge(p.protocol)}
+          <span class="badge b-openai">${pmodels.length} 个模型</span>
+          <button class="btn btn-ghost btn-sm" onclick="editProvider('${p.id}')">编辑</button>
+          <button class="btn btn-red btn-sm" onclick="delProvider('${p.id}')">删除</button>
+        </div>
+      </div>
+      <div class="provider-models">
+        ${pmodels.map((m, j) => modelRowHTML(m, j)).join('') || '<div class="hint">该供应商下暂无模型，点击下方按钮添加。</div>'}
+      </div>
+      <div class="add-model-row">
+        <button class="btn btn-ghost btn-sm" onclick="showAddUnder('${p.id}')">＋ 在此供应商下添加模型</button>
+      </div>
+    </div>`;
+}
+
+function modelRowHTML(m, i) {
+  const p = providerLookup[m.provider_id];
+  const conn = p ? esc(p.base_url) : esc(m.base_url || '');
+  const proto = p ? p.protocol : m.provider;
+  return `
+    <div class="model-row" style="animation-delay:${i * 30}ms">
       <div class="card-head">
         <div>
           <div class="card-title">${esc(m.id)}</div>
-          <div class="card-sub">${esc(m.name)} · ${esc(m.base_url)}</div>
+          <div class="card-sub">${esc(m.name)} · ${conn}</div>
         </div>
         <div class="btn-row">
-          ${provBadge(m.provider)}
+          ${provBadge(proto)}
           ${m.modality === 'vision' ? '<span class="badge b-vision">多模态</span>' : '<span class="badge b-text">纯文本</span>'}
           ${m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>'}
           ${m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>' : ''}
+          ${m.expire_date ? `<span class="badge b-once">到期 ${esc(m.expire_date)}</span>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="editModel('${m.id}')">编辑</button>
           <button class="btn btn-red btn-sm" onclick="delModel('${m.id}')">删除</button>
         </div>
       </div>
       <div class="grid">
-        <div>计费模式 <b>${m.billing_mode === 'request' ? '按请求次数' : '按 Token'}</b></div>
-        <div>模态 <b>${m.modality === 'vision' ? '多模态（含图片）' : '纯文本'}</b></div>
+        <div>计费 <b>${m.billing_mode === 'request' ? '按请求次数' : '按 Token'}</b></div>
         <div>上下文窗口 <b>${m.context_window || '不限'}</b></div>
         <div>每日上限 <b>${m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : '') : '不限'}</b></div>
         <div>RPM <b>${m.rpm_limit || '不限'}</b></div>
         <div>TPM <b>${m.tpm_limit || '不限'}</b></div>
         <div>并发 <b>${m.max_concurrency || 10}</b></div>
         <div>刷新 <b>${m.refresh_time || '—'}（北京时间）</b></div>
+        ${m.token_type === 'one_time' && m.expire_date ? `<div>过期日期 <b>${esc(m.expire_date)}</b></div>` : ''}
       </div>
-    </div>`).join('') || '<div class="hint">暂无模型，点击右上角添加。</div>';
+    </div>`;
 }
 
 let modelLookup = {};
@@ -474,10 +571,12 @@ let speedCache = JSON.parse(localStorage.getItem('gw_speed') || '{}');
 let dragSrc = null;
 
 async function loadPools() {
-  const [pdata, mdata] = await Promise.all([api('/admin/pools'), api('/admin/models')]);
+  const [pdata, mdata, provdata] = await Promise.all([api('/admin/pools'), api('/admin/models'), api('/admin/providers')]);
   if (!pdata || !mdata) return;
   modelLookup = {};
   mdata.models.forEach(m => modelLookup[m.id] = m);
+  providerLookup = {};
+  if (provdata) provdata.providers.forEach(p => providerLookup[p.id] = p);
   poolLookup = pdata.pools;
 
   document.getElementById('pool-list').innerHTML = Object.entries(pdata.pools).map(([name, pool]) => {
@@ -498,7 +597,7 @@ async function loadPools() {
             <span class="sw-label">自动择优</span>
           </label>
           <button class="btn btn-ghost btn-sm" onclick="speedPool('${name}')">⚡ 测速本池</button>
-          ${name === 'auto' ? '<span class="badge b-openai">内置</span>' : `<button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`}
+          ${name === 'auto' ? '<span class="badge b-openai">内置</span>' : `<button class="btn btn-ghost btn-sm" onclick="renamePool('${name}')">✏️ 重命名</button><button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`}
         </div>
       </div>
       ${pool.auto_order ? '<div class="auto-note">⚡ 自动择优已开启：先排除不可用接口（用量用尽 / RPM·TPM 触顶），再在可用接口中按调用延迟从低到高优先调用。下方显示顺序保持不变，关闭后按设定顺序调用。</div>' : ''}
@@ -546,10 +645,12 @@ function infoTip(id) {
   }
   const m = modelLookup[id];
   if (!m) return `<span class="info-wrap"><span class="info-dot">i</span><div class="info-tip"><div class="t-title">${id}</div><div class="t-row"><span>该接口未在模型库中注册</span></div></div></span>`;
+  const p = providerLookup[m.provider_id];
   const rows = [
-    ['协议', m.provider],
+    ['协议', p ? p.protocol : m.provider],
     ['模型名', m.name],
-    ['Base URL', m.base_url],
+    ['Base URL', p ? p.base_url : (m.base_url || '')],
+    ['所属供应商', p ? `${p.name}（${p.id}）` : '—（独立内联）'],
     ['收费标注', m.is_free ? '免费' : '付费'],
     ['计费模式', m.billing_mode === 'request' ? '按请求次数' : '按 Token'],
     ['模型模态', m.modality === 'vision' ? '多模态（支持图片）' : '纯文本'],
@@ -564,6 +665,7 @@ function infoTip(id) {
   if (m.token_type === 'one_time') {
     rows.push(['一次性·最大Token', m.max_tokens ? m.max_tokens.toLocaleString() : '不限']);
     rows.push(['一次性·存活', m.ttl_seconds ? m.ttl_seconds + ' 秒' : '不限']);
+    if (m.expire_date) rows.push(['过期日期', m.expire_date + '（到期次日失效）']);
   }
   return `<span class="info-wrap"><span class="info-dot">i</span><div class="info-tip"><div class="t-title">${id}</div>${rows.map(r => `<div class="t-row"><span>${r[0]}</span><b>${r[1]}</b></div>`).join('')}</div></span>`;
 }
@@ -623,7 +725,7 @@ function bindDrag() {
       const container = dragSrc.closest('.pool-items');
       const ids = [...container.querySelectorAll('.pool-item')].map(n => n.dataset.id);
       renumber(container);
-      const ok = await api('/admin/pools/' + poolName, { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
+      const ok = await api(poolPath(poolName), { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
       if (ok) { api('/admin/reload', { method: 'POST' }); toast('优先级已更新'); }
     });
   });
@@ -635,7 +737,9 @@ async function addToPool(name) {
   if (!id) { toast('请先选择接口', true); return; }
   const data = await api('/admin/pools');
   if (!data) return;
-  const ids = data.pools[name].model_ids || [];
+  const pool = data.pools[name];
+  if (!pool) { toast('池 "' + name + '" 不存在，请刷新页面重试', true); return; }
+  const ids = pool.model_ids || [];
   if (ids.includes(id)) { toast('该接口已在池中', true); return; }
   ids.push(id);
   const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
@@ -645,7 +749,9 @@ async function addToPool(name) {
 async function removeFromPool(name, id) {
   const data = await api('/admin/pools');
   if (!data) return;
-  const ids = (data.pools[name].model_ids || []).filter(x => x !== id);
+  const pool = data.pools[name];
+  if (!pool) { toast('池 "' + name + '" 不存在，请刷新页面重试', true); return; }
+  const ids = (pool.model_ids || []).filter(x => x !== id);
   const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
   if (ok) { await api('/admin/reload', { method: 'POST' }); toast('已移出池 ' + name); loadPools(); }
 }
@@ -687,10 +793,18 @@ async function delPool(name) {
   if (ok) { await api('/admin/reload', { method: 'POST' }); toast('已删除池 ' + name); loadPools(); }
 }
 
+async function renamePool(name) {
+  const newName = prompt('将池 "' + name + '" 重命名为：', name);
+  if (!newName || !newName.trim() || newName.trim() === name) return;
+  const ok = await api(poolPath(name) + '/rename', { method: 'POST', body: JSON.stringify({ new_name: newName.trim() }) });
+  if (ok) { toast('池已重命名为 ' + newName.trim()); loadPools(); }
+}
+
 async function toggleAutoOrder(name, enabled) {
   const data = await api('/admin/pools');
   if (!data) return;
   const p = data.pools[name];
+  if (!p) { toast('池 "' + name + '" 不存在，请刷新页面重试', true); return; }
   const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: p.model_ids, auto_order: enabled }) });
   if (ok) { await api('/admin/reload', { method: 'POST' }); toast(enabled ? '池 ' + name + ' 已开启自动择优' : '池 ' + name + ' 已关闭自动择优'); loadPools(); }
 }
@@ -828,8 +942,90 @@ function showAdd() {
   editingId = null;
   document.getElementById('modal-title').textContent = '添加模型';
   document.getElementById('mform').reset();
-  onBillingChange();
+  document.getElementById('f-model-id').disabled = false;
+  populateProviderSelect('').then(() => { onBillingChange(); onProviderSelect(); });
   document.getElementById('overlay').classList.add('show');
+}
+
+async function showAddUnder(pid) {
+  editingId = null;
+  document.getElementById('modal-title').textContent = '在供应商下添加模型';
+  document.getElementById('mform').reset();
+  document.getElementById('f-model-id').disabled = false;
+  await populateProviderSelect(pid);
+  onBillingChange(); onProviderSelect();
+  document.getElementById('overlay').classList.add('show');
+}
+
+async function populateProviderSelect(selected) {
+  const data = await api('/admin/providers');
+  const sel = document.getElementById('f-provider-id');
+  const opts = ['<option value="">— 独立模型（下方内联填写连接信息）—</option>'];
+  if (data) data.providers.forEach(p => opts.push(`<option value="${esc(p.id)}">${esc(p.name)}（${esc(p.id)}）</option>`));
+  sel.innerHTML = opts.join('');
+  sel.value = selected || '';
+}
+
+function onProviderSelect() {
+  const pid = document.getElementById('f-provider-id').value;
+  const inline = document.getElementById('inline-conn');
+  const note = document.getElementById('inherit-note');
+  if (pid) {
+    inline.style.display = 'none';
+    note.style.display = '';
+    document.getElementById('f-base-url').required = false;
+    document.getElementById('f-api-key').required = false;
+  } else {
+    inline.style.display = '';
+    note.style.display = 'none';
+    document.getElementById('f-base-url').required = true;
+    document.getElementById('f-api-key').required = true;
+  }
+}
+
+let editingProviderId = null;
+function showAddProvider() {
+  editingProviderId = null;
+  document.getElementById('prov-modal-title').textContent = '添加供应商';
+  document.getElementById('pform').reset();
+  document.getElementById('prov-id').disabled = false;
+  document.getElementById('prov-overlay').classList.add('show');
+}
+
+async function editProvider(id) {
+  const data = await api('/admin/providers');
+  if (!data) return;
+  const p = data.providers.find(x => x.id === id);
+  if (!p) return;
+  editingProviderId = id;
+  document.getElementById('prov-modal-title').textContent = '编辑供应商';
+  const f = document.getElementById('pform');
+  f.id.value = p.id; f.name.value = p.name; f.protocol.value = p.protocol;
+  f.base_url.value = p.base_url; f.api_key.value = p.api_key;
+  document.getElementById('prov-id').disabled = true;
+  document.getElementById('prov-overlay').classList.add('show');
+}
+
+function closeProvModal() { document.getElementById('prov-overlay').classList.remove('show'); }
+
+async function submitProvider(e) {
+  e.preventDefault();
+  const body = Object.fromEntries(new FormData(document.getElementById('pform')).entries());
+  let ok;
+  if (editingProviderId) ok = await api('/admin/providers/' + encodeURIComponent(editingProviderId).replace(/%2F/g, '/'), { method: 'PUT', body: JSON.stringify(body) });
+  else ok = await api('/admin/providers', { method: 'POST', body: JSON.stringify(body) });
+  if (!ok) return;
+  await api('/admin/reload', { method: 'POST' });
+  closeProvModal(); toast(editingProviderId ? '供应商已更新' : '供应商已添加');
+  loadModels();
+}
+
+async function delProvider(id) {
+  if (!confirm('确定删除供应商 "' + id + '" 吗？（其下不能仍有模型）')) return;
+  const ok = await api('/admin/providers/' + encodeURIComponent(id).replace(/%2F/g, '/'), { method: 'DELETE' });
+  if (!ok) return;
+  await api('/admin/reload', { method: 'POST' });
+  toast('供应商已删除'); loadModels();
 }
 
 async function editModel(id) {
@@ -840,15 +1036,20 @@ async function editModel(id) {
   editingId = id;
   document.getElementById('modal-title').textContent = '编辑模型';
   const f = document.getElementById('mform');
-  f.id.value = m.id; f.name.value = m.name; f.provider.value = m.provider;
-  f.base_url.value = m.base_url; f.api_key.value = m.api_key; f.token_type.value = m.token_type;
+  f.id.value = m.id; f.name.value = m.name; f.provider.value = m.provider || 'openai';
+  f.base_url.value = m.base_url || ''; f.api_key.value = m.api_key || ''; f.token_type.value = m.token_type;
   f.billing_mode.value = m.billing_mode || 'token'; f.is_free.value = m.is_free ? 'true' : 'false';
   f.modality.value = m.modality || 'text';
   f.daily_token_limit.value = m.daily_token_limit || 0; f.rpm_limit.value = m.rpm_limit || 0;
   f.tpm_limit.value = m.tpm_limit || 0; f.context_window.value = m.context_window || 0;
   f.max_concurrency.value = m.max_concurrency || 10; f.refresh_time.value = m.refresh_time || '';
   f.max_tokens.value = m.max_tokens || 0; f.ttl_seconds.value = m.ttl_seconds || 0;
+  f.expire_date.value = m.expire_date || '';
+  // ID is the primary key — immutable in edit mode. Delete + recreate to rename.
+  document.getElementById('f-model-id').disabled = true;
+  await populateProviderSelect(m.provider_id || '');
   onBillingChange();
+  onProviderSelect();
   document.getElementById('overlay').classList.add('show');
 }
 
@@ -875,6 +1076,49 @@ async function delModel(id) {
   if (!ok) return;
   await api('/admin/reload', { method: 'POST' });
   toast('模型已删除'); loadModels();
+}
+
+async function testConnectivity() {
+  const f = document.getElementById('mform');
+  const providerId = document.getElementById('f-provider-id').value;
+  let base_url, api_key, protocol;
+
+  if (providerId) {
+    const data = await api('/admin/providers');
+    const p = data && data.providers ? data.providers.find(x => x.id === providerId) : null;
+    if (!p) { toast('供应商不存在', true); return; }
+    base_url = p.base_url; api_key = p.api_key; protocol = p.protocol;
+  } else {
+    base_url = f.elements.base_url.value.trim();
+    api_key = f.elements.api_key.value.trim();
+    protocol = f.elements.provider.value;
+  }
+  const model_name = f.elements.name.value.trim();
+
+  if (!base_url) { toast('请填写 Base URL', true); return; }
+  if (!api_key) { toast('请填写 API Key', true); return; }
+  if (!model_name) { toast('请填写模型名称', true); return; }
+
+  const btn = document.getElementById('m-test-btn');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '测试中…';
+  try {
+    const result = await api('/admin/test_model', {
+      method: 'POST',
+      body: JSON.stringify({ base_url, api_key, protocol, model_name })
+    });
+    if (!result) return;
+    const r = result.result;
+    if (r.status === 'ok') {
+      toast(`✓ 连通 延迟 ${r.latency_ms}ms · ${r.tps}t/s · ${r.tokens}tokens`);
+    } else if (r.status === 'rate_limited') {
+      toast(`⚠ 连通但被限流 延迟 ${r.latency_ms}ms`, true);
+    } else {
+      toast(`✕ ${r.error || r.status} · ${r.latency_ms}ms`, true);
+    }
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
 }
 
 setInterval(() => { document.getElementById('clock').textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false }); }, 1000);

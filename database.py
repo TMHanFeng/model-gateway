@@ -1,13 +1,38 @@
 import aiosqlite
+import asyncio
 import time
 import json
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "gateway.db"
 
+# Persistent connection + lock: avoids the per-query connect/close overhead that
+# dominated request latency (every _check_available call used to open 1-4 new
+# connections). WAL + NORMAL synchronous keep writes fast and readers unblocked.
+_conn: aiosqlite.Connection | None = None
+_lock = asyncio.Lock()
+
+
+async def _get_conn() -> aiosqlite.Connection:
+    global _conn
+    if _conn is None:
+        _conn = await aiosqlite.connect(str(DB_PATH))
+        _conn.row_factory = aiosqlite.Row
+        await _conn.execute("PRAGMA journal_mode=WAL")
+        await _conn.execute("PRAGMA synchronous=NORMAL")
+    return _conn
+
+
+async def close_db():
+    global _conn
+    if _conn is not None:
+        await _conn.close()
+        _conn = None
+
 
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         await db.execute("""
             CREATE TABLE IF NOT EXISTS token_usage (
                 model_name TEXT PRIMARY KEY,
@@ -22,6 +47,10 @@ async def init_db():
                 timestamp REAL NOT NULL,
                 tokens INTEGER DEFAULT 0
             )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_request_log_model_ts
+            ON request_log (model_name, timestamp)
         """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS one_time_state (
@@ -46,7 +75,8 @@ async def init_db():
 
 
 async def get_daily_usage(model_name: str) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         cursor = await db.execute(
             "SELECT used_tokens FROM token_usage WHERE model_name = ?",
             (model_name,),
@@ -56,7 +86,8 @@ async def get_daily_usage(model_name: str) -> int:
 
 
 async def add_daily_usage(model_name: str, tokens: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         await db.execute(
             """INSERT INTO token_usage (model_name, used_tokens, last_reset_date)
                VALUES (?, ?, date('now'))
@@ -67,7 +98,8 @@ async def add_daily_usage(model_name: str, tokens: int):
 
 
 async def reset_daily_usage(model_name: str):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         await db.execute(
             "UPDATE token_usage SET used_tokens = 0, last_reset_date = date('now') WHERE model_name = ?",
             (model_name,),
@@ -76,7 +108,8 @@ async def reset_daily_usage(model_name: str):
 
 
 async def reset_all_daily():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         await db.execute(
             "UPDATE token_usage SET used_tokens = 0, last_reset_date = date('now')"
         )
@@ -85,7 +118,8 @@ async def reset_all_daily():
 
 async def log_request(model_name: str, tokens: int):
     now = time.time()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         await db.execute(
             "INSERT INTO request_log (model_name, timestamp, tokens) VALUES (?, ?, ?)",
             (model_name, now, tokens),
@@ -98,7 +132,8 @@ async def log_request(model_name: str, tokens: int):
 
 async def get_rpm(model_name: str) -> int:
     cutoff = time.time() - 60
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         cursor = await db.execute(
             "SELECT COUNT(*) FROM request_log WHERE model_name = ? AND timestamp > ?",
             (model_name, cutoff),
@@ -109,7 +144,8 @@ async def get_rpm(model_name: str) -> int:
 
 async def get_tpm(model_name: str) -> int:
     cutoff = time.time() - 60
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         cursor = await db.execute(
             "SELECT COALESCE(SUM(tokens), 0) FROM request_log WHERE model_name = ? AND timestamp > ?",
             (model_name, cutoff),
@@ -119,7 +155,8 @@ async def get_tpm(model_name: str) -> int:
 
 
 async def init_one_time(model_name: str):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         await db.execute(
             """INSERT OR IGNORE INTO one_time_state (model_name, used_tokens, created_at, expired)
                VALUES (?, 0, ?, 0)""",
@@ -129,7 +166,8 @@ async def init_one_time(model_name: str):
 
 
 async def get_one_time_state(model_name: str) -> dict | None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         cursor = await db.execute(
             "SELECT used_tokens, created_at, expired FROM one_time_state WHERE model_name = ?",
             (model_name,),
@@ -141,7 +179,8 @@ async def get_one_time_state(model_name: str) -> dict | None:
 
 
 async def add_one_time_usage(model_name: str, tokens: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         await db.execute(
             "UPDATE one_time_state SET used_tokens = used_tokens + ? WHERE model_name = ?",
             (tokens, model_name),
@@ -150,7 +189,8 @@ async def add_one_time_usage(model_name: str, tokens: int):
 
 
 async def expire_one_time(model_name: str):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         await db.execute(
             "UPDATE one_time_state SET expired = 1 WHERE model_name = ?",
             (model_name,),
@@ -159,7 +199,8 @@ async def expire_one_time(model_name: str):
 
 
 async def log_decision(pool_name: str, requested: str | None, selected: str | None, estimated: int, steps: list):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _lock:
+        db = await _get_conn()
         await db.execute(
             "INSERT INTO decision_log (ts, pool_name, requested, selected, estimated_tokens, steps) VALUES (?,?,?,?,?,?)",
             (time.time(), pool_name, requested or "", selected or "", estimated, json.dumps(steps, ensure_ascii=False)),
@@ -171,8 +212,8 @@ async def log_decision(pool_name: str, requested: str | None, selected: str | No
 
 
 async def get_decisions(pool_name: str | None = None, limit: int = 100) -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _lock:
+        db = await _get_conn()
         if pool_name:
             cursor = await db.execute(
                 "SELECT * FROM decision_log WHERE pool_name = ? ORDER BY id DESC LIMIT ?",
