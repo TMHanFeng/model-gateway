@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+gateway.db
+*.log
+
+# Local user secrets & runtime configs (managed outside VCS)
+config.json
+config.yaml
+.env
+*.local
+
+# IDE / tool local state
+.omo/
+.vscode/
+.idea/

@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>模型网关 · 管理面板</title>
+<style>
+:root {
+  --bg: #0d1420;
+  --panel: #161f2e;
+  --panel-2: #1b2637;
+  --line: #243044;
+  --line-hi: #33445e;
+  --text: #e8edf5;
+  --muted: #8b98ac;
+  --amber: #f5a524;
+  --amber-dim: rgba(245,165,36,.12);
+  --teal: #2dd4bf;
+  --teal-dim: rgba(45,212,191,.12);
+  --red: #f87171;
+  --red-dim: rgba(248,113,113,.12);
+  --violet: #a78bfa;
+  --violet-dim: rgba(167,139,250,.12);
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, "Courier New", monospace;
+  --sans: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  background-image:
+    radial-gradient(900px 500px at 8% -10%, rgba(45,212,191,.06), transparent 60%),
+    radial-gradient(800px 500px at 100% 110%, rgba(245,165,36,.05), transparent 60%),
+    radial-gradient(rgba(255,255,255,.028) 1px, transparent 1px);
+  background-size: auto, auto, 26px 26px;
+  background-attachment: fixed;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 28px 24px 60px; }
+
+/* ── 顶栏 ── */
+.top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 26px; }
+.brand { display: flex; align-items: baseline; gap: 12px; }
+.brand .mark {
+  font-family: var(--mono); font-weight: 700; font-size: 13px;
+  color: var(--amber); border: 1px solid rgba(245,165,36,.4);
+  padding: 3px 8px; border-radius: 5px; background: var(--amber-dim);
+  letter-spacing: 1px;
+}
+.brand h1 { font-size: 22px; font-weight: 700; letter-spacing: .5px; }
+.brand h1 small { font-size: 13px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+.status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); font-family: var(--mono); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); position: relative; }
+.dot::after { content:''; position:absolute; inset:-4px; border-radius:50%; border:1px solid var(--teal); opacity:.5; animation: ping 1.8s ease-out infinite; }
+@keyframes ping { 0%{transform:scale(.5);opacity:.7} 80%,100%{transform:scale(1.5);opacity:0} }
+
+/* ── 标签页 ── */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 22px; }
+.tab {
+  padding: 10px 18px; font-size: 14px; color: var(--muted); cursor: pointer;
+  border-bottom: 2px solid transparent; transition: color .18s, border-color .18s;
+  user-select: none;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--amber); border-bottom-color: var(--amber); font-weight: 600; }
+.tab .count { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: 5px; }
+
+/* ── 卡片 ── */
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--line-hi);
+  border-radius: 8px; padding: 16px 18px; margin-bottom: 12px;
+  transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+  animation: rise .3s ease both;
+}
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.card:hover { transform: translateY(-2px); border-left-color: var(--amber); box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+.card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 10px; flex-wrap: wrap; }
+.card-title { font-family: var(--mono); font-weight: 600; font-size: 15px; color: var(--text); }
+.card-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+.badge { padding: 2px 9px; border-radius: 4px; font-size: 11px; font-family: var(--mono); letter-spacing: .3px; }
+.b-openai { background: var(--teal-dim); color: var(--teal); border: 1px solid rgba(45,212,191,.3); }
+.b-anthropic { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(245,165,36,.3); }
+.b-once { background: var(--violet-dim); color: var(--violet); border: 1px solid rgba(167,139,250,.3); }
+.b-free { background: var(--teal-dim); color: var(--teal); border: 1px solid rgba(45,212,191,.3); }
+.b-paid { background: var(--red-dim); color: var(--red); border: 1px solid rgba(248,113,113,.3); }
+.b-vision { background: rgba(56,189,248,.12); color: #38bdf8; border: 1px solid rgba(56,189,248,.3); }
+.b-text { background: rgba(255,255,255,.05); color: var(--muted); border: 1px solid var(--line-hi); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px 18px; font-size: 12.5px; color: var(--muted); }
+.grid b { color: var(--text); font-weight: 500; font-family: var(--mono); }
+
+/* ── 按钮 ── */
+.btn {
+  padding: 7px 14px; border-radius: 6px; border: 1px solid transparent; cursor: pointer;
+  font-size: 13px; font-family: var(--sans); transition: all .16s ease; line-height: 1;
+}
+.btn:active { transform: scale(.96); }
+.btn-amber { background: var(--amber); color: #1a1206; font-weight: 600; }
+.btn-amber:hover { background: #ffb63d; box-shadow: 0 0 0 3px var(--amber-dim); }
+.btn-ghost { background: transparent; color: var(--muted); border-color: var(--line-hi); }
+.btn-ghost:hover { color: var(--text); border-color: var(--muted); }
+.btn-red { background: transparent; color: var(--red); border-color: rgba(248,113,113,.35); }
+.btn-red:hover { background: var(--red-dim); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-row { display: flex; gap: 8px; align-items: center; }
+
+/* ── 池 ── */
+.pool-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; margin-bottom: 7px; transition: border-color .15s, background .15s;
+}
+.pool-item:hover { border-color: var(--line-hi); background: #202d42; }
+.pool-item .rank { font-family: var(--mono); color: var(--amber); font-weight: 700; width: 26px; font-size: 13px; }
+.pool-item .mid { font-family: var(--mono); font-size: 13.5px; flex: 1; }
+.arrows { display: flex; gap: 5px; }
+.arrows button {
+  width: 26px; height: 26px; border-radius: 5px; border: 1px solid var(--line-hi);
+  background: var(--panel); color: var(--muted); cursor: pointer; font-size: 13px;
+  transition: all .14s;
+}
+.arrows button:hover { color: var(--amber); border-color: var(--amber); background: var(--amber-dim); }
+
+/* ── 拖拽 ── */
+.pool-item.dragging { opacity: .35; border-style: dashed; }
+.pool-item.drag-over { border-color: var(--amber); box-shadow: 0 -2px 0 var(--amber); }
+.drag-handle { cursor: grab; color: var(--muted); font-size: 15px; margin-right: 10px; user-select: none; letter-spacing: -1px; }
+.drag-handle:active { cursor: grabbing; }
+
+/* ── ⓘ 悬浮信息 ── */
+.info-wrap { position: relative; display: inline-flex; }
+.info-dot {
+  width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line-hi);
+  color: var(--muted); font-size: 11px; font-family: var(--mono); font-style: italic;
+  display: inline-flex; align-items: center; justify-content: center; cursor: help;
+  transition: all .15s;
+}
+.info-wrap:hover .info-dot { color: var(--amber); border-color: var(--amber); background: var(--amber-dim); }
+.info-tip {
+  position: absolute; left: 26px; top: 50%; transform: translateY(-50%) translateX(-6px);
+  width: 250px; background: var(--panel-2); border: 1px solid var(--line-hi); border-radius: 8px;
+  padding: 12px 14px; z-index: 50; opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease; box-shadow: 0 12px 32px rgba(0,0,0,.5);
+}
+.info-wrap:hover .info-tip { opacity: 1; visibility: visible; transform: translateY(-50%) translateX(0); }
+.info-tip .t-title { font-family: var(--mono); font-size: 12.5px; color: var(--amber); margin-bottom: 8px; word-break: break-all; }
+.info-tip .t-row { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); padding: 2.5px 0; }
+.info-tip .t-row b { color: var(--text); font-family: var(--mono); font-weight: 500; }
+
+/* ── 测速标注 ── */
+.lat-tag { font-family: var(--mono); font-size: 11px; padding: 2px 7px; border-radius: 4px; margin-left: 8px; }
+.lat-fast { background: var(--teal-dim); color: var(--teal); }
+.lat-mid { background: var(--amber-dim); color: var(--amber); }
+.lat-slow { background: var(--red-dim); color: var(--red); }
+
+.remove-x { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 4px; transition: all .14s; }
+.remove-x:hover { color: var(--red); background: var(--red-dim); }
+.add-model-row { display: flex; gap: 8px; margin-top: 10px; }
+.add-model-row select { flex: 1; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--line-hi); background: var(--bg); color: var(--text); font-size: 12.5px; font-family: var(--mono); }
+
+/* ── 自动模式开关 ── */
+.switch { position: relative; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+.switch input { display: none; }
+.switch .track { width: 38px; height: 20px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line-hi); position: relative; transition: background .2s, border-color .2s; }
+.switch .track::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: transform .2s cubic-bezier(.22,1,.36,1), background .2s; }
+.switch input:checked + .track { background: var(--teal-dim); border-color: var(--teal); }
+.switch input:checked + .track::after { transform: translateX(18px); background: var(--teal); }
+.switch .sw-label { font-size: 12px; color: var(--muted); }
+.switch input:checked ~ .sw-label { color: var(--teal); }
+.auto-note { font-size: 11px; color: var(--teal); background: var(--teal-dim); border: 1px solid rgba(45,212,191,.25); padding: 5px 10px; border-radius: 5px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+.callable-tag { font-family: var(--mono); font-size: 10.5px; color: var(--muted); border: 1px dashed var(--line-hi); padding: 1px 7px; border-radius: 4px; margin-left: 8px; }
+
+/* ── 调用记录 ── */
+.log-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; animation: rise .25s ease both; }
+.log-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.log-time { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.log-pool { font-family: var(--mono); font-size: 12px; color: var(--amber); background: var(--amber-dim); padding: 1px 8px; border-radius: 4px; }
+.log-selected { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+.log-selected.ok { color: var(--teal); }
+.log-selected.fail { color: var(--red); }
+.log-steps { display: flex; flex-direction: column; gap: 4px; }
+.log-step { display: flex; align-items: center; gap: 8px; font-size: 12px; font-family: var(--mono); }
+.log-step .s-model { color: var(--text); min-width: 200px; }
+.log-step .s-arrow { color: var(--muted); }
+.rsn { padding: 1px 8px; border-radius: 4px; font-size: 11px; }
+.rsn-selected { background: var(--teal-dim); color: var(--teal); }
+.rsn-skip { background: var(--red-dim); color: var(--red); }
+.rsn-warn { background: var(--amber-dim); color: var(--amber); }
+.rsn-neutral { background: rgba(255,255,255,.05); color: var(--muted); }
+
+/* ── 统计 ── */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.stat-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 18px 20px; position: relative; overflow: hidden;
+  transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+  animation: rise .3s ease both;
+}
+.stat-card::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--teal); opacity: .8; }
+.stat-card.warn::before { background: var(--amber); }
+.stat-card.full::before { background: var(--red); }
+.stat-card:hover { transform: translateY(-3px); border-color: var(--line-hi); box-shadow: 0 10px 28px rgba(0,0,0,.38); }
+.stat-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 4px; }
+.stat-id { font-family: var(--mono); font-weight: 600; font-size: 14.5px; color: var(--text); word-break: break-all; }
+.stat-name { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.stat-badges { display: flex; gap: 5px; flex-shrink: 0; }
+.stat-nums { display: flex; align-items: baseline; gap: 7px; margin: 14px 0 9px; }
+.stat-used { font-family: var(--mono); font-size: 26px; font-weight: 700; color: var(--text); letter-spacing: -.5px; }
+.stat-sep { color: var(--muted); font-size: 14px; }
+.stat-limit { font-family: var(--mono); font-size: 14px; color: var(--muted); }
+.stat-unit { font-size: 11px; color: var(--muted); }
+.stat-bar { height: 9px; background: var(--panel-2); border-radius: 5px; overflow: hidden; position: relative; }
+.stat-fill { height: 100%; width: 0; border-radius: 5px; background: linear-gradient(90deg, var(--teal), #5eead4); transition: width .8s cubic-bezier(.22,1,.36,1); position: relative; }
+.stat-fill::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent); transform: translateX(-100%); animation: sheen 2.6s ease-in-out infinite; }
+@keyframes sheen { 0%{transform:translateX(-100%)} 60%,100%{transform:translateX(100%)} }
+.stat-card.warn .stat-fill { background: linear-gradient(90deg, var(--amber), #fcd34d); }
+.stat-card.full .stat-fill { background: linear-gradient(90deg, var(--red), #fca5a5); }
+.stat-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 9px; }
+.stat-pct { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--teal); }
+.stat-card.warn .stat-pct { color: var(--amber); }
+.stat-card.full .stat-pct { color: var(--red); }
+.stat-refresh { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+
+@media (max-width: 640px) {
+  .f2 { grid-template-columns: 1fr; }
+  .modal { width: calc(100vw - 32px); }
+  .stats-grid { grid-template-columns: 1fr; }
+}
+.num-big { font-family: var(--mono); font-weight: 600; font-size: 14px; }
+
+/* ── 测速 ── */
+.speed-card .lat { font-family: var(--mono); font-size: 22px; font-weight: 700; }
+.speed-ok-c { color: var(--teal); }
+.speed-err-c { color: var(--red); }
+.chip { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-family: var(--mono); }
+.chip-ok { background: var(--teal-dim); color: var(--teal); }
+.chip-err { background: var(--red-dim); color: var(--red); }
+.chip-wait { background: var(--amber-dim); color: var(--amber); }
+
+/* ── 弹窗 ── */
+.overlay { display: none; position: fixed; inset: 0; background: rgba(5,9,16,.7); z-index: 100; justify-content: center; align-items: flex-start; padding-top: 6vh; }
+.overlay.show { display: flex; animation: fade .18s ease; }
+@keyframes fade { from { opacity: 0; } }
+.modal {
+  background: var(--panel); border: 1px solid var(--line-hi); border-radius: 10px;
+  padding: 26px; width: 520px; max-height: 84vh; overflow-y: auto;
+  animation: pop .22s cubic-bezier(.22,1,.36,1);
+}
+@keyframes pop { from { opacity: 0; transform: translateY(14px) scale(.98); } }
+.modal h3 { font-size: 17px; margin-bottom: 18px; display: flex; align-items: center; gap: 10px; }
+.modal h3::before { content:''; width: 4px; height: 18px; background: var(--amber); border-radius: 2px; }
+.f2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+.fg { margin-bottom: 13px; }
+.fg label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+.fg input, .fg select {
+  width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line-hi);
+  background: var(--bg); color: var(--text); font-size: 13px; font-family: var(--mono);
+  transition: border-color .15s, box-shadow .15s;
+}
+.fg input:focus, .fg select:focus { outline: none; border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-dim); }
+.modal-actions { display: flex; gap: 10px; margin-top: 20px; }
+
+/* ── Toast ── */
+#toast {
+  position: fixed; right: 22px; bottom: 22px; z-index: 200; display: flex; flex-direction: column; gap: 8px;
+}
+.toast-item {
+  background: var(--panel-2); border: 1px solid var(--line-hi); border-left: 3px solid var(--teal);
+  color: var(--text); padding: 11px 16px; border-radius: 7px; font-size: 13px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.4); animation: slidein .25s cubic-bezier(.22,1,.36,1);
+}
+.toast-item.err { border-left-color: var(--red); }
+@keyframes slidein { from { opacity: 0; transform: translateX(30px); } }
+
+.hint { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">
+      <span class="mark">GW</span>
+      <h1>模型网关<small>管理面板</small></h1>
+    </div>
+    <div class="status"><span class="dot"></span>运行中 · <span id="clock">--:--:--</span></div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="models">模型管理<span class="count" id="cnt-models"></span></div>
+    <div class="tab" data-tab="pools">模型池</div>
+    <div class="tab" data-tab="stats">用量统计</div>
+    <div class="tab" data-tab="speed">接口测速</div>
+    <div class="tab" data-tab="logs">调用记录</div>
+  </div>
+
+  <div id="tab-models">
+    <div class="toolbar">
+      <div class="hint">在此添加、编辑上游模型接口，同名模型会自动归入一个大池子供调用。</div>
+      <button class="btn btn-amber" onclick="showAdd()">＋ 添加模型</button>
+    </div>
+    <div id="model-list"></div>
+  </div>
+
+  <div id="tab-pools" class="hidden">
+    <div class="toolbar">
+      <div class="hint">拖拽 ⠿ 调整池内优先级（越靠前越先调用）；悬停 ⓘ 查看该接口的限额与刷新详情；测速结果会标注在接口后方。</div>
+      <button class="btn btn-amber" onclick="showAddPool()">＋ 新增模型池</button>
+    </div>
+    <div id="pool-list"></div>
+  </div>
+
+  <div id="tab-stats" class="hidden">
+    <div class="toolbar">
+      <div class="hint">各模型配额使用情况，每 5 秒自动刷新。</div>
+      <button class="btn btn-ghost btn-sm" onclick="loadStats()">手动刷新</button>
+    </div>
+    <div id="stats-grid" class="stats-grid"></div>
+  </div>
+
+  <div id="tab-speed" class="hidden">
+    <div class="toolbar">
+      <div class="hint">向每个模型发送一条极短请求，测量首字延迟与吞吐。并发执行，不会明显消耗配额。</div>
+      <button class="btn btn-amber" onclick="runSpeed()">开始测速</button>
+    </div>
+    <div id="speed-results"></div>
+  </div>
+
+  <div id="tab-logs" class="hidden">
+    <div class="toolbar">
+      <div class="hint">每次调用的选模过程与切换依据。绿色为最终选中，红色为被排除的原因（配额用尽 / RPM·TPM 触顶 / 冷却 / 超上下文等）。</div>
+      <div class="btn-row">
+        <select id="log-pool-filter" onchange="loadDecisions()" style="padding:6px 10px;border-radius:6px;border:1px solid var(--line-hi);background:var(--bg);color:var(--text);font-size:12.5px;font-family:var(--mono)">
+          <option value="">全部池</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="loadDecisions()">刷新</button>
+      </div>
+    </div>
+    <div id="log-list"></div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h3 id="modal-title">添加模型</h3>
+    <form id="mform" onsubmit="submitModel(event)">
+      <div class="f2">
+        <div class="fg"><label>模型 ID（唯一标识）</label><input name="id" required placeholder="openai/gpt-4o"></div>
+        <div class="fg"><label>模型名称</label><input name="name" required placeholder="gpt-4o"></div>
+      </div>
+      <div class="f2">
+        <div class="fg"><label>提供商协议</label><select name="provider"><option value="openai">openai（兼容格式）</option><option value="anthropic">anthropic</option></select></div>
+        <div class="fg"><label>令牌类型</label><select name="token_type"><option value="daily">daily（每日刷新）</option><option value="one_time">one_time（一次性）</option></select></div>
+      </div>
+      <div class="f2">
+        <div class="fg"><label>计费模式</label><select name="billing_mode" onchange="onBillingChange()"><option value="token">按 Token 计费</option><option value="request">按请求次数计费</option></select></div>
+        <div class="fg"><label>收费标注</label><select name="is_free"><option value="false">付费模型（红）</option><option value="true">免费模型（绿）</option></select></div>
+      </div>
+      <div class="fg"><label>模型模态</label><select name="modality"><option value="text">纯文本（不支持图片）</option><option value="vision">多模态（支持图片）</option></select></div>
+      <div class="fg"><label>Base URL</label><input name="base_url" required placeholder="https://api.openai.com/v1"></div>
+      <div class="fg"><label>API Key</label><input name="api_key" required placeholder="sk-..."></div>
+      <div class="f2">
+        <div class="fg"><label id="limit-label">每日 Token 上限（0=不限）</label><input name="daily_token_limit" type="number" value="0"></div>
+        <div class="fg"><label>上下文窗口（0=不校验）</label><input name="context_window" type="number" value="0"></div>
+      </div>
+      <div class="f2">
+        <div class="fg"><label>RPM 限制（0=不限）</label><input name="rpm_limit" type="number" value="0"></div>
+        <div class="fg"><label>TPM 限制（0=不限）</label><input name="tpm_limit" type="number" value="0"></div>
+      </div>
+      <div class="f2">
+        <div class="fg"><label>最大并发数</label><input name="max_concurrency" type="number" value="10"></div>
+        <div class="fg"><label>刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
+      </div>
+      <div class="f2">
+        <div class="fg"><label>时区</label><input value="Asia/Shanghai（北京时间，固定）" disabled></div>
+        <div class="fg"><label>一次性·最大 Token</label><input name="max_tokens" type="number" value="0"></div>
+      </div>
+      <div class="fg"><label>一次性·存活时长（秒）</label><input name="ttl_seconds" type="number" value="0"></div>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-amber">保存</button>
+        <button type="button" class="btn btn-ghost" onclick="closeModal()">取消</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let editingId = null;
+let statsTimer = null;
+
+function getKey() {
+  let k = localStorage.getItem('gw_key');
+  if (!k) { k = prompt('请输入管理密码：') || ''; localStorage.setItem('gw_key', k); }
+  return k;
+}
+function headers() { return { 'Authorization': 'Bearer ' + getKey(), 'Content-Type': 'application/json' }; }
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function poolPath(name) { return '/admin/pools/' + encodeURIComponent(name); }
+
+async function api(path, opts = {}) {
+  opts.headers = headers();
+  const r = await fetch(path, opts);
+  if (r.status === 401) { localStorage.removeItem('gw_key'); toast('密码错误，请重新输入', true); return null; }
+  if (!r.ok) { let d = {}; try { d = await r.json(); } catch(e){} toast(d.detail || ('请求失败 ' + r.status), true); return null; }
+  return r.json();
+}
+
+function toast(msg, isErr) {
+  const el = document.createElement('div');
+  el.className = 'toast-item' + (isErr ? ' err' : '');
+  el.textContent = msg;
+  document.getElementById('toast').appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 300); }, 2600);
+}
+
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab, t)));
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  el.classList.add('active');
+  ['models','pools','stats','speed','logs'].forEach(t => document.getElementById('tab-' + t).classList.toggle('hidden', t !== name));
+  clearInterval(statsTimer);
+  if (name === 'models') loadModels();
+  if (name === 'pools') loadPools();
+  if (name === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 5000); }
+  if (name === 'logs') { populateLogFilter(); loadDecisions(); }
+}
+
+function provBadge(p) { return p === 'anthropic' ? '<span class="badge b-anthropic">anthropic</span>' : '<span class="badge b-openai">openai</span>'; }
+
+async function loadModels() {
+  const data = await api('/admin/models');
+  if (!data) return;
+  document.getElementById('cnt-models').textContent = data.models.length;
+  document.getElementById('model-list').innerHTML = data.models.map((m, i) => `
+    <div class="card" style="animation-delay:${i * 40}ms">
+      <div class="card-head">
+        <div>
+          <div class="card-title">${esc(m.id)}</div>
+          <div class="card-sub">${esc(m.name)} · ${esc(m.base_url)}</div>
+        </div>
+        <div class="btn-row">
+          ${provBadge(m.provider)}
+          ${m.modality === 'vision' ? '<span class="badge b-vision">多模态</span>' : '<span class="badge b-text">纯文本</span>'}
+          ${m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>'}
+          ${m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>' : ''}
+          <button class="btn btn-ghost btn-sm" onclick="editModel('${m.id}')">编辑</button>
+          <button class="btn btn-red btn-sm" onclick="delModel('${m.id}')">删除</button>
+        </div>
+      </div>
+      <div class="grid">
+        <div>计费模式 <b>${m.billing_mode === 'request' ? '按请求次数' : '按 Token'}</b></div>
+        <div>模态 <b>${m.modality === 'vision' ? '多模态（含图片）' : '纯文本'}</b></div>
+        <div>上下文窗口 <b>${m.context_window || '不限'}</b></div>
+        <div>每日上限 <b>${m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : '') : '不限'}</b></div>
+        <div>RPM <b>${m.rpm_limit || '不限'}</b></div>
+        <div>TPM <b>${m.tpm_limit || '不限'}</b></div>
+        <div>并发 <b>${m.max_concurrency || 10}</b></div>
+        <div>刷新 <b>${m.refresh_time || '—'}（北京时间）</b></div>
+      </div>
+    </div>`).join('') || '<div class="hint">暂无模型，点击右上角添加。</div>';
+}
+
+let modelLookup = {};
+let poolLookup = {};
+let speedCache = JSON.parse(localStorage.getItem('gw_speed') || '{}');
+let dragSrc = null;
+
+async function loadPools() {
+  const [pdata, mdata] = await Promise.all([api('/admin/pools'), api('/admin/models')]);
+  if (!pdata || !mdata) return;
+  modelLookup = {};
+  mdata.models.forEach(m => modelLookup[m.id] = m);
+  poolLookup = pdata.pools;
+
+  document.getElementById('pool-list').innerHTML = Object.entries(pdata.pools).map(([name, pool]) => {
+    const ids = pool.model_ids || [];
+    const availModels = mdata.models.filter(m => !ids.includes(m.id));
+    const availPools = Object.keys(pdata.pools).filter(p => p !== name && !ids.includes('pool:' + p));
+    return `
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">池：${name}<span class="callable-tag">model="${name}" 可调用</span></div>
+          <div class="card-sub">${pool.strategy === 'sequential' ? '策略：按序调用' : (pool.strategy || '')} · 共 ${ids.length} 项${pool.auto_order ? ' · 自动择优' : ''}</div>
+        </div>
+        <div class="btn-row">
+          <label class="switch" title="开启后：先排除不可用接口（用量用尽 / RPM·TPM 触顶），再在可用接口中按调用延迟从低到高优先调用（不改变下方显示顺序）">
+            <input type="checkbox" ${pool.auto_order ? 'checked' : ''} onchange="toggleAutoOrder('${name}', this.checked)">
+            <span class="track"></span>
+            <span class="sw-label">自动择优</span>
+          </label>
+          <button class="btn btn-ghost btn-sm" onclick="speedPool('${name}')">⚡ 测速本池</button>
+          ${name === 'auto' ? '<span class="badge b-openai">内置</span>' : `<button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`}
+        </div>
+      </div>
+      ${pool.auto_order ? '<div class="auto-note">⚡ 自动择优已开启：先排除不可用接口（用量用尽 / RPM·TPM 触顶），再在可用接口中按调用延迟从低到高优先调用。下方显示顺序保持不变，关闭后按设定顺序调用。</div>' : ''}
+      <div class="pool-items" data-pool="${name}">
+        ${ids.map((id, i) => poolItemHTML(name, id, i)).join('') || '<div class="hint">该池为空，从下方添加接口或子池。</div>'}
+      </div>
+      <div class="add-model-row">
+        <select id="addsel-${name}">
+          <option value="">— 选择要加入的接口 / 子池 —</option>
+          <optgroup label="模型接口">
+            ${availModels.map(m => `<option value="${m.id}">${m.id}（${m.name}）</option>`).join('')}
+          </optgroup>
+          <optgroup label="子模型池">
+            ${availPools.map(p => `<option value="pool:${p}">［池］${p}</option>`).join('')}
+          </optgroup>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="addToPool('${name}')">＋ 加入</button>
+      </div>
+    </div>`;
+  }).join('') || '<div class="hint">暂无模型池，点击右上角新增。</div>';
+
+  bindDrag();
+}
+
+function latTag(id) {
+  const s = speedCache[id];
+  if (!s) return '';
+  if (s.status !== 'ok') return `<span class="lat-tag lat-slow">${s.status === 'rate_limited' ? '限流' : '失败'}</span>`;
+  const cls = s.latency_ms < 800 ? 'lat-fast' : s.latency_ms < 2500 ? 'lat-mid' : 'lat-slow';
+  return `<span class="lat-tag ${cls}">${s.latency_ms}ms · ${s.tps}t/s</span>`;
+}
+
+function infoTip(id) {
+  if (id.startsWith('pool:')) {
+    const pname = id.slice(5);
+    const p = poolLookup[pname];
+    const members = p ? (p.model_ids || []) : [];
+    const rows = [
+      ['类型', '嵌套子池'],
+      ['择优模式', p && p.auto_order ? '自动（按延迟）' : '按设定顺序'],
+      ['包含项数', String(members.length)],
+      ...members.map((mid, idx) => [`${idx + 1}`, mid]),
+    ];
+    return `<span class="info-wrap"><span class="info-dot">i</span><div class="info-tip"><div class="t-title">池：${pname}</div>${rows.map(r => `<div class="t-row"><span>${r[0]}</span><b>${r[1]}</b></div>`).join('')}</div></span>`;
+  }
+  const m = modelLookup[id];
+  if (!m) return `<span class="info-wrap"><span class="info-dot">i</span><div class="info-tip"><div class="t-title">${id}</div><div class="t-row"><span>该接口未在模型库中注册</span></div></div></span>`;
+  const rows = [
+    ['协议', m.provider],
+    ['模型名', m.name],
+    ['Base URL', m.base_url],
+    ['收费标注', m.is_free ? '免费' : '付费'],
+    ['计费模式', m.billing_mode === 'request' ? '按请求次数' : '按 Token'],
+    ['模型模态', m.modality === 'vision' ? '多模态（支持图片）' : '纯文本'],
+    ['令牌类型', m.token_type === 'one_time' ? '一次性' : '每日刷新'],
+    ['每日上限', m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : '') : '不限'],
+    ['上下文窗口', m.context_window ? m.context_window.toLocaleString() : '不限'],
+    ['RPM', m.rpm_limit || '不限'],
+    ['TPM', m.tpm_limit || '不限'],
+    ['最大并发', m.max_concurrency || 10],
+    ['刷新时间', m.refresh_time ? `${m.refresh_time}（北京时间）` : '—'],
+  ];
+  if (m.token_type === 'one_time') {
+    rows.push(['一次性·最大Token', m.max_tokens ? m.max_tokens.toLocaleString() : '不限']);
+    rows.push(['一次性·存活', m.ttl_seconds ? m.ttl_seconds + ' 秒' : '不限']);
+  }
+  return `<span class="info-wrap"><span class="info-dot">i</span><div class="info-tip"><div class="t-title">${id}</div>${rows.map(r => `<div class="t-row"><span>${r[0]}</span><b>${r[1]}</b></div>`).join('')}</div></span>`;
+}
+
+function poolItemHTML(name, id, i) {
+  const isPool = id.startsWith('pool:');
+  const label = isPool
+    ? `<span class="badge b-vision">子池</span> <span style="color:#38bdf8">${esc(id.slice(5))}</span>`
+    : `${esc(id)}${latTag(id)}`;
+  return `
+    <div class="pool-item" draggable="true" data-pool="${name}" data-idx="${i}" data-id="${id}">
+      <span class="drag-handle" title="拖拽排序">⠿</span>
+      <span class="rank">${String(i + 1).padStart(2, '0')}</span>
+      <span class="mid">${label}</span>
+      ${infoTip(id)}
+      <span style="flex:1"></span>
+      <button class="remove-x" onclick="removeFromPool('${name}','${id}')" title="移出该池">✕</button>
+    </div>`;
+}
+
+function renumber(container) {
+  container.querySelectorAll('.pool-item').forEach((n, i) => {
+    n.dataset.idx = i;
+    const r = n.querySelector('.rank');
+    if (r) r.textContent = String(i + 1).padStart(2, '0');
+  });
+}
+
+function bindDrag() {
+  document.querySelectorAll('.pool-item[draggable]').forEach(el => {
+    el.addEventListener('dragstart', e => {
+      dragSrc = el;
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      document.querySelectorAll('.pool-item').forEach(x => x.classList.remove('drag-over'));
+    });
+    el.addEventListener('dragover', e => {
+      e.preventDefault();
+      if (!dragSrc || el.dataset.pool !== dragSrc.dataset.pool) return;
+      const container = el.closest('.pool-items');
+      const siblings = [...container.querySelectorAll('.pool-item:not(.dragging)')];
+      const next = siblings.find(child => {
+        const box = child.getBoundingClientRect();
+        return e.clientY < box.top + box.height / 2;
+      });
+      if (next) container.insertBefore(dragSrc, next);
+      else container.appendChild(dragSrc);
+      renumber(container);
+    });
+    el.addEventListener('drop', async e => {
+      e.preventDefault();
+      if (!dragSrc) return;
+      const poolName = dragSrc.dataset.pool;
+      const container = dragSrc.closest('.pool-items');
+      const ids = [...container.querySelectorAll('.pool-item')].map(n => n.dataset.id);
+      renumber(container);
+      const ok = await api('/admin/pools/' + poolName, { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
+      if (ok) { api('/admin/reload', { method: 'POST' }); toast('优先级已更新'); }
+    });
+  });
+}
+
+async function addToPool(name) {
+  const sel = document.getElementById('addsel-' + name);
+  const id = sel.value;
+  if (!id) { toast('请先选择接口', true); return; }
+  const data = await api('/admin/pools');
+  if (!data) return;
+  const ids = data.pools[name].model_ids || [];
+  if (ids.includes(id)) { toast('该接口已在池中', true); return; }
+  ids.push(id);
+  const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
+  if (ok) { await api('/admin/reload', { method: 'POST' }); toast('已加入池 ' + name); loadPools(); }
+}
+
+async function removeFromPool(name, id) {
+  const data = await api('/admin/pools');
+  if (!data) return;
+  const ids = (data.pools[name].model_ids || []).filter(x => x !== id);
+  const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
+  if (ok) { await api('/admin/reload', { method: 'POST' }); toast('已移出池 ' + name); loadPools(); }
+}
+
+function collectModels(pools, name, seen, out) {
+  if (seen.has(name)) return;
+  seen.add(name);
+  (pools[name]?.model_ids || []).forEach(id => {
+    if (id.startsWith('pool:')) collectModels(pools, id.slice(5), seen, out);
+    else if (!out.includes(id)) out.push(id);
+  });
+}
+
+async function speedPool(name) {
+  const data = await api('/admin/pools');
+  if (!data) return;
+  const ids = [];
+  collectModels(data.pools, name, new Set(), ids);
+  if (!ids.length) { toast('该池没有可测速的模型接口', true); return; }
+  toast('正在测速池 ' + name + ' …');
+  const res = await api('/speedtest', { method: 'POST', body: JSON.stringify({ model_ids: ids }) });
+  if (!res) return;
+  res.results.forEach(r => { speedCache[r.model_id] = r; });
+  localStorage.setItem('gw_speed', JSON.stringify(speedCache));
+  toast('池 ' + name + ' 测速完成');
+  loadPools();
+}
+
+function showAddPool() {
+  const name = prompt('请输入新模型池名称（如 deepseek-v4-flash）：');
+  if (!name || !name.trim()) return;
+  api('/admin/pools', { method: 'POST', body: JSON.stringify({ name: name.trim(), model_ids: [] }) })
+    .then(ok => { if (ok) { api('/admin/reload', { method: 'POST' }).then(() => { toast('已创建池 ' + name.trim()); loadPools(); }); } });
+}
+
+async function delPool(name) {
+  if (!confirm('确定删除模型池 "' + name + '" 吗？池内接口不会被删除。')) return;
+  const ok = await api(poolPath(name), { method: 'DELETE' });
+  if (ok) { await api('/admin/reload', { method: 'POST' }); toast('已删除池 ' + name); loadPools(); }
+}
+
+async function toggleAutoOrder(name, enabled) {
+  const data = await api('/admin/pools');
+  if (!data) return;
+  const p = data.pools[name];
+  const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: p.model_ids, auto_order: enabled }) });
+  if (ok) { await api('/admin/reload', { method: 'POST' }); toast(enabled ? '池 ' + name + ' 已开启自动择优' : '池 ' + name + ' 已关闭自动择优'); loadPools(); }
+}
+
+async function loadStats() {
+  const data = await api('/stats');
+  if (!data) return;
+  const grid = document.getElementById('stats-grid');
+  grid.innerHTML = data.models.map((m, i) => {
+    const used = m.daily_used_tokens ?? m.used_tokens ?? 0;
+    const limit = m.daily_token_limit || m.max_tokens || 0;
+    const unit = m.unit || 'tokens';
+    const pct = limit > 0 ? Math.min(100, used / limit * 100) : 0;
+    const cls = m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : '');
+    const pctText = m.expired ? '已失效' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量');
+    const billing = m.billing_mode === 'request' ? '按次计费' : '按 Token 计费';
+    const typeBadge = m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>' : '<span class="badge b-openai">每日</span>';
+    const freeBadge = m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>';
+    const refresh = m.token_type === 'one_time' ? '不刷新' : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
+    return `
+      <div class="stat-card ${cls}" style="animation-delay:${i * 45}ms">
+        <div class="stat-top">
+          <div>
+            <div class="stat-id">${m.id}</div>
+            <div class="stat-name">${m.name} · ${billing}</div>
+          </div>
+          <div class="stat-badges">${freeBadge}${typeBadge}</div>
+        </div>
+        <div class="stat-nums">
+          <span class="stat-used">${used.toLocaleString()}</span>
+          <span class="stat-sep">/</span>
+          <span class="stat-limit">${limit ? limit.toLocaleString() : '∞'}</span>
+          <span class="stat-unit">${unit}</span>
+        </div>
+        <div class="stat-bar"><div class="stat-fill" data-pct="${pct}"></div></div>
+        <div class="stat-meta">
+          <span class="stat-pct">${pctText}</span>
+          <span class="stat-refresh">${refresh}</span>
+        </div>
+      </div>`;
+  }).join('') || '<div class="hint">暂无模型。</div>';
+
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    grid.querySelectorAll('.stat-fill').forEach(f => { f.style.width = f.dataset.pct + '%'; });
+  }));
+}
+
+async function runSpeed() {
+  const el = document.getElementById('speed-results');
+  el.innerHTML = '<div class="hint"><span class="chip chip-wait">测速中…</span> 正在并发请求所有模型</div>';
+  const data = await api('/speedtest', { method: 'POST', body: '{}' });
+  if (!data) return;
+  el.innerHTML = data.results.map((r, i) => `
+    <div class="card speed-card" style="animation-delay:${i * 50}ms">
+      <div class="card-head">
+        <div><div class="card-title">${esc(r.model_id)}</div><div class="card-sub">${esc(r.model_name || '')} · ${esc(r.provider || '')}</div></div>
+        <span class="chip ${r.status === 'ok' ? 'chip-ok' : 'chip-err'}">${r.status === 'ok' ? '正常' : r.status === 'rate_limited' ? '限流' : '失败'}</span>
+      </div>
+      <div class="grid">
+        <div>延迟 <b class="lat ${r.status === 'ok' ? 'speed-ok-c' : 'speed-err-c'}" style="font-size:16px">${r.latency_ms ?? '—'}</b> ms</div>
+        <div>吞吐 <b>${r.tps ?? '—'}</b> tok/s</div>
+        <div>消耗 <b>${r.tokens ?? '—'}</b> tokens</div>
+        ${r.error ? `<div>错误 <b style="color:var(--red)">${r.error}</b></div>` : ''}
+      </div>
+    </div>`).join('');
+  toast('测速完成');
+}
+
+const REASON_LABELS = {
+  selected: ['选中调用', 'rsn-selected'],
+  ok: ['可用', 'rsn-selected'],
+  quota_exhausted: ['用量已用尽', 'rsn-skip'],
+  rpm_limited: ['RPM 触顶', 'rsn-skip'],
+  tpm_limited: ['TPM 触顶', 'rsn-skip'],
+  cooldown: ['冷却中', 'rsn-warn'],
+  context_exceeded: ['超上下文窗口', 'rsn-skip'],
+  no_vision: ['不支持图片', 'rsn-skip'],
+  one_time_expired: ['一次性已失效', 'rsn-skip'],
+  already_tried: ['本轮已尝试', 'rsn-neutral'],
+  pool_exhausted: ['子池无可用接口', 'rsn-skip'],
+  cycle: ['循环引用已跳过', 'rsn-warn'],
+  switch_429: ['上游限流 → 切换', 'rsn-warn'],
+  switch_error: ['上游错误 → 切换', 'rsn-warn'],
+};
+function reasonChip(reason) {
+  const [label, cls] = REASON_LABELS[reason] || [reason, 'rsn-neutral'];
+  return `<span class="rsn ${cls}">${label}</span>`;
+}
+
+async function populateLogFilter() {
+  const data = await api('/admin/pools');
+  if (!data) return;
+  const sel = document.getElementById('log-pool-filter');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部池</option>' + Object.keys(data.pools).map(n => `<option value="${n}">${n}</option>`).join('');
+  sel.value = cur;
+}
+
+async function loadDecisions() {
+  const poolFilter = document.getElementById('log-pool-filter').value;
+  const url = '/admin/decisions?limit=100' + (poolFilter ? '&pool=' + encodeURIComponent(poolFilter) : '');
+  const data = await api(url);
+  const el = document.getElementById('log-list');
+  if (!data) return;
+  if (!data.decisions.length) { el.innerHTML = '<div class="hint">暂无调用记录。发起一次对话后这里会显示选模过程与切换依据。</div>'; return; }
+  el.innerHTML = data.decisions.map(d => {
+    const t = new Date(d.ts * 1000).toLocaleString('zh-CN', { hour12: false });
+    const ok = !!d.selected;
+    const steps = (d.steps || []).map(s => `
+      <div class="log-step">
+        <span class="s-model">${esc(s.model)}</span>
+        <span class="s-arrow">→</span>
+        ${reasonChip(s.reason)}
+      </div>`).join('');
+    return `
+      <div class="log-card">
+        <div class="log-head">
+          <span class="log-time">${t}</span>
+          <span class="log-pool">池 ${esc(d.pool_name)}</span>
+          ${d.requested ? `<span class="rsn rsn-neutral">指定 ${esc(d.requested)}</span>` : ''}
+          <span class="rsn rsn-neutral">估算 ${d.estimated_tokens} tok</span>
+          <span class="log-selected ${ok ? 'ok' : 'fail'}">${ok ? '✓ ' + esc(d.selected) : '✕ 无可用接口'}</span>
+        </div>
+        <div class="log-steps">${steps || '<span class="hint">无候选</span>'}</div>
+      </div>`;
+  }).join('');
+}
+
+function onBillingChange() {
+  const mode = document.getElementById('mform').billing_mode.value;
+  document.getElementById('limit-label').textContent = mode === 'request' ? '每日请求次数上限（0=不限）' : '每日 Token 上限（0=不限）';
+}
+
+function showAdd() {
+  editingId = null;
+  document.getElementById('modal-title').textContent = '添加模型';
+  document.getElementById('mform').reset();
+  onBillingChange();
+  document.getElementById('overlay').classList.add('show');
+}
+
+async function editModel(id) {
+  const data = await api('/admin/models');
+  if (!data) return;
+  const m = data.models.find(x => x.id === id);
+  if (!m) return;
+  editingId = id;
+  document.getElementById('modal-title').textContent = '编辑模型';
+  const f = document.getElementById('mform');
+  f.id.value = m.id; f.name.value = m.name; f.provider.value = m.provider;
+  f.base_url.value = m.base_url; f.api_key.value = m.api_key; f.token_type.value = m.token_type;
+  f.billing_mode.value = m.billing_mode || 'token'; f.is_free.value = m.is_free ? 'true' : 'false';
+  f.modality.value = m.modality || 'text';
+  f.daily_token_limit.value = m.daily_token_limit || 0; f.rpm_limit.value = m.rpm_limit || 0;
+  f.tpm_limit.value = m.tpm_limit || 0; f.context_window.value = m.context_window || 0;
+  f.max_concurrency.value = m.max_concurrency || 10; f.refresh_time.value = m.refresh_time || '';
+  f.max_tokens.value = m.max_tokens || 0; f.ttl_seconds.value = m.ttl_seconds || 0;
+  onBillingChange();
+  document.getElementById('overlay').classList.add('show');
+}
+
+function closeModal() { document.getElementById('overlay').classList.remove('show'); }
+
+async function submitModel(e) {
+  e.preventDefault();
+  const body = Object.fromEntries(new FormData(document.getElementById('mform')).entries());
+  ['daily_token_limit','rpm_limit','tpm_limit','context_window','max_concurrency','max_tokens','ttl_seconds'].forEach(k => body[k] = parseInt(body[k]) || 0);
+  body.is_free = body.is_free === 'true';
+  delete body.timezone;
+  let ok;
+  if (editingId) ok = await api('/admin/models/' + encodeURIComponent(editingId).replace(/%2F/g, '/'), { method: 'PUT', body: JSON.stringify(body) });
+  else ok = await api('/admin/models', { method: 'POST', body: JSON.stringify(body) });
+  if (!ok) return;
+  await api('/admin/reload', { method: 'POST' });
+  closeModal(); toast(editingId ? '模型已更新' : '模型已添加');
+  loadModels();
+}
+
+async function delModel(id) {
+  if (!confirm('确定删除模型 "' + id + '" 吗？将同时从所有池中移除。')) return;
+  const ok = await api('/admin/models/' + encodeURIComponent(id).replace(/%2F/g, '/'), { method: 'DELETE' });
+  if (!ok) return;
+  await api('/admin/reload', { method: 'POST' });
+  toast('模型已删除'); loadModels();
+}
+
+setInterval(() => { document.getElementById('clock').textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false }); }, 1000);
+loadModels();
+</script>
+</body>
+</html>
