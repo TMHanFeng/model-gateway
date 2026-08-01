@@ -376,7 +376,7 @@ body {
       </div>
       <div id="inherit-note" class="auto-note" style="display:none">该模型继承所属供应商的协议 / Base URL / API Key，无需在此填写。</div>
       <div class="f2">
-        <div class="fg"><label>令牌类型</label><select name="token_type"><option value="daily">daily（每日刷新）</option><option value="one_time">one_time（一次性）</option></select></div>
+        <div class="fg"><label>令牌类型</label><select name="token_type" id="f-token-type" onchange="onTokenTypeChange()"><option value="daily">daily（每日刷新）</option><option value="one_time">one_time（一次性）</option></select></div>
         <div class="fg"><label>计费模式</label><select name="billing_mode" onchange="onBillingChange()"><option value="token">按 Token 计费</option><option value="request">按请求次数计费</option></select></div>
       </div>
       <div class="f2">
@@ -395,13 +395,15 @@ body {
         <div class="fg"><label>最大并发数</label><input name="max_concurrency" type="number" value="10"></div>
         <div class="fg"><label>刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
       </div>
-      <div class="f2">
-        <div class="fg"><label>时区</label><input value="Asia/Shanghai（北京时间，固定）" disabled></div>
-        <div class="fg"><label>一次性·最大 Token</label><input name="max_tokens" type="number" value="0"></div>
-      </div>
-      <div class="f2">
-        <div class="fg"><label>一次性·存活时长（秒）</label><input name="ttl_seconds" type="number" value="0"></div>
-        <div class="fg"><label>一次性·过期日期（北京时间，到期次日失效）</label><input name="expire_date" id="f-expire-date" type="date"></div>
+      <div id="once-fields">
+        <div class="f2">
+          <div class="fg"><label>时区</label><input value="Asia/Shanghai（北京时间，固定）" disabled></div>
+          <div class="fg"><label>一次性·最大 Token</label><input name="max_tokens" type="number" value="0"></div>
+        </div>
+        <div class="f2">
+          <div class="fg"><label>一次性·存活时长（秒）</label><input name="ttl_seconds" type="number" value="0"></div>
+          <div class="fg"><label>一次性·过期日期（北京时间，到期次日失效）</label><input name="expire_date" id="f-expire-date" type="date"></div>
+        </div>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" onclick="testConnectivity()" id="m-test-btn">⚡ 测试连通性</button>
@@ -938,12 +940,19 @@ function onBillingChange() {
   document.getElementById('limit-label').textContent = mode === 'request' ? '每日请求次数上限（0=不限）' : '每日 Token 上限（0=不限）';
 }
 
+function onTokenTypeChange() {
+  const once = document.getElementById('once-fields');
+  const oneTime = document.getElementById('mform').token_type.value === 'one_time';
+  once.style.display = oneTime ? '' : 'none';
+}
+
 function showAdd() {
   editingId = null;
   document.getElementById('modal-title').textContent = '添加模型';
   document.getElementById('mform').reset();
   document.getElementById('f-model-id').disabled = false;
   populateProviderSelect('').then(() => { onBillingChange(); onProviderSelect(); });
+  onTokenTypeChange();
   document.getElementById('overlay').classList.add('show');
 }
 
@@ -954,6 +963,7 @@ async function showAddUnder(pid) {
   document.getElementById('f-model-id').disabled = false;
   await populateProviderSelect(pid);
   onBillingChange(); onProviderSelect();
+  onTokenTypeChange();
   document.getElementById('overlay').classList.add('show');
 }
 
@@ -1045,6 +1055,7 @@ async function editModel(id) {
   f.max_concurrency.value = m.max_concurrency || 10; f.refresh_time.value = m.refresh_time || '';
   f.max_tokens.value = m.max_tokens || 0; f.ttl_seconds.value = m.ttl_seconds || 0;
   f.expire_date.value = m.expire_date || '';
+  onTokenTypeChange();
   // ID is the primary key — immutable in edit mode. Delete + recreate to rename.
   document.getElementById('f-model-id').disabled = true;
   await populateProviderSelect(m.provider_id || '');
@@ -1061,6 +1072,10 @@ async function submitModel(e) {
   ['daily_token_limit','rpm_limit','tpm_limit','context_window','max_concurrency','max_tokens','ttl_seconds'].forEach(k => body[k] = parseInt(body[k]) || 0);
   body.is_free = body.is_free === 'true';
   delete body.timezone;
+  // fallback: if one-time fields are filled but token_type is still daily, switch it
+  if (body.token_type !== 'one_time' && (body.max_tokens > 0 || body.ttl_seconds > 0 || body.expire_date)) {
+    body.token_type = 'one_time';
+  }
   let ok;
   if (editingId) ok = await api('/admin/models/' + encodeURIComponent(editingId).replace(/%2F/g, '/'), { method: 'PUT', body: JSON.stringify(body) });
   else ok = await api('/admin/models', { method: 'POST', body: JSON.stringify(body) });

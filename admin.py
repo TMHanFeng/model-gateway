@@ -86,11 +86,21 @@ async def add_model(request: Request, _=Depends(verify_admin)):
         entry["provider"] = body["provider"]
         entry["base_url"] = body["base_url"]
         entry["api_key"] = body["api_key"]
-    if body.get("token_type") == "one_time":
-        entry["max_tokens"] = body.get("max_tokens", 0)
-        entry["ttl_seconds"] = body.get("ttl_seconds", 0)
-        if body.get("expire_date"):
-            entry["expire_date"] = body["expire_date"]
+    # one-time fields: save whenever any is provided, and auto-switch to one_time
+    max_tokens_raw = body.get("max_tokens", 0)
+    ttl_raw = body.get("ttl_seconds", 0)
+    exp_raw = body.get("expire_date", "")
+    has_once_fields = (
+        max_tokens_raw not in (None, "", 0)
+        or ttl_raw not in (None, "", 0)
+        or bool(exp_raw)
+    )
+    if body.get("token_type") == "one_time" or has_once_fields:
+        entry["token_type"] = "one_time"
+        entry["max_tokens"] = int(max_tokens_raw or 0)
+        entry["ttl_seconds"] = int(ttl_raw or 0)
+        if exp_raw:
+            entry["expire_date"] = exp_raw
 
     models.append(entry)
     config["models"] = models
