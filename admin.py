@@ -168,8 +168,16 @@ async def delete_model(model_id: str, _=Depends(verify_admin)):
     for pool_name, pool_cfg in config.get("pools", {}).items():
         pool_cfg["model_ids"] = [mid for mid in pool_cfg.get("model_ids", []) if mid != model_id]
 
+    # Also clear any single_override that points to the deleted model
+    if "single_override" in config:
+        config["single_override"] = {
+            k: v for k, v in config["single_override"].items()
+            if v != model_id
+        }
+
     save_config(config)
     restart_scheduler()
+    _sync_pool()
     return {"ok": True}
 
 
@@ -299,6 +307,8 @@ async def create_pool(request: Request, _=Depends(verify_admin)):
         "model_ids": body.get("model_ids", []),
         "auto_order": bool(body.get("auto_order", False)),
     }
+    if body.get("fallback_pool"):
+        pools[name]["fallback_pool"] = body["fallback_pool"]
     save_config(config)
     restart_scheduler()
     _sync_pool()
@@ -307,8 +317,8 @@ async def create_pool(request: Request, _=Depends(verify_admin)):
 
 @router.delete("/pools/{pool_name:path}")
 async def delete_pool(pool_name: str, _=Depends(verify_admin)):
-    if pool_name == "auto":
-        raise HTTPException(status_code=400, detail="Auto pool cannot be deleted")
+    if pool_name in ("auto", "__fallback__"):
+        raise HTTPException(status_code=400, detail=f"Pool '{pool_name}' cannot be deleted")
 
     config = load_config()
     pools = config.get("pools", {})
@@ -320,6 +330,35 @@ async def delete_pool(pool_name: str, _=Depends(verify_admin)):
     restart_scheduler()
     _sync_pool()
     return {"ok": True}
+
+
+@router.put("/pools/reorder")
+async def reorder_pools(request: Request, _=Depends(verify_admin)):
+    """Reorder pools (body: {pool_names: ["pool1", "pool2", ...]}). auto always first."""
+    body = await request.json()
+    pool_names = body.get("pool_names", [])
+    if not isinstance(pool_names, list):
+        raise HTTPException(status_code=400, detail="pool_names must be a list")
+
+    config = load_config()
+    pools = config.get("pools", {})
+
+    # auto must always be first; __fallback__ goes last
+    ordered = ["auto"]
+    for name in pool_names:
+        if name not in ("auto", "__fallback__") and name in pools:
+            ordered.append(name)
+    ordered.append("__fallback__")
+
+    # Rewrite pools dict in new order
+    new_pools = {}
+    for name in ordered:
+        if name in pools:
+            new_pools[name] = pools[name]
+    config["pools"] = new_pools
+    save_config(config)
+    _sync_pool()
+    return {"ok": True, "pools": list(new_pools.keys())}
 
 
 @router.put("/pools/{pool_name:path}")

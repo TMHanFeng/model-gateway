@@ -591,25 +591,29 @@ async function loadPools() {
   document.getElementById('pool-list').innerHTML = Object.entries(pdata.pools).map(([name, pool]) => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
-    const availPools = Object.keys(pdata.pools).filter(p => p !== name && !ids.includes('pool:' + p));
+    const availPools = Object.keys(pdata.pools).filter(p => p !== name && p !== '__fallback__' && !ids.includes('pool:' + p));
+    const isAuto = name === 'auto';
+    const isFallback = name === '__fallback__';
+    const isDraggable = !isAuto; // auto is fixed at top, __fallback__ also not draggable for now
     return `
-    <div class="card">
+    <div class="card" data-pool-card="${name}" ${isDraggable ? 'draggable="true"' : ''}>
       <div class="card-head">
+        ${isDraggable ? '<span class="drag-handle" title="拖拽排序">⠿</span>' : (isAuto ? '<span class="drag-handle" style="opacity:.3;cursor:not-allowed" title="auto 池固定在顶端">⠿</span>' : '')}
         <div>
-          <div class="card-title">池：${name}<span class="callable-tag">model="${name}" 可调用</span></div>
+          <div class="card-title">池：${name}<span class="callable-tag">model="${name}" 可调用</span>${isFallback ? '<span class="badge b-openai">🛟 兜底池</span>' : ''}</div>
           <div class="card-sub">${pool.strategy === 'sequential' ? '策略：按序调用' : (pool.strategy || '')} · 共 ${ids.length} 项${pool.auto_order ? ' · 自动择优' : ''}</div>
         </div>
         <div class="btn-row">
-          <label class="switch" title="开启后：先排除不可用接口（用量用尽 / RPM·TPM 触顶），再在可用接口中按调用延迟从低到高优先调用（不改变下方显示顺序）">
+          ${!isFallback ? `<label class="switch" title="开启后：先排除不可用接口（用量用尽 / RPM·TPM 触顶），再在可用接口中按调用延迟从低到高优先调用（不改变下方显示顺序）">
             <input type="checkbox" ${pool.auto_order ? 'checked' : ''} onchange="toggleAutoOrder('${name}', this.checked)">
             <span class="track"></span>
             <span class="sw-label">自动择优</span>
-          </label>
+          </label>` : '<span class="badge b-openai">自动择优</span>'}
           <button class="btn btn-ghost btn-sm" onclick="speedPool('${name}')">⚡ 测速本池</button>
-          ${name === 'auto' ? `<button class="btn btn-amber btn-sm" onclick="toggleSingleMode('${name}')" id="single-btn-${name}" title="开启后，auto池只使用选定的单个模型；关闭后恢复正常。池内布局不变。">🎯 一键单模型</button><span class="badge b-openai">内置</span>` : `<button class="btn btn-ghost btn-sm" onclick="renamePool('${name}')">✏️ 重命名</button><button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`}
+          ${isAuto ? `<button class="btn btn-amber btn-sm" onclick="toggleSingleMode('${name}')" id="single-btn-${name}" title="开启后，auto池只使用选定的单个模型；关闭后恢复正常。池内布局不变。">🎯 一键单模型</button><span class="badge b-openai">内置</span>` : (isFallback ? '' : `<button class="btn btn-ghost btn-sm" onclick="renamePool('${name}')">✏️ 重命名</button><button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`)}
         </div>
       </div>
-      ${name === 'auto' ? `
+      ${isAuto ? `
       <div class="single-overlay" id="single-overlay-${name}" style="display:none">
         <div class="single-ctrl">
           <label>单模型锁定：</label>
@@ -648,6 +652,7 @@ async function loadPools() {
   }).join('') || '<div class="hint">暂无模型池，点击右上角新增。</div>';
 
   bindDrag();
+  bindPoolDrag();
   refreshSingleModeUI();
 }
 
@@ -773,6 +778,51 @@ function bindDrag() {
       renumber(container);
       const ok = await api(poolPath(poolName), { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
       if (ok) { api('/admin/reload', { method: 'POST' }); toast('优先级已更新'); }
+    });
+  });
+}
+
+let poolDragSrc = null;
+
+function bindPoolDrag() {
+  document.querySelectorAll('.card[data-pool-card][draggable]').forEach(el => {
+    el.addEventListener('dragstart', e => {
+      poolDragSrc = el;
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      poolDragSrc = null;
+      document.querySelectorAll('.card[data-pool-card]').forEach(x => x.classList.remove('drag-over'));
+    });
+    el.addEventListener('dragover', e => {
+      e.preventDefault();
+      if (!poolDragSrc || el === poolDragSrc) return;
+      const container = el.parentElement;
+      const siblings = [...container.querySelectorAll('.card[data-pool-card]:not(.dragging)')];
+      const next = siblings.find(child => {
+        const box = child.getBoundingClientRect();
+        return e.clientY < box.top + box.height / 2;
+      });
+      if (next) container.insertBefore(poolDragSrc, next);
+      else container.insertBefore(poolDragSrc, null); // append at end
+    });
+    el.addEventListener('drop', async e => {
+      e.preventDefault();
+      if (!poolDragSrc) return;
+      // auto always stays first; collect order of non-auto pools
+      const container = document.getElementById('pool-list');
+      const autoCard = container.querySelector('.card[data-pool-card="auto"]');
+      const fbCard = container.querySelector('.card[data-pool-card="__fallback__"]');
+      const ordered = [...container.querySelectorAll('.card[data-pool-card]')]
+        .filter(c => c !== autoCard && c !== fbCard)
+        .map(c => c.dataset.poolCard);
+      const ok = await api('/admin/pools/reorder', {
+        method: 'PUT',
+        body: JSON.stringify({ pool_names: ordered })
+      });
+      if (ok) { api('/admin/reload', { method: 'POST' }); toast('池顺序已更新'); }
     });
   });
 }
@@ -951,9 +1001,21 @@ async function loadStats() {
   const data = await api('/stats');
   if (!data) return;
   const grid = document.getElementById('stats-grid');
-  grid.innerHTML = data.models.map((m, i) => {
-    const used = m.daily_used_tokens ?? m.used_tokens ?? 0;
-    const limit = m.daily_token_limit || m.max_tokens || 0;
+  grid.innerHTML = data.models
+    .map(m => ({
+      ...m,
+      _used: m.daily_used_tokens ?? m.used_tokens ?? 0,
+      _limit: m.daily_token_limit || m.max_tokens || 0,
+    }))
+    .sort((a, b) => {
+      // Sort by usage percentage descending: most-used first. Unlimited (-1) last.
+      const ap = a._limit > 0 ? a._used / a._limit : -1;
+      const bp = b._limit > 0 ? b._used / b._limit : -1;
+      return bp - ap;
+    })
+    .map((m, i) => {
+    const used = m._used;
+    const limit = m._limit;
     const unit = m.unit || 'tokens';
     const pct = limit > 0 ? Math.min(100, used / limit * 100) : 0;
     const cls = m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : '');
