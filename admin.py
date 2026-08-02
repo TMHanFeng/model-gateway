@@ -380,6 +380,52 @@ async def rename_pool(pool_name: str, request: Request, _=Depends(verify_admin))
     return {"ok": True, "pool_name": new_name}
 
 
+@router.post("/pools/{pool_name:path}/single_override")
+async def set_single_override(pool_name: str, request: Request, _=Depends(verify_admin)):
+    """Lock a pool to use only one model. Body: {model_id: "..."}"""
+    body = await request.json()
+    model_id = (body.get("model_id") or "").strip()
+    if not model_id:
+        raise HTTPException(status_code=400, detail="Missing model_id")
+
+    from main import pool
+    if pool_name not in pool.pools:
+        raise HTTPException(status_code=404, detail=f"Pool '{pool_name}' not found")
+    if model_id not in pool.registry:
+        raise HTTPException(status_code=400, detail=f"Model '{model_id}' not found in registry")
+
+    # Verify model is actually in this pool (directly or via sub-pool)
+    pool_cfg = pool.pools.get(pool_name, {})
+    model_ids = pool_cfg.get("model_ids", [])
+    if model_id not in model_ids and not any(m.startswith("pool:") for m in model_ids):
+        raise HTTPException(status_code=400, detail=f"Model '{model_id}' is not in pool '{pool_name}'")
+
+    pool.single_override[pool_name] = model_id
+    return {"ok": True, "pool_name": pool_name, "model_id": model_id}
+
+
+@router.delete("/pools/{pool_name:path}/single_override")
+async def clear_single_override(pool_name: str, _=Depends(verify_admin)):
+    """Release single-model lock, return to normal pool behavior."""
+    from main import pool
+    if pool_name not in pool.pools:
+        raise HTTPException(status_code=404, detail=f"Pool '{pool_name}' not found")
+
+    model_id = pool.single_override.pop(pool_name, None)
+    return {"ok": True, "pool_name": pool_name, "cleared": model_id is not None}
+
+
+@router.get("/pools/{pool_name:path}/single_override")
+async def get_single_override(pool_name: str, _=Depends(verify_admin)):
+    """Get current single-model override for a pool."""
+    from main import pool
+    if pool_name not in pool.pools:
+        raise HTTPException(status_code=404, detail=f"Pool '{pool_name}' not found")
+
+    model_id = pool.single_override.get(pool_name)
+    return {"ok": True, "pool_name": pool_name, "model_id": model_id}
+
+
 @router.post("/reload")
 async def reload_pool(request: Request, _=Depends(verify_admin)):
     from main import pool

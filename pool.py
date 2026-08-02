@@ -62,6 +62,8 @@ class ModelPool:
         self.pools: dict[str, dict] = {}
         self.providers: dict[str, dict] = {}
         self.providers_cache: dict[str, object] = {}
+        # Single-model override: pool_name -> model_id. When set, only that model is used.
+        self.single_override: dict[str, str] = {}
         self._load()
 
     def _load(self):
@@ -309,6 +311,19 @@ class ModelPool:
         visiting = visiting | {pool_name}
 
         meta = self.pools.get(pool_name) or self.pools.get("auto") or {}
+
+        # Single-model override: when set, only use the specified model
+        override_id = self.single_override.get(pool_name)
+        if override_id:
+            entry = self.registry.get(override_id)
+            if entry:
+                ok, reason = await self._check_available(entry, estimated_tokens, has_images)
+                if ok:
+                    steps = [{"model": override_id, "reason": "single_override_selected"}]
+                    return entry, steps
+                return None, [{"model": override_id, "reason": f"single_override_unavailable:{reason}"}]
+            return None, [{"model": override_id, "reason": "single_override_not_found"}]
+
         units = []
         for raw in meta.get("model_ids", []):
             if raw.startswith("pool:"):

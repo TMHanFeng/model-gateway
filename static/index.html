@@ -179,6 +179,12 @@ body {
 .switch .sw-label { font-size: 12px; color: var(--muted); }
 .switch input:checked ~ .sw-label { color: var(--teal); }
 .auto-note { font-size: 11px; color: var(--teal); background: var(--teal-dim); border: 1px solid rgba(45,212,191,.25); padding: 5px 10px; border-radius: 5px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+.single-overlay { background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.3); padding: 8px 12px; border-radius: 6px; margin-bottom: 8px; }
+.single-ctrl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.single-ctrl label { font-size: 12px; color: var(--amber); }
+.single-ctrl select { flex: 1; min-width: 120px; }
+.single-active { font-size: 12px; color: var(--amber); background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.3); padding: 6px 12px; border-radius: 6px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.single-active strong { color: var(--text); }
 .callable-tag { font-family: var(--mono); font-size: 10.5px; color: var(--muted); border: 1px dashed var(--line-hi); padding: 1px 7px; border-radius: 4px; margin-left: 8px; }
 
 /* ── 调用记录 ── */
@@ -600,8 +606,29 @@ async function loadPools() {
             <span class="sw-label">自动择优</span>
           </label>
           <button class="btn btn-ghost btn-sm" onclick="speedPool('${name}')">⚡ 测速本池</button>
+          <button class="btn btn-amber btn-sm" onclick="toggleSingleMode('${name}')" id="single-btn-${name}" title="开启后，本池只使用选定的单个模型；关闭后恢复正常。池内布局不变。">🎯 一键单模型</button>
           ${name === 'auto' ? '<span class="badge b-openai">内置</span>' : `<button class="btn btn-ghost btn-sm" onclick="renamePool('${name}')">✏️ 重命名</button><button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`}
         </div>
+      </div>
+      <div class="single-overlay" id="single-overlay-${name}" style="display:none">
+        <div class="single-ctrl">
+          <label>单模型锁定：</label>
+          <select id="single-sel-${name}">
+            <option value="">— 选择模型 —</option>
+            ${ids.map(id => {
+              const mid = id.replace(/^pool:/, '');
+              const m = modelLookup[mid];
+              const label = m ? `${m.id}（${m.name}）` : id;
+              return `<option value="${id}">${label}</option>`;
+            }).join('')}
+          </select>
+          <button class="btn btn-amber btn-sm" onclick="setSingleMode('${name}')">🔒 锁定</button>
+          <button class="btn btn-ghost btn-sm" onclick="closeSingleMode('${name}')">取消</button>
+        </div>
+      </div>
+      <div class="single-active" id="single-active-${name}" style="display:none">
+        🔒 当前锁定模型：<strong id="single-label-${name}"></strong>
+        <button class="btn btn-red btn-sm" onclick="clearSingleMode('${name}')">🔓 解除锁定</button>
       </div>
       ${pool.auto_order ? '<div class="auto-note">⚡ 自动择优已开启：先排除不可用接口（用量用尽 / RPM·TPM 触顶），再在可用接口中按调用延迟从低到高优先调用。下方显示顺序保持不变，关闭后按设定顺序调用。</div>' : ''}
       <div class="pool-items" data-pool="${name}">
@@ -623,6 +650,26 @@ async function loadPools() {
   }).join('') || '<div class="hint">暂无模型池，点击右上角新增。</div>';
 
   bindDrag();
+  refreshSingleModeUI();
+}
+
+async function refreshSingleModeUI() {
+  const pools = Object.keys(poolLookup || {});
+  for (const name of pools) {
+    const overlay = document.getElementById('single-overlay-' + name);
+    const active = document.getElementById('single-active-' + name);
+    if (!overlay || !active) continue;
+    const data = await api('/admin/pools/' + encodeURIComponent(name).replace(/%2F/g, '/') + '/single_override');
+    if (data && data.model_id) {
+      active.style.display = 'flex';
+      const label = document.getElementById('single-label-' + name);
+      if (label) label.textContent = data.model_id;
+      overlay.style.display = 'none';
+    } else {
+      active.style.display = 'none';
+      overlay.style.display = 'none';
+    }
+  }
 }
 
 function latTag(id) {
@@ -846,6 +893,41 @@ async function toggleAutoOrder(name, enabled) {
   if (!p) { toast('池 "' + name + '" 不存在，请刷新页面重试', true); return; }
   const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: p.model_ids, auto_order: enabled }) });
   if (ok) { await api('/admin/reload', { method: 'POST' }); toast(enabled ? '池 ' + name + ' 已开启自动择优' : '池 ' + name + ' 已关闭自动择优'); loadPools(); }
+}
+
+function toggleSingleMode(name) {
+  const overlay = document.getElementById('single-overlay-' + name);
+  const isVisible = overlay.style.display !== 'none';
+  overlay.style.display = isVisible ? 'none' : 'block';
+}
+
+function closeSingleMode(name) {
+  document.getElementById('single-overlay-' + name).style.display = 'none';
+}
+
+async function setSingleMode(name) {
+  const sel = document.getElementById('single-sel-' + name);
+  const modelId = sel.value;
+  if (!modelId) { toast('请先选择一个模型', true); return; }
+  const ok = await api('/admin/pools/' + encodeURIComponent(name).replace(/%2F/g, '/') + '/single_override', {
+    method: 'POST',
+    body: JSON.stringify({ model_id: modelId })
+  });
+  if (ok) {
+    await api('/admin/reload', { method: 'POST' });
+    toast('已锁定：' + name + ' 池只使用 ' + modelId);
+    closeSingleMode(name);
+    loadPools();
+  }
+}
+
+async function clearSingleMode(name) {
+  const ok = await api('/admin/pools/' + encodeURIComponent(name).replace(/%2F/g, '/') + '/single_override', { method: 'DELETE' });
+  if (ok) {
+    await api('/admin/reload', { method: 'POST' });
+    toast('已解除锁定：' + name + ' 池恢复正常');
+    loadPools();
+  }
 }
 
 async function loadStats() {
