@@ -135,7 +135,7 @@ body {
 /* ── 拖拽 ── */
 .pool-item.dragging { opacity: .35; border-style: dashed; }
 .pool-item.drag-over { border-color: var(--amber); box-shadow: 0 -2px 0 var(--amber); }
-.drag-handle { cursor: grab; color: var(--muted); font-size: 15px; margin-right: 10px; user-select: none; letter-spacing: -1px; }
+.drag-handle { cursor: grab; color: var(--muted); font-size: 15px; margin-right: 4px; user-select: none; letter-spacing: -1px; }
 .drag-handle:active { cursor: grabbing; }
 
 /* ── ⓘ 悬浮信息 ── */
@@ -598,9 +598,8 @@ async function loadPools() {
     return `
     <div class="card" data-pool-card="${name}" ${isDraggable ? 'draggable="true"' : ''}>
       <div class="card-head">
-        ${isDraggable ? '<span class="drag-handle" title="拖拽排序">⠿</span>' : (isAuto ? '<span class="drag-handle" style="opacity:.3;cursor:not-allowed" title="auto 池固定在顶端">⠿</span>' : '')}
         <div>
-          <div class="card-title">池：${name}<span class="callable-tag">model="${name}" 可调用</span>${isFallback ? '<span class="badge b-openai">🛟 兜底池</span>' : ''}</div>
+          <div class="card-title">${isDraggable ? '<span class="drag-handle" title="拖拽排序">⠿</span>' : (isAuto ? '<span class="drag-handle" style="opacity:.3;cursor:not-allowed" title="auto 池固定在顶端">⠿</span>' : '')}池：${name}<span class="callable-tag">model="${name}" 可调用</span>${isFallback ? '<span class="badge b-openai">🛟 兜底池</span>' : ''}</div>
           <div class="card-sub">${pool.strategy === 'sequential' ? '策略：按序调用' : (pool.strategy || '')} · 共 ${ids.length} 项${pool.auto_order ? ' · 自动择优' : ''}</div>
         </div>
         <div class="btn-row">

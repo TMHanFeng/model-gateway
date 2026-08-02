@@ -117,6 +117,7 @@ class ModelPool:
                 "model_ids": pool_cfg.get("model_ids", []),
                 "auto_order": bool(pool_cfg.get("auto_order", False)),
                 "fallback_pool": pool_cfg.get("fallback_pool"),
+                "strategy": pool_cfg.get("strategy", "sequential"),
             }
 
         # Auto-create __fallback__ pool: contains ALL models, auto_order, survives reloads

@@ -284,8 +284,9 @@ async def delete_provider(provider_id: str, _=Depends(verify_admin)):
 
 @router.get("/pools")
 async def get_pools(_=Depends(verify_admin)):
-    config = load_config()
-    return {"pools": config.get("pools", {})}
+    from main import pool
+    # Return from in-memory pool.pools (includes auto-created __fallback__)
+    return {"pools": pool.pools}
 
 
 @router.post("/pools")
@@ -419,7 +420,7 @@ async def rename_pool(pool_name: str, request: Request, _=Depends(verify_admin))
     return {"ok": True, "pool_name": new_name}
 
 
-@router.post("/pools/{pool_name:path}/single_override")
+@router.post("/pools/{pool_name}/single_override")
 async def set_single_override(pool_name: str, request: Request, _=Depends(verify_admin)):
     """Lock a pool to use only one model. Body: {model_id: "..."}"""
     body = await request.json()
@@ -443,7 +444,7 @@ async def set_single_override(pool_name: str, request: Request, _=Depends(verify
     return {"ok": True, "pool_name": pool_name, "model_id": model_id}
 
 
-@router.delete("/pools/{pool_name:path}/single_override")
+@router.delete("/pools/{pool_name}/single_override")
 async def clear_single_override(pool_name: str, _=Depends(verify_admin)):
     """Release single-model lock, return to normal pool behavior."""
     from main import pool
@@ -455,7 +456,7 @@ async def clear_single_override(pool_name: str, _=Depends(verify_admin)):
     return {"ok": True, "pool_name": pool_name, "cleared": model_id is not None}
 
 
-@router.get("/pools/{pool_name:path}/single_override")
+@router.get("/pools/{pool_name}/single_override")
 async def get_single_override(pool_name: str, _=Depends(verify_admin)):
     """Get current single-model override for a pool."""
     from main import pool
