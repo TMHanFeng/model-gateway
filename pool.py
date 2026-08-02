@@ -118,6 +118,27 @@ class ModelPool:
                 "auto_order": bool(pool_cfg.get("auto_order", False)),
             }
 
+        # Restore single_override from config so it survives reloads
+        self.single_override = {
+            k: v for k, v in self.config.get("single_override", {}).items()
+            if k in self.pools
+        }
+
+    # ── single_override persistence ────────────────────────────────────────────
+
+    def _persist_single_override(self):
+        """Write current single_override to config.json so it survives reloads."""
+        self.config["single_override"] = dict(self.single_override)
+        save_config(self.config)
+
+    def set_single_override(self, pool_name: str, model_id: str):
+        self.single_override[pool_name] = model_id
+        self._persist_single_override()
+
+    def clear_single_override(self, pool_name: str):
+        self.single_override.pop(pool_name, None)
+        self._persist_single_override()
+
     def reload(self):
         old_latency = {mid: e.latency_ms for mid, e in self.registry.items()}
         self.providers_cache.clear()
@@ -473,9 +494,16 @@ class ModelPool:
         has_images = self._has_images(req)
         max_attempts = len(self.registry) + 1
         actual_calls: list[dict] = []
+        # Track whether we've already fallen back from single_override to normal pool
+        single_override_fallback_done = False
+        override_id = self.single_override.get(pool_name)
 
         for _ in range(max_attempts):
-            entry, _ = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
+            # After single_override model fails once, fall back to normal pool selection
+            if single_override_fallback_done:
+                entry, _ = await self.select_model(pool_name, None, estimated, exclude=tried, has_images=has_images)
+            else:
+                entry, _ = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
             if entry is None:
                 break
             tried.add(entry.id)
@@ -487,10 +515,16 @@ class ModelPool:
                 return response, tokens, actual_calls
             except RateLimitError:
                 actual_calls.append({"model": entry.id, "reason": "switch_429"})
+                # If this failure was from the single_override model, fall back to normal pool next
+                if not single_override_fallback_done and entry.id == override_id:
+                    single_override_fallback_done = True
                 continue
             except Exception:
                 entry.cooldown_until = time.time() + 30
                 actual_calls.append({"model": entry.id, "reason": "switch_error"})
+                # If this failure was from the single_override model, fall back to normal pool next
+                if not single_override_fallback_done and entry.id == override_id:
+                    single_override_fallback_done = True
                 continue
 
         await db.log_decision(pool_name, requested_model, None, estimated, actual_calls)
@@ -502,9 +536,16 @@ class ModelPool:
         has_images = self._has_images(req)
         max_attempts = len(self.registry) + 1
         actual_calls: list[dict] = []
+        # Track whether we've already fallen back from single_override to normal pool
+        single_override_fallback_done = False
+        override_id = self.single_override.get(pool_name)
 
         for _ in range(max_attempts):
-            entry, _ = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
+            # After single_override model fails once, fall back to normal pool selection
+            if single_override_fallback_done:
+                entry, _ = await self.select_model(pool_name, None, estimated, exclude=tried, has_images=has_images)
+            else:
+                entry, _ = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
             if entry is None:
                 break
             tried.add(entry.id)
@@ -516,10 +557,16 @@ class ModelPool:
                 return stream, entry, actual_calls
             except RateLimitError:
                 actual_calls.append({"model": entry.id, "reason": "switch_429"})
+                # If this failure was from the single_override model, fall back to normal pool next
+                if not single_override_fallback_done and entry.id == override_id:
+                    single_override_fallback_done = True
                 continue
             except Exception:
                 entry.cooldown_until = time.time() + 30
                 actual_calls.append({"model": entry.id, "reason": "switch_error"})
+                # If this failure was from the single_override model, fall back to normal pool next
+                if not single_override_fallback_done and entry.id == override_id:
+                    single_override_fallback_done = True
                 continue
 
         await db.log_decision(pool_name, requested_model, None, estimated, actual_calls)

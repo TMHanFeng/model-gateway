@@ -933,19 +933,17 @@ async function setSingleMode(name) {
     body: JSON.stringify({ model_id: modelId })
   });
   if (ok) {
-    await api('/admin/reload', { method: 'POST' });
     toast('已锁定：' + name + ' 池只使用 ' + modelId);
     closeSingleMode(name);
-    loadPools();
+    await refreshSingleModeUI();
   }
 }
 
 async function clearSingleMode(name) {
   const ok = await api('/admin/pools/' + encodeURIComponent(name).replace(/%2F/g, '/') + '/single_override', { method: 'DELETE' });
   if (ok) {
-    await api('/admin/reload', { method: 'POST' });
     toast('已解除锁定：' + name + ' 池恢复正常');
-    loadPools();
+    await refreshSingleModeUI();
   }
 }
 
