@@ -591,10 +591,10 @@ async function loadPools() {
   document.getElementById('pool-list').innerHTML = Object.entries(pdata.pools).map(([name, pool]) => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
-    const availPools = Object.keys(pdata.pools).filter(p => p !== name && p !== '__fallback__' && !ids.includes('pool:' + p));
+    const availPools = Object.keys(pdata.pools).filter(p => p !== name && p !== '兜底池' && !ids.includes('pool:' + p));
     const isAuto = name === 'auto';
-    const isFallback = name === '__fallback__';
-    const isDraggable = !isAuto; // auto is fixed at top, __fallback__ also not draggable for now
+    const isFallback = name === '兜底池';
+    const isDraggable = !isAuto; // auto is fixed at top
     return `
     <div class="card" data-pool-card="${name}" ${isDraggable ? 'draggable="true"' : ''}>
       <div class="card-head">
@@ -603,11 +603,11 @@ async function loadPools() {
           <div class="card-sub">${pool.strategy === 'sequential' ? '策略：按序调用' : (pool.strategy || '')} · 共 ${ids.length} 项${pool.auto_order ? ' · 自动择优' : ''}</div>
         </div>
         <div class="btn-row">
-          ${!isFallback ? `<label class="switch" title="开启后：先排除不可用接口（用量用尽 / RPM·TPM 触顶），再在可用接口中按调用延迟从低到高优先调用（不改变下方显示顺序）">
+          <label class="switch" title="开启后：先排除不可用接口（用量用尽 / RPM·TPM 触顶），再在可用接口中按调用延迟从低到高优先调用（不改变下方显示顺序）">
             <input type="checkbox" ${pool.auto_order ? 'checked' : ''} onchange="toggleAutoOrder('${name}', this.checked)">
             <span class="track"></span>
             <span class="sw-label">自动择优</span>
-          </label>` : '<span class="badge b-openai">自动择优</span>'}
+          </label>
           <button class="btn btn-ghost btn-sm" onclick="speedPool('${name}')">⚡ 测速本池</button>
           ${isAuto ? `<button class="btn btn-amber btn-sm" onclick="toggleSingleMode('${name}')" id="single-btn-${name}" title="开启后，auto池只使用选定的单个模型；关闭后恢复正常。池内布局不变。">🎯 一键单模型</button><span class="badge b-openai">内置</span>` : (isFallback ? '' : `<button class="btn btn-ghost btn-sm" onclick="renamePool('${name}')">✏️ 重命名</button><button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`)}
         </div>
@@ -813,7 +813,7 @@ function bindPoolDrag() {
       // auto always stays first; collect order of non-auto pools
       const container = document.getElementById('pool-list');
       const autoCard = container.querySelector('.card[data-pool-card="auto"]');
-      const fbCard = container.querySelector('.card[data-pool-card="__fallback__"]');
+      const fbCard = container.querySelector('.card[data-pool-card="兜底池"]');
       const ordered = [...container.querySelectorAll('.card[data-pool-card]')]
         .filter(c => c !== autoCard && c !== fbCard)
         .map(c => c.dataset.poolCard);

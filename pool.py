@@ -120,22 +120,25 @@ class ModelPool:
                 "strategy": pool_cfg.get("strategy", "sequential"),
             }
 
-        # Auto-create __fallback__ pool: contains ALL models, auto_order, survives reloads
-        all_model_ids = list(self.registry.keys())
-        if "__fallback__" not in self.pools:
-            self.pools["__fallback__"] = {
-                "model_ids": all_model_ids,
-                "auto_order": True,
+        # Auto-create 兜底池 (fallback pool): empty by default, user manually adds models.
+        # Migrate legacy __fallback__ to 兜底池 if present.
+        legacy_pool = self.pools.pop("__fallback__", None)
+        if "兜底池" not in self.pools:
+            self.pools["兜底池"] = {
+                "model_ids": (legacy_pool or {}).get("model_ids", []),
+                "auto_order": (legacy_pool or {}).get("auto_order", False),
                 "fallback_pool": None,
+                "strategy": (legacy_pool or {}).get("strategy", "sequential"),
             }
-        else:
-            # Keep __fallback__ model_ids in sync with current registry
-            self.pools["__fallback__"]["model_ids"] = all_model_ids
-            self.pools["__fallback__"]["auto_order"] = True
+            # Persist the migration so config.json stays in sync
+            if "pools" in self.config:
+                self.config["pools"].pop("__fallback__", None)
+                self.config["pools"]["兜底池"] = self.pools["兜底池"]
+                save_config(self.config)
 
-        # Ensure auto pool always has fallback_pool pointing to __fallback__
+        # Ensure auto pool always has fallback_pool pointing to 兜底池
         if "auto" in self.pools and not self.pools["auto"].get("fallback_pool"):
-            self.pools["auto"]["fallback_pool"] = "__fallback__"
+            self.pools["auto"]["fallback_pool"] = "兜底池"
 
         # Restore single_override from config so it survives reloads
         self.single_override = {

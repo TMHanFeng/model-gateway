@@ -285,7 +285,7 @@ async def delete_provider(provider_id: str, _=Depends(verify_admin)):
 @router.get("/pools")
 async def get_pools(_=Depends(verify_admin)):
     from main import pool
-    # Return from in-memory pool.pools (includes auto-created __fallback__)
+    # Return from in-memory pool.pools (includes auto-created 兜底池)
     return {"pools": pool.pools}
 
 
@@ -318,7 +318,7 @@ async def create_pool(request: Request, _=Depends(verify_admin)):
 
 @router.delete("/pools/{pool_name:path}")
 async def delete_pool(pool_name: str, _=Depends(verify_admin)):
-    if pool_name in ("auto", "__fallback__"):
+    if pool_name in ("auto", "兜底池"):
         raise HTTPException(status_code=400, detail=f"Pool '{pool_name}' cannot be deleted")
 
     config = load_config()
@@ -344,12 +344,12 @@ async def reorder_pools(request: Request, _=Depends(verify_admin)):
     config = load_config()
     pools = config.get("pools", {})
 
-    # auto must always be first; __fallback__ goes last
+    # auto must always be first; 兜底池 goes last
     ordered = ["auto"]
     for name in pool_names:
-        if name not in ("auto", "__fallback__") and name in pools:
+        if name not in ("auto", "兜底池") and name in pools:
             ordered.append(name)
-    ordered.append("__fallback__")
+    ordered.append("兜底池")
 
     # Rewrite pools dict in new order
     new_pools = {}
@@ -387,6 +387,8 @@ async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin))
 
 @router.post("/pools/{pool_name:path}/rename")
 async def rename_pool(pool_name: str, request: Request, _=Depends(verify_admin)):
+    if pool_name in ("auto", "兜底池"):
+        raise HTTPException(status_code=400, detail=f"Pool '{pool_name}' cannot be renamed")
     body = await request.json()
     new_name = (body.get("new_name") or "").strip()
     if not new_name:
