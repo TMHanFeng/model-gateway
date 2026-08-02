@@ -394,11 +394,10 @@ async def set_single_override(pool_name: str, request: Request, _=Depends(verify
     if model_id not in pool.registry:
         raise HTTPException(status_code=400, detail=f"Model '{model_id}' not found in registry")
 
-    # Verify model is actually in this pool (directly or via sub-pool)
-    pool_cfg = pool.pools.get(pool_name, {})
-    model_ids = pool_cfg.get("model_ids", [])
-    if model_id not in model_ids and not any(m.startswith("pool:") for m in model_ids):
-        raise HTTPException(status_code=400, detail=f"Model '{model_id}' is not in pool '{pool_name}'")
+    # Verify model is reachable from this pool (directly or via sub-pools)
+    reachable = pool._collect_pool_models(pool_name)
+    if model_id not in reachable:
+        raise HTTPException(status_code=400, detail=f"Model '{model_id}' is not reachable from pool '{pool_name}'")
 
     pool.single_override[pool_name] = model_id
     return {"ok": True, "pool_name": pool_name, "model_id": model_id}

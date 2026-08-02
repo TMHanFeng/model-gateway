@@ -303,6 +303,21 @@ class ModelPool:
                 best = child
         return best
 
+    def _collect_pool_models(self, pool_name: str, visiting: set | None = None) -> list[str]:
+        """Recursively collect all model IDs reachable from a pool (including sub-pools)."""
+        visiting = visiting or set()
+        if pool_name in visiting:
+            return []
+        visiting = visiting | {pool_name}
+        meta = self.pools.get(pool_name) or {}
+        models = []
+        for raw in meta.get("model_ids", []):
+            if raw.startswith("pool:"):
+                models.extend(self._collect_pool_models(raw[5:], visiting))
+            elif raw in self.registry:
+                models.append(raw)
+        return models
+
     async def _select_from_pool(self, pool_name: str, estimated_tokens: int = 0, exclude: set | None = None, has_images: bool = False, visiting: set | None = None):
         exclude = exclude or set()
         visiting = visiting or set()
