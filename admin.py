@@ -316,7 +316,7 @@ async def create_pool(request: Request, _=Depends(verify_admin)):
     return {"ok": True, "pool": pools[name]}
 
 
-@router.delete("/pools/{pool_name:path}")
+@router.delete("/pools/{pool_name}")
 async def delete_pool(pool_name: str, _=Depends(verify_admin)):
     if pool_name in ("auto", "兜底池"):
         raise HTTPException(status_code=400, detail=f"Pool '{pool_name}' cannot be deleted")
@@ -362,7 +362,7 @@ async def reorder_pools(request: Request, _=Depends(verify_admin)):
     return {"ok": True, "pools": list(new_pools.keys())}
 
 
-@router.put("/pools/{pool_name:path}")
+@router.put("/pools/{pool_name}")
 async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin)):
     body = await request.json()
     model_ids = body.get("model_ids")
@@ -385,7 +385,7 @@ async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin))
     return {"ok": True, "pool": pools[pool_name]}
 
 
-@router.post("/pools/{pool_name:path}/rename")
+@router.post("/pools/{pool_name}/rename")
 async def rename_pool(pool_name: str, request: Request, _=Depends(verify_admin)):
     if pool_name in ("auto", "兜底池"):
         raise HTTPException(status_code=400, detail=f"Pool '{pool_name}' cannot be renamed")
