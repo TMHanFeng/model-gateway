@@ -510,6 +510,14 @@ class ModelPool:
             r["provider"] = entry.provider
             if r.get("status") == "ok" and r.get("latency_ms") is not None:
                 self._record_latency(entry, r["latency_ms"])
+                # Record usage from speed test
+                tokens = r.get("tokens", 0)
+                if tokens > 0:
+                    if entry.token_type == "one_time":
+                        await db.add_one_time_usage(entry.id, tokens)
+                    else:
+                        await db.add_daily_usage(entry.id, tokens)
+                    r["usage_recorded"] = tokens
             return r
 
         tasks = [test_one(mid) for mid in targets]

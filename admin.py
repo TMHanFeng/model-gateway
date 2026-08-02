@@ -61,12 +61,20 @@ async def add_model(request: Request, _=Depends(verify_admin)):
                 raise HTTPException(status_code=400, detail=f"Missing field: {field}")
 
     models = config.get("models", [])
+    raw_id = (body.get("id") or "").strip()
+    if not raw_id:
+        raise HTTPException(status_code=400, detail="Missing field: id")
+    if "/" in raw_id or "\\" in raw_id:
+        raise HTTPException(status_code=400, detail="模型ID中不能包含 / 或 \\ 字符")
+
+    # When adding under a provider, prefix the model ID with provider name
+    final_id = f"{pid}/{raw_id}" if pid else raw_id
     for m in models:
-        if m["id"] == body["id"]:
-            raise HTTPException(status_code=409, detail=f"Model id '{body['id']}' already exists")
+        if m["id"] == final_id:
+            raise HTTPException(status_code=409, detail=f"模型ID '{final_id}' 已存在")
 
     entry = {
-        "id": body["id"],
+        "id": final_id,
         "name": body["name"],
         "daily_token_limit": body.get("daily_token_limit", 0),
         "rpm_limit": body.get("rpm_limit", 0),
@@ -226,6 +234,28 @@ async def update_provider(provider_id: str, request: Request, _=Depends(verify_a
     return {"ok": True, "provider": providers[idx]}
 
 
+@router.put("/providers/reorder")
+async def reorder_providers(request: Request, _=Depends(verify_admin)):
+    """Reorder providers. Body: {provider_ids: ['id1', 'id2', ...]}"""
+    body = await request.json()
+    new_order = body.get("provider_ids", [])
+    if not isinstance(new_order, list):
+        raise HTTPException(status_code=400, detail="provider_ids must be a list")
+
+    config = load_config()
+    providers = config.get("providers", [])
+    existing_ids = {p["id"] for p in providers}
+    if set(new_order) != existing_ids:
+        raise HTTPException(status_code=400, detail="provider_ids must contain exactly all existing provider IDs")
+
+    # Rebuild providers list in new order
+    by_id = {p["id"]: p for p in providers}
+    config["providers"] = [by_id[pid] for pid in new_order]
+    save_config(config)
+    restart_scheduler()
+    return {"ok": True}
+
+
 @router.delete("/providers/{provider_id:path}")
 async def delete_provider(provider_id: str, _=Depends(verify_admin)):
     config = load_config()
@@ -382,8 +412,13 @@ async def test_model(request: Request, _=Depends(verify_admin)):
         provider = AnthropicProvider(base_url, api_key)
     else:
         provider = OpenAIProvider(base_url, api_key)
+    import database as db
     try:
         result = await provider.speedtest(model_name)
+        # Record usage for stats even on test calls
+        if result.get("status") == "ok" and result.get("tokens", 0) > 0:
+            test_id = f"__test__{model_name}"
+            await db.add_daily_usage(test_id, result["tokens"])
         return {"ok": True, "result": result}
     finally:
         await provider.close()

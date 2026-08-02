@@ -506,15 +506,16 @@ async function loadModels() {
     html = '<div class="hint">暂无模型。点击右上角「添加供应商」后在其下添加模型，或「添加独立模型」。</div>';
   }
   document.getElementById('model-list').innerHTML = html;
+  bindProviderDrag();
 }
 
 function providerCardHTML(p, pmodels, i) {
   const masked = p.api_key ? (esc(p.api_key.slice(0, 6)) + '****') : '—';
   return `
-    <div class="card provider-card" style="animation-delay:${i * 40}ms">
+    <div class="card provider-card" draggable="true" data-prov-id="${esc(p.id)}" style="animation-delay:${i * 40}ms">
       <div class="card-head">
         <div>
-          <div class="card-title">🔌 ${esc(p.name)}<span class="provider-id-tag">${esc(p.id)}</span></div>
+          <div class="card-title"><span class="drag-handle" title="拖拽排序">⠿</span> 🔌 ${esc(p.name)}<span class="provider-id-tag">${esc(p.id)}</span></div>
           <div class="card-sub">${esc(p.base_url)} · key: ${masked}</div>
         </div>
         <div class="btn-row">
@@ -729,6 +730,42 @@ function bindDrag() {
       renumber(container);
       const ok = await api(poolPath(poolName), { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
       if (ok) { api('/admin/reload', { method: 'POST' }); toast('优先级已更新'); }
+    });
+  });
+}
+
+let provDragSrc = null;
+
+function bindProviderDrag() {
+  document.querySelectorAll('.provider-card[draggable]').forEach(el => {
+    el.addEventListener('dragstart', e => {
+      provDragSrc = el;
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      provDragSrc = null;
+      document.querySelectorAll('.provider-card').forEach(x => x.classList.remove('drag-over'));
+    });
+    el.addEventListener('dragover', e => {
+      e.preventDefault();
+      if (!provDragSrc || el === provDragSrc) return;
+      const container = document.getElementById('model-list');
+      const siblings = [...container.querySelectorAll('.provider-card:not(.dragging)')];
+      const next = siblings.find(child => {
+        const box = child.getBoundingClientRect();
+        return e.clientY < box.top + box.height / 2;
+      });
+      if (next) container.insertBefore(provDragSrc, next);
+      else container.appendChild(provDragSrc);
+    });
+    el.addEventListener('drop', async e => {
+      e.preventDefault();
+      if (!provDragSrc) return;
+      const ids = [...document.querySelectorAll('.provider-card[draggable]')].map(n => n.dataset.provId);
+      const ok = await api('/admin/providers/reorder', { method: 'PUT', body: JSON.stringify({ provider_ids: ids }) });
+      if (ok) { toast('供应商顺序已更新'); loadModels(); }
     });
   });
 }
@@ -962,6 +999,7 @@ async function showAddUnder(pid) {
   document.getElementById('mform').reset();
   document.getElementById('f-model-id').disabled = false;
   await populateProviderSelect(pid);
+  document.getElementById('f-model-id').placeholder = '例如: glm-4.7-flash（供应商将自动前缀）';
   onBillingChange(); onProviderSelect();
   onTokenTypeChange();
   document.getElementById('overlay').classList.add('show');
