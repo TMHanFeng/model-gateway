@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import HTMLResponse
 from pathlib import Path
+import subprocess
 from pool import load_config, save_config
 from scheduler import restart_scheduler
 from providers.openai_provider import OpenAIProvider
@@ -9,6 +10,34 @@ from providers.anthropic_provider import AnthropicProvider
 router = APIRouter(prefix="/admin")
 
 FRONTEND_PATH = Path(__file__).parent / "static" / "index.html"
+REPO_DIR = Path(__file__).parent
+
+
+def get_gateway_version() -> str:
+    """获取网关版本：优先最近的 git tag 并附短 commit hash，失败回退 unknown"""
+    version = ""
+    commit = ""
+    try:
+        r = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            capture_output=True, text=True, timeout=5, cwd=str(REPO_DIR),
+        )
+        if r.returncode == 0:
+            version = r.stdout.strip()
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, cwd=str(REPO_DIR),
+        )
+        if r.returncode == 0:
+            commit = r.stdout.strip()
+    except Exception:
+        pass
+    if version and commit:
+        return f"{version} · {commit}"
+    return version or commit or "unknown"
 
 
 def _sync_pool():
@@ -31,7 +60,8 @@ def verify_admin(request: Request):
 
 @router.get("/", response_class=HTMLResponse)
 async def admin_page():
-    return FRONTEND_PATH.read_text(encoding="utf-8")
+    html = FRONTEND_PATH.read_text(encoding="utf-8")
+    return html.replace("__GATEWAY_VERSION__", get_gateway_version())
 
 
 @router.get("/models")
