@@ -63,9 +63,15 @@ running = True
 last_git_check = 0
 is_updating = False
 update_progress = ""
-selected_source = "auto"
+selected_source = "auto"  # "auto" / "github" / "gitee" / "gitee_first"
 version_cache = {}
 VERSION_CACHE_TTL = 60
+
+# ── 全局版本缓存（后台线程写，前端秒读） ──
+_global_version_cache = {
+    "gitee": "—", "gitee_date": None,
+    "github": "—", "github_date": None,
+}
 
 # ── 网页仪表盘 HTML ──────────────────────────────────────────────────
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -1136,51 +1142,51 @@ def handle_api_request(conn):
             response_body = json.dumps(result, ensure_ascii=False)
 
         elif path == "/remote-versions":
-            # 并行查询：Gitee快速先回，GitHub慢查询异步（最长120s）
             import threading as _t2
-            rv = {"gitee": "unknown", "github": "unknown", "gitee_date": None, "github_date": None, "latest": "", "has_update": False, "tags": [], "source": selected_source}
+            rv = {"gitee": "—", "github": "—", "gitee_date": None, "github_date": None, "latest": "", "has_update": False, "tags": [], "source": selected_source}
             def _gitee():
                 try:
                     t = get_remote_latest_tag("origin", timeout=30)
                     if t:
-                        rv["gitee"] = t
-                        rv["gitee_date"] = get_cached_tags_with_dates("origin")[0][1] if get_cached_tags_with_dates("origin") else None
+                        _global_version_cache["gitee"] = t
+                        gts = get_cached_tags_with_dates("origin")
+                        _global_version_cache["gitee_date"] = gts[0][1] if gts else None
                 except Exception as e:
                     log.error(f"Gitee版本查询失败: {e}")
             def _github():
                 try:
                     t = get_remote_latest_tag("github", timeout=120)
                     if t:
-                        rv["github"] = t
-                        rv["github_date"] = get_cached_tags_with_dates("github")[0][1] if get_cached_tags_with_dates("github") else None
+                        _global_version_cache["github"] = t
+                        hts = get_cached_tags_with_dates("github")
+                        _global_version_cache["github_date"] = hts[0][1] if hts else None
                 except Exception as e:
                     log.error(f"GitHub版本查询失败: {e}")
             def _tags():
                 try:
                     g = get_cached_tags_with_dates("origin")
                     h = get_cached_tags_with_dates("github")
-                    for t, dt in (g + h):
-                        rv["tags"].append({"tag": t, "date": dt, "src": "gitee" if t in str(g) else "github"})
+                    rv["gitee_tags"] = [{"tag": t, "date": dt, "src": "gitee"} for t, dt in g]
+                    rv["github_tags"] = [{"tag": t, "date": dt, "src": "github"} for t, dt in h]
+                    rv["tags"] = rv["gitee_tags"] + rv["github_tags"]
                     cur = get_current_version()
-                    for t, _ in g:
-                        if t > cur and t.startswith("v"):
+                    for t, _ in g + h:
+                        if t.startswith("v") and t > cur:
                             rv["has_update"] = True
                             rv["latest"] = t
-                            break
-                    for t, _ in h:
-                        if t > cur and t.startswith("v"):
-                            rv["has_update"] = True
-                            rv["latest"] = t
-                            break
                 except Exception:
                     pass
+            # 启动后台线程（不影响上次的缓存读取）
             t_g = _t2.Thread(target=_gitee, daemon=True); t_g.start()
             t_h = _t2.Thread(target=_github, daemon=True); t_h.start()
             t_t = _t2.Thread(target=_tags, daemon=True); t_t.start()
             t_g.join(timeout=35)
-            t_t.join(timeout=5)
-            # GitHub 在后台慢慢查（最长120s），不阻塞本次返回
-            t_h.join(timeout=0.01)
+            t_t.join(timeout=8)
+            # 读缓存：第一次加载可能暂无，之后都秒读
+            rv["gitee"] = _global_version_cache["gitee"]
+            rv["gitee_date"] = _global_version_cache["gitee_date"]
+            rv["github"] = _global_version_cache["github"]
+            rv["github_date"] = _global_version_cache["github_date"]
             response_body = json.dumps(rv, ensure_ascii=False)
 
         elif path in ("/updater", "/dashboard"):
