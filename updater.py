@@ -124,12 +124,12 @@ body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background
     <div class="row"><span class="label">服务状态</span><span class="value __SC__" id="svc-status">__SV__</span></div>
     <div class="row"><span class="label">API 健康</span><span class="value __AC__" id="api-status">__AV__</span></div>
     <div class="row"><span class="label">当前版本</span><span class="value neutral" id="cur-ver">__CU__</span></div>
-    <div class="row"><span class="label">Gitee 版本</span><span class="value neutral" id="gitee-ver">__GVR__</span></div>
-    <div class="row"><span class="label">GitHub 版本</span><span class="value neutral" id="github-ver">__HVR__</span></div>
-    <div class="row"><span class="label">最新版本</span><span class="value upd" id="lat-ver">__LA__</span></div>
+    <div class="row"><span class="label">Gitee 版本</span><span class="value neutral" id="gitee-ver">加载中...</span></div>
+    <div class="row"><span class="label">GitHub 版本</span><span class="value neutral" id="github-ver">加载中...</span></div>
+    <div class="row"><span class="label">最新版本</span><span class="value upd" id="lat-ver">加载中...</span></div>
     <div class="row"><span class="label">更新源</span><select class="sel" id="src-select" onchange="selectSource()"><option value="auto">自动（GitHub 优先）</option><option value="github">GitHub</option><option value="gitee">Gitee</option><option value="gitee_first">Gitee 优先</option></select></div>
     <div class="row"><span class="label">可用版本</span><select class="sel" id="ver-select"><option value="">加载中...</option></select></div>
-    <div class="row"><span class="label">更新状态</span><span class="value neutral" id="upd-text">__UT__</span></div>
+    <div class="row"><span class="label">更新状态</span><span class="value neutral" id="upd-text">加载中...</span></div>
     <div class="row"><span class="label">Tailscale</span><span class="value neutral" id="ts-ip">__TI__</span></div>
   </div>
   <div class="progress" id="progress">__UP__</div>
@@ -139,6 +139,7 @@ body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background
     <button class="btn btn-green" onclick="doAction('restart')" id="btn-restart">&#x1f501; 重启网关</button>
     <button class="btn btn-red" onclick="doAction('stop')" id="btn-stop">&#x23f9; 停止网关</button>
     <button class="btn btn-ghost" onclick="doAction('start')" id="btn-start">&#x25b6; 启动网关</button>
+    <button class="btn btn-ghost" onclick="refreshVersions()" id="btn-refresh" title="重新查询远程版本">&#x1f504; 刷新版本</button>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -150,20 +151,21 @@ function hideProgress(){document.getElementById('progress').classList.remove('sh
 function setBusy(b){document.querySelectorAll('.actions .btn').forEach(function(x){x.disabled=b});if(b)startPoll();else stopPoll()}
 function startPoll(){if(pollTimer)return;pollTimer=setInterval(fetchStatus,2000)}
 function stopPoll(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
-async function fetchStatus(){try{var r=await fetch('/status');if(!r.ok)return;var d=await r.json();document.getElementById('svc-status').textContent=d.service_active?'运行中':'已停止';document.getElementById('svc-status').className='value '+(d.service_active?'ok':'err');document.getElementById('api-status').textContent=d.api_healthy?'正常':'异常';document.getElementById('api-status').className='value '+(d.api_healthy?'ok':'err');document.getElementById('cur-ver').textContent=d.git.current+(d.git.commit?' · '+d.git.commit:'');document.getElementById('gitee-ver').textContent=(d.git.gitee_version&&d.git.gitee_version!=='unknown'?d.git.gitee_version:'—')+(d.git.gitee_date?' · '+String(d.git.gitee_date).slice(0,16):'');document.getElementById('github-ver').textContent=(d.git.github_version&&d.git.github_version!=='unknown'?d.git.github_version:'—')+(d.git.github_date?' · '+String(d.git.github_date).slice(0,16):'');document.getElementById('lat-ver').textContent=d.git.latest;document.getElementById('upd-text').textContent=d.git.has_update?'🔄 有可用更新':'✅ 已是最新';document.getElementById('clock').textContent=d.timestamp.slice(0,19).replace('T',' ');var srcEl=document.getElementById('src-select');if(d.git.source&&srcEl.value!==d.git.source)srcEl.value=d.git.source;if(d.is_updating){showProgress(d.update_progress||'更新中...');setBusy(true)}else{hideProgress();setBusy(false)}}catch(e){}}
+async function fetchStatus(){try{var r=await fetch('/status');if(!r.ok)return;var d=await r.json();document.getElementById('svc-status').textContent=d.service_active?'运行中':'已停止';document.getElementById('svc-status').className='value '+(d.service_active?'ok':'err');document.getElementById('api-status').textContent=d.api_healthy?'正常':'异常';document.getElementById('api-status').className='value '+(d.api_healthy?'ok':'err');document.getElementById('cur-ver').textContent=d.git.current+(d.git.commit?' · '+d.git.commit:'');document.getElementById('clock').textContent=d.timestamp.slice(0,19).replace('T',' ');var srcEl=document.getElementById('src-select');if(d.git.source&&srcEl.value!==d.git.source)srcEl.value=d.git.source;if(d.is_updating){showProgress(d.update_progress||'更新中...');setBusy(true)}else{hideProgress();setBusy(false)}}catch(e){}}
+async function loadVersions(){try{var btn=document.getElementById('btn-refresh');btn.textContent='⏳ 查询中...';btn.disabled=true;var r=await fetch('/remote-versions');var d=await r.json();var giteeV=(d.gitee&&d.gitee!=='unknown'?d.gitee:'—');var giteeD=d.gitee_date?String(d.gitee_date).slice(0,16):'';document.getElementById('gitee-ver').textContent=giteeV+(giteeD?' · '+giteeD:'');var ghV=(d.github&&d.github!=='unknown'?d.github:'—');var ghD=d.github_date?String(d.github_date).slice(0,16):'';document.getElementById('github-ver').textContent=ghV+(ghD?' · '+ghD:'');document.getElementById('lat-ver').textContent=d.latest||'—';document.getElementById('upd-text').textContent=d.has_update?'🔄 有可用更新':'✅ 已是最新';var sel=document.getElementById('ver-select');if(d.tags&&d.tags.length>0){sel.innerHTML='';d.tags.forEach(function(v){var o=document.createElement('option');o.value=v.tag;o.textContent=v.tag+' ['+v.src+']'+(v.date?' · '+String(v.date).slice(0,16):'');sel.appendChild(o)})}else{sel.innerHTML='<option value="">暂无</option>'}var srcEl=document.getElementById('src-select');if(d.source&&srcEl.value!==d.source)srcEl.value=d.source}catch(e){document.getElementById('upd-text').textContent='⚠ 查询失败，可点击刷新重试'}finally{var btn=document.getElementById('btn-refresh');if(btn){btn.textContent='🔄 刷新版本';btn.disabled=false}}}
+function refreshVersions(){loadVersions()}
 async function doAction(action){if(action==='stop'&&!confirm('确定要停止网关服务吗？'))return;setBusy(true);showProgress('正在执行 '+action+' ...');try{var r=await fetch('/action/'+action);var d=await r.json();if(d.ok){toast('&#x2705; '+action+' 成功');showProgress(action+' 执行成功，正在等待服务就绪...');setTimeout(fetchStatus,1500)}else{toast('&#x274c; '+action+' 失败',true);hideProgress();setBusy(false)}}catch(e){toast('&#x274c; 请求失败: '+e,true);hideProgress();setBusy(false)}}
 function verKey(t){var m=String(t).match(/[vV]?([0-9]+(?:[.][0-9]+)*)/);if(!m)return 0;var a=m[1].split('.').map(function(n){return parseInt(n,10)||0});for(var i=0;i<3;i++){if(!a[i])a[i]=0}return a[0]*10000+a[1]*100+a[2]}
 function mergeVersions(d){var map={};(d.gitee||[]).forEach(function(v){map[v.tag]=v});(d.github||[]).forEach(function(v){if(map[v.tag]){map[v.tag].src='github/gitee'}else{map[v.tag]={tag:v.tag,date:v.date,src:'github'}}});return Object.keys(map).map(function(k){return map[k]}).sort(function(a,b){return verKey(b.tag)-verKey(a.tag)})}
-function renderVersions(d){var sel=document.getElementById('ver-select');if(!d||!((d.gitee&&d.gitee.length)||(d.github&&d.github.length))){sel.innerHTML='';var o=document.createElement('option');o.value='';o.textContent='暂无可用版本';sel.appendChild(o);return}sel.innerHTML='';mergeVersions(d).forEach(function(v){var o=document.createElement('option');o.value=v.tag;o.textContent=v.tag+' ['+v.src+']'+(v.date?' · '+String(v.date).slice(0,16):'');sel.appendChild(o)})}
-function loadVersions(){fetch('/versions').then(function(r){return r.json()}).then(renderVersions).catch(function(){})}
-async function selectSource(){var s=document.getElementById('src-select').value;try{var r=await fetch('/select-source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:s})});var d=await r.json();toast(d.ok?'&#x2705; 已切换更新源: '+s:'&#x274c; 切换更新源失败',!d.ok)}catch(e){toast('&#x274c; 请求失败: '+e,true)}}
+ async function selectSource(){var s=document.getElementById('src-select').value;try{var r=await fetch('/select-source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:s})});var d=await r.json();toast(d.ok?'&#x2705; 已切换更新源: '+s:'&#x274c; 切换更新源失败',!d.ok)}catch(e){toast('&#x274c; 请求失败: '+e,true)}}
 async function doRollback(){var sel=document.getElementById('ver-select');var tag=sel.value;if(!tag){toast('&#x274c; 请先选择版本',true);return}if(!confirm('确定要更新/回滚到版本 '+tag+' 吗？'))return;setBusy(true);showProgress('正在切换 '+tag+' ...');try{var r=await fetch('/rollback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:tag})});var d=await r.json();if(d.ok){toast('&#x2705; 已开始切换 '+tag);showProgress('切换任务已提交，等待服务就绪...');setTimeout(fetchStatus,1500)}else{toast('&#x274c; '+(d.error||'切换失败'),true);hideProgress();setBusy(false)}}catch(e){toast('&#x274c; 请求失败: '+e,true);hideProgress();setBusy(false)}}
+// 页面加载后：立即查询远程版本（异步，不阻塞）
 loadVersions();
 </script>
 </body>
 </html>"""
 
-def render_dashboard(svc_class, svc_text, api_class, api_text, current, latest, update_text, tailscale_ip, update_progress, timestamp, gitee="—", github="—", gitee_date=None, github_date=None, source="auto"):
+def render_dashboard(svc_class, svc_text, api_class, api_text, current, latest="加载中", update_text="加载中", tailscale_ip="—", update_progress="", timestamp="", gitee="—", github="—", gitee_date=None, github_date=None, source="auto"):
     h = DASHBOARD_HTML
     gitee_text = gitee if gitee and gitee != "—" else "—"
     if gitee_date:
@@ -363,12 +365,13 @@ def get_current_commit_short() -> str:
     return commit[:7] if commit else ""
 
 
-def get_remote_latest_tag(remote: str) -> str | None:
-    """获取远程最高的语义化版本 tag，远程不存在/不可达时返回 None"""
+def get_remote_latest_tag(remote: str, timeout: int = 30) -> str | None:
+    """获取远程最高的语义化版本 tag，远程不存在/不可达时返回 None。
+    timeout: 超时秒数（默认30，GitHub可设120）"""
     try:
         result = subprocess.run(
             ["git", "ls-remote", "--tags", remote],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=timeout,
             cwd=str(REPO_DIR),
         )
         if result.returncode != 0:
@@ -394,11 +397,12 @@ def get_remote_latest_tag(remote: str) -> str | None:
         return None
 
 
-def get_remote_versions() -> dict:
-    """获取 gitee(origin) / github 两个远程的最新版本 tag"""
+def get_remote_versions(github_timeout: int = 120, gitee_timeout: int = 30) -> dict:
+    """获取 gitee(origin) / github 两个远程的最新版本 tag。
+    GitHub 默认120秒超时，Gitee默认30秒"""
     return {
-        "gitee": get_remote_latest_tag("origin"),
-        "github": get_remote_latest_tag("github"),
+        "gitee": get_remote_latest_tag("origin", timeout=gitee_timeout),
+        "github": get_remote_latest_tag("github", timeout=github_timeout),
     }
 
 
@@ -1000,36 +1004,21 @@ def handle_api_request(conn):
         content_type = "application/json"
 
         if path == "/status" or path == "/":
-            # 完整状态报告（带超时保护）
-            inner = {}
-            git_status = {"current": "unknown", "latest": "unknown", "has_update": False, "commit": ""}
-            svc_active = api_healthy = False
-
-            def _get_status():
-                nonlocal inner, svc_active, api_healthy, git_status
-                inner = get_inner_address()
-                svc_active = is_service_active()
-                api_healthy = check_api_healthy()
-                versions = get_remote_versions()
-                has_update, cur, lat = has_updates_available(versions)
-                gitee_tags = get_cached_tags_with_dates("origin")
-                github_tags = get_cached_tags_with_dates("github")
-                git_status = {
-                    "current": cur,
-                    "latest": lat,
-                    "has_update": has_update,
-                    "commit": get_current_commit_short(),
-                    "gitee_version": versions.get("gitee") or "unknown",
-                    "github_version": versions.get("github") or "unknown",
-                    "gitee_date": gitee_tags[0][1] if gitee_tags else None,
-                    "github_date": github_tags[0][1] if github_tags else None,
-                    "source": selected_source,
-                }
-
-            t = _t.Thread(target=_get_status, daemon=True)
-            t.start()
-            t.join(timeout=15)
-
+            # 快速状态报告（不执行 git 查询，避免阻塞）
+            inner = get_inner_address()
+            svc_active = is_service_active()
+            api_healthy = check_api_healthy()
+            cur_ver = get_current_version()
+            commit = get_current_commit_short()
+            git_status = {
+                "current": cur_ver,
+                "latest": "请刷新版本",
+                "has_update": False,
+                "commit": commit,
+                "gitee_version": "加载中",
+                "github_version": "加载中",
+                "source": selected_source,
+            }
             response_body = json.dumps({
                 "service": "updater",
                 "inner_address": inner,
@@ -1146,33 +1135,72 @@ def handle_api_request(conn):
             t.join(timeout=40)
             response_body = json.dumps(result, ensure_ascii=False)
 
+        elif path == "/remote-versions":
+            # 并行查询：Gitee快速先回，GitHub慢查询异步（最长120s）
+            import threading as _t2
+            rv = {"gitee": "unknown", "github": "unknown", "gitee_date": None, "github_date": None, "latest": "", "has_update": False, "tags": [], "source": selected_source}
+            def _gitee():
+                try:
+                    t = get_remote_latest_tag("origin", timeout=30)
+                    if t:
+                        rv["gitee"] = t
+                        rv["gitee_date"] = get_cached_tags_with_dates("origin")[0][1] if get_cached_tags_with_dates("origin") else None
+                except Exception as e:
+                    log.error(f"Gitee版本查询失败: {e}")
+            def _github():
+                try:
+                    t = get_remote_latest_tag("github", timeout=120)
+                    if t:
+                        rv["github"] = t
+                        rv["github_date"] = get_cached_tags_with_dates("github")[0][1] if get_cached_tags_with_dates("github") else None
+                except Exception as e:
+                    log.error(f"GitHub版本查询失败: {e}")
+            def _tags():
+                try:
+                    g = get_cached_tags_with_dates("origin")
+                    h = get_cached_tags_with_dates("github")
+                    for t, dt in (g + h):
+                        rv["tags"].append({"tag": t, "date": dt, "src": "gitee" if t in str(g) else "github"})
+                    cur = get_current_version()
+                    for t, _ in g:
+                        if t > cur and t.startswith("v"):
+                            rv["has_update"] = True
+                            rv["latest"] = t
+                            break
+                    for t, _ in h:
+                        if t > cur and t.startswith("v"):
+                            rv["has_update"] = True
+                            rv["latest"] = t
+                            break
+                except Exception:
+                    pass
+            t_g = _t2.Thread(target=_gitee, daemon=True); t_g.start()
+            t_h = _t2.Thread(target=_github, daemon=True); t_h.start()
+            t_t = _t2.Thread(target=_tags, daemon=True); t_t.start()
+            t_g.join(timeout=35)
+            t_t.join(timeout=5)
+            # GitHub 在后台慢慢查（最长120s），不阻塞本次返回
+            t_h.join(timeout=0.01)
+            response_body = json.dumps(rv, ensure_ascii=False)
+
         elif path in ("/updater", "/dashboard"):
             status_code = 200
             content_type = "text/html; charset=utf-8"
             inner = get_inner_address()
-            versions = get_remote_versions()
-            has_update, current, latest = has_updates_available(versions)
+            cur_ver = get_current_version()
             commit = get_current_commit_short()
-            current_display = f"{current} · {commit}" if commit else current
+            current_display = f"{cur_ver} · {commit}" if commit else cur_ver
             svc_active = is_service_active()
             api_healthy = check_api_healthy()
-            gitee_tags = get_cached_tags_with_dates("origin")
-            github_tags = get_cached_tags_with_dates("github")
             response_body = render_dashboard(
                 svc_class="ok" if svc_active else "err",
                 svc_text="运行中" if svc_active else "已停止",
                 api_class="ok" if api_healthy else "err",
                 api_text="正常" if api_healthy else "异常",
                 current=current_display,
-                latest=latest,
-                update_text="🔄 有可用更新" if has_update else "✅ 已是最新",
                 tailscale_ip=inner.get("ip", "—"),
                 update_progress=update_progress or "",
                 timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                gitee=versions.get("gitee") or "—",
-                github=versions.get("github") or "—",
-                gitee_date=gitee_tags[0][1] if gitee_tags else None,
-                github_date=github_tags[0][1] if github_tags else None,
                 source=selected_source,
             )
 
