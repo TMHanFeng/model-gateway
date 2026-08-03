@@ -13,8 +13,7 @@ FRONTEND_PATH = Path(__file__).parent / "static" / "index.html"
 REPO_DIR = Path(__file__).parent
 
 
-def get_gateway_version() -> str:
-    """获取网关版本：优先最近的 git tag 并附短 commit hash，失败回退 unknown"""
+def _read_git_version() -> tuple[str, str]:
     version = ""
     commit = ""
     try:
@@ -35,9 +34,19 @@ def get_gateway_version() -> str:
             commit = r.stdout.strip()
     except Exception:
         pass
-    if version and commit:
-        return f"{version} · {commit}"
-    return version or commit or "unknown"
+    return version, commit
+
+
+# 进程启动时缓存一次，反映"真正运行的代码"版本（避免 git pull 后磁盘已更新、
+# 但进程仍是旧代码时误报新版本）
+GATEWAY_VERSION, GATEWAY_COMMIT = _read_git_version()
+
+
+def get_gateway_version() -> str:
+    """获取网关版本（进程启动时缓存的版本 + commit），失败回退 unknown"""
+    if GATEWAY_VERSION and GATEWAY_COMMIT:
+        return f"{GATEWAY_VERSION} · {GATEWAY_COMMIT}"
+    return GATEWAY_VERSION or GATEWAY_COMMIT or "unknown"
 
 
 def _sync_pool():

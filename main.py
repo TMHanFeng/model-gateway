@@ -6,7 +6,7 @@ from models import ChatCompletionRequest
 from pool import ModelPool, load_config
 from database import init_db, close_db
 from scheduler import start_scheduler
-from admin import router as admin_router
+from admin import router as admin_router, GATEWAY_VERSION, GATEWAY_COMMIT
 
 
 @asynccontextmanager
@@ -103,6 +103,11 @@ async def speedtest(request: Request, _=Depends(verify_key)):
 @app.get("/health")
 async def health():
     return {"status": "ok", "time": int(time.time())}
+
+
+@app.get("/version")
+async def version_info():
+    return {"version": GATEWAY_VERSION, "commit": GATEWAY_COMMIT}
 
 
 if __name__ == "__main__":

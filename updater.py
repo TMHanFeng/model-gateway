@@ -40,6 +40,11 @@ REQUEST_TIMEOUT = 5          # HTTP 请求超时（秒）
 TAILSCALE_CHECK_INTERVAL = 60 # Tailscale 状态检查间隔
 GIT_PULL_INTERVAL = 300      # 代码拉取间隔（秒），5分钟
 
+# Tailscale 保活
+TAILSCALED_SERVICE = "tailscaled"  # tailscaled systemd 服务名
+TS_FAIL_THRESHOLD = 3        # Tailscale 连续离线阈值
+TS_RESTART_COOLDOWN = 60     # Tailscale 保活冷却（秒）
+
 # 内网穿透地址（Tailscale 连接后自动获取）
 TAILSCALE_IFACE = "tailscale0"
 INNER_IP = None  # 运行时自动检测
@@ -59,6 +64,8 @@ log = logging.getLogger("updater")
 # ── 状态变量 ──────────────────────────────────────────────────────────
 consecutive_fails = 0
 last_restart_time = 0
+ts_consecutive_fails = 0
+last_ts_restart_time = 0
 running = True
 last_git_check = 0
 is_updating = False
@@ -129,7 +136,7 @@ body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background
   <div>
     <div class="row"><span class="label">服务状态</span><span class="value __SC__" id="svc-status">__SV__</span></div>
     <div class="row"><span class="label">API 健康</span><span class="value __AC__" id="api-status">__AV__</span></div>
-    <div class="row"><span class="label">当前版本</span><span class="value neutral" id="cur-ver">__CU__</span></div>
+    <div class="row"><span class="label">网关版本</span><span class="value neutral" id="cur-ver">__CU__</span></div>
     <div class="row"><span class="label">Gitee 版本</span><span class="value neutral" id="gitee-ver">加载中...</span></div>
     <div class="row"><span class="label">GitHub 版本</span><span class="value neutral" id="github-ver">加载中...</span></div>
     <div class="row"><span class="label">最新版本</span><span class="value upd" id="lat-ver">加载中...</span></div>
@@ -145,6 +152,7 @@ body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background
     <button class="btn btn-green" onclick="doAction('restart')" id="btn-restart">&#x1f501; 重启网关</button>
     <button class="btn btn-red" onclick="doAction('stop')" id="btn-stop">&#x23f9; 停止网关</button>
     <button class="btn btn-ghost" onclick="doAction('start')" id="btn-start">&#x25b6; 启动网关</button>
+    <button class="btn btn-ghost" onclick="restartTailscale()" id="btn-ts" title="Tailscale 离线时手动恢复">&#x1f4e1; 重启 Tailscale</button>
     <button class="btn btn-ghost" onclick="refreshVersions()" id="btn-refresh" title="重新查询远程版本">&#x1f504; 刷新版本</button>
   </div>
 </div>
@@ -157,10 +165,11 @@ function hideProgress(){document.getElementById('progress').classList.remove('sh
 function setBusy(b){document.querySelectorAll('.actions .btn').forEach(function(x){x.disabled=b});if(b)startPoll();else stopPoll()}
 function startPoll(){if(pollTimer)return;pollTimer=setInterval(fetchStatus,2000)}
 function stopPoll(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
-async function fetchStatus(){try{var r=await fetch('/status');if(!r.ok)return;var d=await r.json();document.getElementById('svc-status').textContent=d.service_active?'运行中':'已停止';document.getElementById('svc-status').className='value '+(d.service_active?'ok':'err');document.getElementById('api-status').textContent=d.api_healthy?'正常':'异常';document.getElementById('api-status').className='value '+(d.api_healthy?'ok':'err');document.getElementById('cur-ver').textContent=d.git.current+(d.git.commit?' · '+d.git.commit:'');document.getElementById('clock').textContent=d.timestamp.slice(0,19).replace('T',' ');var srcEl=document.getElementById('src-select');if(d.git.source&&srcEl.value!==d.git.source)srcEl.value=d.git.source;if(d.is_updating){showProgress(d.update_progress||'更新中...');setBusy(true)}else{hideProgress();setBusy(false)}}catch(e){}}
+async function fetchStatus(){try{var r=await fetch('/status');if(!r.ok)return;var d=await r.json();document.getElementById('svc-status').textContent=d.service_active?'运行中':'已停止';document.getElementById('svc-status').className='value '+(d.service_active?'ok':'err');document.getElementById('api-status').textContent=d.api_healthy?'正常':'异常';document.getElementById('api-status').className='value '+(d.api_healthy?'ok':'err');document.getElementById('cur-ver').textContent=d.git.current+(d.git.commit?' · '+d.git.commit:'');document.getElementById('clock').textContent=d.timestamp.slice(0,19).replace('T',' ');var tsEl=document.getElementById('ts-ip');if(tsEl){var tsOn=!!d.tailscale_online;var tsIp=d.inner_address&&d.inner_address.ip?d.inner_address.ip:'';tsEl.textContent=tsOn?(tsIp||'在线'):'离线';tsEl.className='value '+(tsOn?'ok':'err')}var srcEl=document.getElementById('src-select');if(d.git.source&&srcEl.value!==d.git.source)srcEl.value=d.git.source;if(d.is_updating){showProgress(d.update_progress||'更新中...');setBusy(true)}else{hideProgress();setBusy(false)}}catch(e){}}
 async function loadVersions(){try{var btn=document.getElementById('btn-refresh');btn.textContent='⏳ 查询中...';btn.disabled=true;var r=await fetch('/remote-versions');var d=await r.json();var giteeV=(d.gitee&&d.gitee!=='unknown'?d.gitee:'—');var giteeD=d.gitee_date?String(d.gitee_date).slice(0,16):'';document.getElementById('gitee-ver').textContent=giteeV+(giteeD?' · '+giteeD:'');var ghV=(d.github&&d.github!=='unknown'?d.github:'—');var ghD=d.github_date?String(d.github_date).slice(0,16):'';document.getElementById('github-ver').textContent=ghV+(ghD?' · '+ghD:'');document.getElementById('lat-ver').textContent=d.latest||'—';document.getElementById('upd-text').textContent=d.has_update?'🔄 有可用更新':'✅ 已是最新';var sel=document.getElementById('ver-select');if(d.tags&&d.tags.length>0){sel.innerHTML='';d.tags.forEach(function(v){var o=document.createElement('option');o.value=v.tag;o.textContent=v.tag+' ['+v.src+']'+(v.date?' · '+String(v.date).slice(0,16):'');sel.appendChild(o)})}else{sel.innerHTML='<option value="">暂无</option>'}var srcEl=document.getElementById('src-select');if(d.source&&srcEl.value!==d.source)srcEl.value=d.source}catch(e){document.getElementById('upd-text').textContent='⚠ 查询失败，可点击刷新重试'}finally{var btn=document.getElementById('btn-refresh');if(btn){btn.textContent='🔄 刷新版本';btn.disabled=false}}}
 function refreshVersions(){loadVersions()}
 async function doAction(action){if(action==='stop'&&!confirm('确定要停止网关服务吗？'))return;setBusy(true);showProgress('正在执行 '+action+' ...');try{var r=await fetch('/action/'+action);var d=await r.json();if(d.ok){toast('&#x2705; '+action+' 成功');showProgress(action+' 执行成功，正在等待服务就绪...');setTimeout(fetchStatus,1500)}else{toast('&#x274c; '+action+' 失败',true);hideProgress();setBusy(false)}}catch(e){toast('&#x274c; 请求失败: '+e,true);hideProgress();setBusy(false)}}
+async function restartTailscale(){if(!confirm('确定要重启 Tailscale 吗？'))return;setBusy(true);showProgress('正在恢复 Tailscale ...');try{var r=await fetch('/action/restart-tailscale');var d=await r.json();if(d.ok){toast('&#x2705; Tailscale 保活成功');hideProgress();setBusy(false);setTimeout(fetchStatus,3000)}else{toast('&#x274c; Tailscale 恢复失败',true);hideProgress();setBusy(false)}}catch(e){toast('&#x274c; 请求失败: '+e,true);hideProgress();setBusy(false)}}
 function verKey(t){var m=String(t).match(/[vV]?([0-9]+(?:[.][0-9]+)*)/);if(!m)return 0;var a=m[1].split('.').map(function(n){return parseInt(n,10)||0});for(var i=0;i<3;i++){if(!a[i])a[i]=0}return a[0]*10000+a[1]*100+a[2]}
 function mergeVersions(d){var map={};(d.gitee||[]).forEach(function(v){map[v.tag]=v});(d.github||[]).forEach(function(v){if(map[v.tag]){map[v.tag].src='github/gitee'}else{map[v.tag]={tag:v.tag,date:v.date,src:'github'}}});return Object.keys(map).map(function(k){return map[k]}).sort(function(a,b){return verKey(b.tag)-verKey(a.tag)})}
  async function selectSource(){var s=document.getElementById('src-select').value;try{var r=await fetch('/select-source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:s})});var d=await r.json();toast(d.ok?'&#x2705; 已切换更新源: '+s:'&#x274c; 切换更新源失败',!d.ok)}catch(e){toast('&#x274c; 请求失败: '+e,true)}}
@@ -223,6 +232,50 @@ def is_tailscale_online() -> bool:
         return self_info.get("Online", False)
     except Exception:
         return False
+
+
+def is_tailscale_active() -> bool:
+    """检查 tailscaled 守护进程服务是否处于 active（systemd 系统级或用户级）"""
+    for base in (
+        ["systemctl", "is-active", TAILSCALED_SERVICE],
+        ["systemctl", "--user", "is-active", TAILSCALED_SERVICE],
+    ):
+        try:
+            result = subprocess.run(base, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip() == "active":
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def restart_tailscale() -> bool:
+    """尝试恢复 Tailscale（保活）。依次尝试多种方式，返回是否成功。"""
+    global last_ts_restart_time
+    now = time.time()
+    if now - last_ts_restart_time < TS_RESTART_COOLDOWN:
+        log.warning(f"Tailscale 保活冷却期内（还剩 {int(TS_RESTART_COOLDOWN - (now - last_ts_restart_time))}s）")
+        return False
+
+    commands = [
+        ["sudo", "-n", "systemctl", "restart", TAILSCALED_SERVICE],
+        ["systemctl", "restart", TAILSCALED_SERVICE],
+        ["systemctl", "--user", "restart", TAILSCALED_SERVICE],
+        ["tailscale", "up"],
+    ]
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                log.info(f"✅ Tailscale 恢复命令执行成功: {' '.join(cmd)}")
+                time.sleep(8)
+                if is_tailscale_online():
+                    last_ts_restart_time = now
+                    return True
+        except Exception:
+            continue
+    last_ts_restart_time = now
+    return False
 
 
 def get_inner_address() -> dict:
@@ -371,6 +424,22 @@ def get_current_commit_short() -> str:
     return commit[:7] if commit else ""
 
 
+def get_gateway_running_version() -> dict:
+    """从正在运行的网关 /version 抓取真实版本（而非本地 git 状态）。
+    用于判断是否存在"假更新"：git 文件已更新但运行中的网关仍是旧代码。"""
+    try:
+        req = urllib.request.Request("http://127.0.0.1:8650/version")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return {
+                "reachable": True,
+                "version": data.get("version", "") or "",
+                "commit": data.get("commit", "") or "",
+            }
+    except Exception:
+        return {"reachable": False, "version": "", "commit": ""}
+
+
 def get_remote_latest_tag(remote: str, timeout: int = 30) -> str | None:
     """获取远程最高的语义化版本 tag，远程不存在/不可达时返回 None。
     timeout: 超时秒数（默认30，GitHub可设120）"""
@@ -501,11 +570,17 @@ def git_pull(remote: str = "origin", branch: str = "") -> tuple[bool, str, str]:
         return False, str(e), branch
 
 
-def has_updates_available(versions: dict | None = None) -> tuple[bool, str, str]:
-    """检查是否有可用更新（基于版本号判断，github 优先；无 tag 时回退 commit 比较）"""
+def has_updates_available(versions: dict | None = None, gw: dict | None = None) -> tuple[bool, str, str]:
+    """检查是否有可用更新（基于版本号判断，github 优先；无 tag 时回退 commit 比较）。
+    current 优先取"正在运行的网关"的真实版本（/version），网关不可达时回退本地 git 版本。"""
     if versions is None:
         versions = get_remote_versions()
-    current_ver = get_current_version()
+    if gw is None:
+        gw = get_gateway_running_version()
+    if gw["reachable"] and gw["version"]:
+        current_ver = gw["version"]
+    else:
+        current_ver = get_current_version()
     _, latest = pick_latest_version(versions)
 
     if latest:
@@ -796,38 +871,45 @@ def restart_service() -> bool:
 
 
 # ── 核心更新流程 ──────────────────────────────────────────────────────
-def perform_update() -> bool:
-    """执行完整更新流程"""
+def perform_update(force: bool = False) -> bool:
+    """执行完整更新流程。force=True 为手动「立即更新」：跳过是否有更新的判断，强制拉取并重启网关。"""
     global is_updating, update_progress
 
     is_updating = True
     update_progress = "开始更新..."
 
     try:
-        # 1. 检查 Tailscale
+        # 1. 检查 Tailscale（手动强制更新时仅告警，不阻断；网关更新本身不依赖内网穿透）
         update_progress = "检查内网穿透状态..."
         if not is_tailscale_online():
-            log.error("❌ Tailscale 离线，无法开始更新")
-            return False
+            if force:
+                log.warning("⚠️ Tailscale 离线，强制更新继续（网关更新不依赖内网穿透）")
+            else:
+                log.error("❌ Tailscale 离线，无法开始更新")
+                return False
 
         inner = get_inner_address()
         log.info(f"🌐 内网地址: {inner['address']} / {inner['dns']}")
 
-        # 2. 检查是否有更新
-        update_progress = "检查代码更新..."
-        has_update, current, latest = has_updates_available()
-        if not has_update:
-            log.info("✅ 当前已是最新版本")
-            return True
-
-        log.info(f"📦 发现新版本: {current} → {latest}")
+        # 2. 检查是否有更新（手动「立即更新」跳过该判断，直接拉取重启）
+        if not force:
+            update_progress = "检查代码更新..."
+            has_update, current, latest = has_updates_available()
+            if not has_update:
+                log.info("✅ 当前已是最新版本")
+                return True
+            log.info(f"📦 发现新版本: {current} → {latest}")
 
         # 3. 选择更新源远程（auto 时版本号优先 github）
         update_progress = "选择最新代码源..."
         remote, commit = resolve_update_source()
         if not remote:
-            log.error("❌ 无法获取远程代码")
-            return False
+            if force:
+                remote = "origin"
+                log.warning("⚠️ 无法自动选择远程，手动更新回退到 origin(gitee)")
+            else:
+                log.error("❌ 无法获取远程代码")
+                return False
         log.info(f"📥 选择远程: {remote} (commit: {commit[:8] or 'unknown'})")
 
         # 4. 停止服务
@@ -1014,13 +1096,15 @@ def handle_api_request(conn):
             inner = get_inner_address()
             svc_active = is_service_active()
             api_healthy = check_api_healthy()
-            cur_ver = get_current_version()
-            commit = get_current_commit_short()
+            gw = get_gateway_running_version()
+            cur_ver = gw["version"] if gw["reachable"] and gw["version"] else get_current_version()
+            commit = gw["commit"] if gw["reachable"] and gw["commit"] else get_current_commit_short()
             git_status = {
                 "current": cur_ver,
                 "latest": "请刷新版本",
                 "has_update": False,
                 "commit": commit,
+                "gateway_reachable": gw["reachable"],
                 "gitee_version": "加载中",
                 "github_version": "加载中",
                 "source": selected_source,
@@ -1028,6 +1112,7 @@ def handle_api_request(conn):
             response_body = json.dumps({
                 "service": "updater",
                 "inner_address": inner,
+                "tailscale_online": inner.get("online", False),
                 "service_active": svc_active,
                 "api_healthy": api_healthy,
                 "is_updating": is_updating,
@@ -1089,7 +1174,7 @@ def handle_api_request(conn):
                 response_body = json.dumps({"ok": False, "action": "update", "reason": "already_updating", "progress": update_progress})
             else:
                 import threading
-                thread = threading.Thread(target=perform_update, daemon=True)
+                thread = threading.Thread(target=perform_update, args=(True,), daemon=True)
                 thread.start()
                 response_body = json.dumps({"ok": True, "action": "update", "status": "update_started"})
 
@@ -1100,6 +1185,10 @@ def handle_api_request(conn):
         elif path == "/action/restart":
             ok = restart_service()
             response_body = json.dumps({"ok": ok, "action": "restart"})
+
+        elif path == "/action/restart-tailscale":
+            ok = restart_tailscale()
+            response_body = json.dumps({"ok": ok, "action": "restart-tailscale"})
 
         elif method == "POST" and path == "/select-source":
             src = "auto"
@@ -1132,7 +1221,9 @@ def handle_api_request(conn):
                 response_body = json.dumps({"ok": True, "status": "rollback_started", "tag": tag})
 
         elif path == "/versions":
-            result = {"github": [], "gitee": [], "current": get_current_version()}
+            gw = get_gateway_running_version()
+            current_ver = gw["version"] if gw["reachable"] and gw["version"] else get_current_version()
+            result = {"github": [], "gitee": [], "current": current_ver}
             def _versions():
                 result["github"] = get_remote_tags_with_dates("github")
                 result["gitee"] = get_remote_tags_with_dates("origin")
@@ -1169,7 +1260,8 @@ def handle_api_request(conn):
                     rv["gitee_tags"] = [{"tag": t, "date": dt, "src": "gitee"} for t, dt in g]
                     rv["github_tags"] = [{"tag": t, "date": dt, "src": "github"} for t, dt in h]
                     rv["tags"] = rv["gitee_tags"] + rv["github_tags"]
-                    cur = get_current_version()
+                    gw = get_gateway_running_version()
+                    cur = gw["version"] if gw["reachable"] and gw["version"] else get_current_version()
                     for t, _ in g + h:
                         if t.startswith("v") and t > cur:
                             rv["has_update"] = True
@@ -1193,8 +1285,9 @@ def handle_api_request(conn):
             status_code = 200
             content_type = "text/html; charset=utf-8"
             inner = get_inner_address()
-            cur_ver = get_current_version()
-            commit = get_current_commit_short()
+            gw = get_gateway_running_version()
+            cur_ver = gw["version"] if gw["reachable"] and gw["version"] else get_current_version()
+            commit = gw["commit"] if gw["reachable"] and gw["commit"] else get_current_commit_short()
             current_display = f"{cur_ver} · {commit}" if commit else cur_ver
             svc_active = is_service_active()
             api_healthy = check_api_healthy()
@@ -1271,12 +1364,13 @@ def health_check() -> dict:
 
 
 def main():
-    global consecutive_fails, running
+    global consecutive_fails, running, ts_consecutive_fails, last_ts_restart_time
 
     log.info("=" * 60)
     log.info("Model Gateway 更新服务启动")
     log.info(f"检测间隔: {CHECK_INTERVAL}s | 失败阈值: {FAIL_THRESHOLD} | 冷却期: {RESTART_COOLDOWN}s")
     log.info(f"Git检查间隔: {GIT_PULL_INTERVAL}s | 监控目标: {CHECK_URL}")
+    log.info(f"Tailscale保活: 阈值 {TS_FAIL_THRESHOLD} 次 | 冷却 {TS_RESTART_COOLDOWN}s")
     log.info("=" * 60)
 
     # 启动 API 服务器
@@ -1308,6 +1402,23 @@ def main():
             log.info(f"🔄 更新中... {update_progress}")
             time.sleep(CHECK_INTERVAL)
             continue
+
+        # ── Tailscale 保活：连续离线超过阈值则尝试恢复 ──
+        if not status["tailscale"]:
+            ts_consecutive_fails += 1
+            now = time.time()
+            if ts_consecutive_fails >= TS_FAIL_THRESHOLD and (now - last_ts_restart_time) >= TS_RESTART_COOLDOWN:
+                log.warning(f"⚠️ Tailscale 连续离线 {ts_consecutive_fails} 次，尝试保活恢复...")
+                if restart_tailscale():
+                    log.info("✅ Tailscale 保活成功")
+                    ts_consecutive_fails = 0
+                else:
+                    log.error("❌ Tailscale 保活失败，将在冷却后重试")
+                    ts_consecutive_fails = TS_FAIL_THRESHOLD - 1
+        else:
+            if ts_consecutive_fails > 0:
+                log.info(f"✅ Tailscale 已恢复（之前连续离线 {ts_consecutive_fails} 次）")
+            ts_consecutive_fails = 0
 
         if status["healthy"]:
             if consecutive_fails > 0:
