@@ -37,11 +37,15 @@ class ModelEntry:
     latency_ms: float | None = None
     cooldown_until: float = 0.0
     one_time_created_at: float | None = None
+    rolling5h_window_start: float | None = None
     semaphore: asyncio.Semaphore = field(default=None, repr=False)
 
     def __post_init__(self):
         if self.semaphore is None:
             self.semaphore = asyncio.Semaphore(self.max_concurrency)
+
+
+ROLLING_5H_SECONDS = 5 * 3600
 
 
 def load_config() -> dict:
@@ -264,6 +268,14 @@ class ModelPool:
             if entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
                 await db.expire_one_time(entry.id)
                 return False, "one_time_expired"
+        elif entry.token_type == "rolling_5h":
+            state = await db.get_5h_state(entry.id)
+            if state is not None and (now - state["window_start"]) < ROLLING_5H_SECONDS:
+                entry.rolling5h_window_start = state["window_start"]
+                if entry.daily_token_limit > 0 and state["used_amount"] >= entry.daily_token_limit:
+                    return False, "quota_exhausted"
+            else:
+                entry.rolling5h_window_start = None
         elif entry.daily_token_limit > 0:
             used = await db.get_daily_usage(entry.id)
             if used >= entry.daily_token_limit:
@@ -333,6 +345,10 @@ class ModelPool:
                     return max(0.0, entry.one_time_created_at + entry.ttl_seconds - now)
                 return float(entry.ttl_seconds)  # not started yet — treat full TTL as remaining
             return float("inf")
+        if entry.token_type == "rolling_5h":
+            if entry.rolling5h_window_start is not None:
+                return max(0.0, entry.rolling5h_window_start + ROLLING_5H_SECONDS - now)
+            return float(ROLLING_5H_SECONDS)
         # daily model: quota is lost at the next refresh
         if entry.refresh_time and entry.daily_token_limit > 0:
             try:
@@ -467,6 +483,15 @@ class ModelPool:
         else:
             entry.latency_ms = round(0.7 * entry.latency_ms + 0.3 * ms, 1)
 
+    async def _charge_rolling_5h(self, entry: ModelEntry, amount: int):
+        """5h 滚动窗口计费：窗口过期（或首次）则重置并开启新窗口，再累加用量"""
+        state = await db.get_5h_state(entry.id)
+        now = time.time()
+        if state is None or (now - state["window_start"]) >= ROLLING_5H_SECONDS:
+            await db.reset_5h_window(entry.id)
+            entry.rolling5h_window_start = now
+        await db.add_5h_usage(entry.id, amount)
+
     async def execute(self, entry: ModelEntry, req) -> tuple:
         provider = self._get_provider(entry)
         t0 = time.perf_counter()
@@ -487,6 +512,9 @@ class ModelPool:
             state = await db.get_one_time_state(entry.id)
             if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
                 await db.expire_one_time(entry.id)
+        elif entry.token_type == "rolling_5h":
+            charge = 1 if entry.billing_mode == "request" else tokens_used
+            await self._charge_rolling_5h(entry, charge)
         else:
             charge = 1 if entry.billing_mode == "request" else tokens_used
             await db.add_daily_usage(entry.id, charge)
@@ -501,6 +529,8 @@ class ModelPool:
         # undercounted TPM for every streamed call.
         if entry.token_type == "daily" and entry.billing_mode == "request":
             await db.add_daily_usage(entry.id, 1)
+        elif entry.token_type == "rolling_5h" and entry.billing_mode == "request":
+            await self._charge_rolling_5h(entry, 1)
         raw = provider.chat_stream(req, entry.name)
         return self._wrap_stream(entry, raw, t0)
 
@@ -526,6 +556,9 @@ class ModelPool:
                     state = await db.get_one_time_state(entry.id)
                     if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
                         await db.expire_one_time(entry.id)
+                elif entry.token_type == "rolling_5h":
+                    if entry.billing_mode == "token":
+                        await self._charge_rolling_5h(entry, captured)
                 elif entry.billing_mode == "token":
                     await db.add_daily_usage(entry.id, captured)
 
@@ -668,6 +701,8 @@ class ModelPool:
                 if tokens > 0:
                     if entry.token_type == "one_time":
                         await db.add_one_time_usage(entry.id, tokens)
+                    elif entry.token_type == "rolling_5h":
+                        await self._charge_rolling_5h(entry, tokens)
                     else:
                         await db.add_daily_usage(entry.id, tokens)
                     r["usage_recorded"] = tokens
@@ -709,6 +744,20 @@ class ModelPool:
                     s["used_tokens"] = 0
                     s["max_tokens"] = entry.max_tokens
                     s["expired"] = False
+            elif entry.token_type == "rolling_5h":
+                state = await db.get_5h_state(entry.id)
+                now = time.time()
+                if state and (now - state["window_start"]) < ROLLING_5H_SECONDS:
+                    used = state["used_amount"]
+                    remaining = int(ROLLING_5H_SECONDS - (now - state["window_start"]))
+                else:
+                    used = 0
+                    remaining = ROLLING_5H_SECONDS
+                s["daily_used_tokens"] = used
+                s["daily_token_limit"] = entry.daily_token_limit
+                s["daily_remaining"] = max(0, entry.daily_token_limit - used) if entry.daily_token_limit > 0 else -1
+                s["refresh_time"] = ""
+                s["window_remaining_sec"] = remaining
             else:
                 used = await db.get_daily_usage(entry.id)
                 s["daily_used_tokens"] = used

@@ -89,6 +89,7 @@ body {
 .b-openai { background: var(--teal-dim); color: var(--teal); border: 1px solid rgba(45,212,191,.3); }
 .b-anthropic { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(245,165,36,.3); }
 .b-once { background: var(--violet-dim); color: var(--violet); border: 1px solid rgba(167,139,250,.3); }
+.b-5h { background: rgba(56,189,248,.12); color: #38bdf8; border: 1px solid rgba(56,189,248,.3); }
 .b-free { background: var(--teal-dim); color: var(--teal); border: 1px solid rgba(45,212,191,.3); }
 .b-paid { background: var(--red-dim); color: var(--red); border: 1px solid rgba(248,113,113,.3); }
 .b-vision { background: rgba(56,189,248,.12); color: #38bdf8; border: 1px solid rgba(56,189,248,.3); }
@@ -389,7 +390,7 @@ body {
       </div>
       <div id="inherit-note" class="auto-note" style="display:none">该模型继承所属供应商的协议 / Base URL / API Key，无需在此填写。</div>
       <div class="f2">
-        <div class="fg"><label>令牌类型</label><select name="token_type" id="f-token-type" onchange="onTokenTypeChange()"><option value="daily">daily（每日刷新）</option><option value="one_time">one_time（一次性）</option></select></div>
+        <div class="fg"><label>令牌类型</label><select name="token_type" id="f-token-type" onchange="onTokenTypeChange()"><option value="daily">daily（每日刷新）</option><option value="rolling_5h">rolling_5h（5h 限额）</option><option value="one_time">one_time（一次性）</option></select></div>
         <div class="fg"><label>计费模式</label><select name="billing_mode" onchange="onBillingChange()"><option value="token">按 Token 计费</option><option value="request">按请求次数计费</option></select></div>
       </div>
       <div class="f2">
@@ -562,7 +563,7 @@ function modelRowHTML(m, i) {
           ${provBadge(proto)}
           ${m.modality === 'vision' ? '<span class="badge b-vision">多模态</span>' : '<span class="badge b-text">纯文本</span>'}
           ${m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>'}
-          ${m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>' : ''}
+          ${m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>' : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>' : ''}
           ${m.expire_date ? `<span class="badge b-once">到期 ${esc(m.expire_date)}</span>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="editModel('${m.id}')">编辑</button>
           <button class="btn btn-red btn-sm" onclick="delModel('${m.id}')">删除</button>
@@ -711,8 +712,8 @@ function infoTip(id) {
     ['收费标注', m.is_free ? '免费' : '付费'],
     ['计费模式', m.billing_mode === 'request' ? '按请求次数' : '按 Token'],
     ['模型模态', m.modality === 'vision' ? '多模态（支持图片）' : '纯文本'],
-    ['令牌类型', m.token_type === 'one_time' ? '一次性' : '每日刷新'],
-    ['每日上限', m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : '') : '不限'],
+    ['令牌类型', m.token_type === 'one_time' ? '一次性' : m.token_type === 'rolling_5h' ? '5h 窗口（5h限额）' : '每日刷新'],
+    [(m.token_type === 'rolling_5h' ? '5h 窗口限额' : '每日上限'), m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : '') : '不限'],
     ['上下文窗口', m.context_window ? m.context_window.toLocaleString() : '不限'],
     ['RPM', m.rpm_limit || '不限'],
     ['TPM', m.tpm_limit || '不限'],
@@ -1003,6 +1004,7 @@ async function clearSingleMode(name) {
   }
 }
 
+function fmtDur(sec){sec=Math.max(0,Math.floor(sec||0));var h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);return h>0?(h+'h '+m+'m'):(m+'m')}
 async function loadStats() {
   const data = await api('/stats');
   if (!data) return;
@@ -1027,9 +1029,13 @@ async function loadStats() {
     const cls = m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : '');
     const pctText = m.expired ? '已失效' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量');
     const billing = m.billing_mode === 'request' ? '按次计费' : '按 Token 计费';
-    const typeBadge = m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>' : '<span class="badge b-openai">每日</span>';
+    const typeBadge = m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>'
+      : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>'
+      : '<span class="badge b-openai">每日</span>';
     const freeBadge = m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>';
-    const refresh = m.token_type === 'one_time' ? '不刷新' : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
+    const refresh = m.token_type === 'one_time' ? '不刷新'
+      : m.token_type === 'rolling_5h' ? '5h窗口 · 剩 ' + fmtDur(m.window_remaining_sec)
+      : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
     return `
       <div class="stat-card ${cls}" style="animation-delay:${i * 45}ms">
         <div class="stat-top">
@@ -1140,14 +1146,21 @@ async function loadDecisions() {
 }
 
 function onBillingChange() {
-  const mode = document.getElementById('mform').billing_mode.value;
-  document.getElementById('limit-label').textContent = mode === 'request' ? '每日请求次数上限（0=不限）' : '每日 Token 上限（0=不限）';
+  const form = document.getElementById('mform');
+  const mode = form.billing_mode.value;
+  const ttype = form.token_type.value;
+  if (ttype === 'rolling_5h') {
+    document.getElementById('limit-label').textContent = mode === 'request' ? '5h 窗口请求次数限额（0=不限）' : '5h 窗口 Token 限额（0=不限）';
+  } else {
+    document.getElementById('limit-label').textContent = mode === 'request' ? '每日请求次数上限（0=不限）' : '每日 Token 上限（0=不限）';
+  }
 }
 
 function onTokenTypeChange() {
   const once = document.getElementById('once-fields');
   const oneTime = document.getElementById('mform').token_type.value === 'one_time';
   once.style.display = oneTime ? '' : 'none';
+  onBillingChange();
 }
 
 function showAdd() {

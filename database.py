@@ -71,6 +71,13 @@ async def init_db():
                 steps TEXT
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS rolling5h_state (
+                model_name TEXT PRIMARY KEY,
+                used_amount INTEGER DEFAULT 0,
+                window_start REAL NOT NULL
+            )
+        """)
         await db.commit()
 
 
@@ -194,6 +201,52 @@ async def expire_one_time(model_name: str):
         await db.execute(
             "UPDATE one_time_state SET expired = 1 WHERE model_name = ?",
             (model_name,),
+        )
+        await db.commit()
+
+
+async def init_5h_state(model_name: str):
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            """INSERT OR IGNORE INTO rolling5h_state (model_name, used_amount, window_start)
+               VALUES (?, 0, ?)""",
+            (model_name, time.time()),
+        )
+        await db.commit()
+
+
+async def get_5h_state(model_name: str) -> dict | None:
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT used_amount, window_start FROM rolling5h_state WHERE model_name = ?",
+            (model_name,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {"used_amount": row[0], "window_start": row[1]}
+
+
+async def add_5h_usage(model_name: str, amount: int):
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            "UPDATE rolling5h_state SET used_amount = used_amount + ? WHERE model_name = ?",
+            (amount, model_name),
+        )
+        await db.commit()
+
+
+async def reset_5h_window(model_name: str):
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            """INSERT INTO rolling5h_state (model_name, used_amount, window_start)
+               VALUES (?, 0, ?)
+               ON CONFLICT(model_name) DO UPDATE SET used_amount = 0, window_start = excluded.window_start""",
+            (model_name, time.time()),
         )
         await db.commit()
 
