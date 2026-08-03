@@ -441,8 +441,7 @@ async def set_single_override(pool_name: str, request: Request, _=Depends(verify
     if model_id not in reachable:
         raise HTTPException(status_code=400, detail=f"Model '{model_id}' is not reachable from pool '{pool_name}'")
 
-    pool.single_override[pool_name] = model_id
-    pool._persist_single_override()
+    pool.set_single_override(pool_name, model_id)
     return {"ok": True, "pool_name": pool_name, "model_id": model_id}
 
 
@@ -453,8 +452,7 @@ async def clear_single_override(pool_name: str, _=Depends(verify_admin)):
     if pool_name not in pool.pools:
         raise HTTPException(status_code=404, detail=f"Pool '{pool_name}' not found")
 
-    model_id = pool.single_override.pop(pool_name, None)
-    pool._persist_single_override()
+    model_id = pool.clear_single_override(pool_name)
     return {"ok": True, "pool_name": pool_name, "cleared": model_id is not None}
 
 

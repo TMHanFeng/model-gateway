@@ -136,46 +136,57 @@ class ModelPool:
                 self.config["pools"]["兜底池"] = self.pools["兜底池"]
                 save_config(self.config)
 
-        # Migrate any stale fallback_pool references from legacy __fallback__ to 兜底池,
-        # and ensure the auto pool always has a fallback_pool pointing to 兜底池.
+        # Migrate stale fallback_pool references from legacy __fallback__ to 兜底池,
+        # and repair any fallback_pool that points to a missing pool. Ensure the
+        # auto pool always falls back to an existing pool (prefer 兜底池).
         migrated = False
-        for pcfg in self.pools.values():
-            if pcfg.get("fallback_pool") == "__fallback__":
+        for pname, pcfg in self.pools.items():
+            fb = pcfg.get("fallback_pool")
+            if fb == "__fallback__":
                 pcfg["fallback_pool"] = "兜底池"
                 migrated = True
-        if "auto" in self.pools and not self.pools["auto"].get("fallback_pool"):
-            self.pools["auto"]["fallback_pool"] = "兜底池"
-            migrated = True
+            elif fb and fb not in self.pools:
+                pcfg["fallback_pool"] = "兜底池" if "兜底池" in self.pools else None
+                migrated = True
+        if "auto" in self.pools:
+            fb = self.pools["auto"].get("fallback_pool")
+            if not fb or fb not in self.pools:
+                self.pools["auto"]["fallback_pool"] = "兜底池" if "兜底池" in self.pools else None
+                migrated = True
         if migrated:
             # Mirror the fix into config and persist so it survives restarts
-            for pcfg in self.config.get("pools", {}).values():
-                if pcfg.get("fallback_pool") == "__fallback__":
-                    pcfg["fallback_pool"] = "兜底池"
-            auto_cfg = self.config.get("pools", {}).get("auto")
-            if auto_cfg is not None and not auto_cfg.get("fallback_pool"):
-                auto_cfg["fallback_pool"] = "兜底池"
+            for pname, pcfg in self.config.get("pools", {}).items():
+                inmem = self.pools.get(pname)
+                if inmem and pcfg.get("fallback_pool") != inmem["fallback_pool"]:
+                    pcfg["fallback_pool"] = inmem["fallback_pool"]
             save_config(self.config)
 
         # Restore single_override from config so it survives reloads
         self.single_override = {
             k: v for k, v in self.config.get("single_override", {}).items()
-            if k in self.pools
+            if k in self.pools and v in self.registry
         }
 
     # ── single_override persistence ────────────────────────────────────────────
 
     def _persist_single_override(self):
         """Write current single_override to config.json so it survives reloads."""
-        self.config["single_override"] = dict(self.single_override)
-        save_config(self.config)
+        try:
+            config = load_config()
+        except Exception:
+            config = self.config
+        config["single_override"] = dict(self.single_override)
+        save_config(config)
+        self.config = config
 
     def set_single_override(self, pool_name: str, model_id: str):
         self.single_override[pool_name] = model_id
         self._persist_single_override()
 
     def clear_single_override(self, pool_name: str):
-        self.single_override.pop(pool_name, None)
+        cleared = self.single_override.pop(pool_name, None)
         self._persist_single_override()
+        return cleared
 
     def reload(self):
         old_latency = {mid: e.latency_ms for mid, e in self.registry.items()}
@@ -519,9 +530,12 @@ class ModelPool:
                     await db.add_daily_usage(entry.id, captured)
 
     def failure_detail(self, steps: list[dict], has_images: bool) -> str:
-        attempted = any(s.get("reason") in ("selected", "switch_429", "switch_error") for s in steps)
+        attempted = any(s.get("reason") in ("selected", "single_override_selected", "switch_429", "switch_error") for s in steps)
+        locked = any(str(s.get("reason", "")).startswith("single_override") for s in steps)
         if has_images and not attempted:
             return "请求包含图片，但池内没有可用的多模态模型（均为纯文本或不可用）"
+        if locked:
+            return "单模型锁定：锁定模型不可用或调用失败，且兜底池无可用模型"
         if not steps:
             return "池为空或无匹配模型"
         return "所有候选模型均不可用：用量用尽 / RPM·TPM 触顶 / 冷却 / 超上下文"
@@ -538,10 +552,15 @@ class ModelPool:
         use_fallback = False
 
         for _ in range(max_attempts):
-            if use_fallback and fb_name:
-                entry, _ = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images)
+            if use_fallback:
+                if not fb_name:
+                    break
+                entry, steps = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images)
             else:
-                entry, _ = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
+                entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
+
+            if steps:
+                actual_calls.extend(steps)
 
             if entry is None:
                 # Main pool / single model cannot serve — escalate to fallback pool once.
@@ -553,18 +572,23 @@ class ModelPool:
 
             try:
                 response, tokens = await self.execute(entry, req)
-                actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
+                last_reason = actual_calls[-1]["reason"] if actual_calls else ""
+                if last_reason in ("selected", "single_override_selected") and actual_calls[-1]["model"] == entry.id:
+                    if use_fallback:
+                        actual_calls[-1]["reason"] = "fallback_selected"
+                else:
+                    actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
                 await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls)
                 return response, tokens, actual_calls
             except RateLimitError:
                 actual_calls.append({"model": entry.id, "reason": "fallback_switch_429" if use_fallback else "switch_429"})
-                if override_id and entry.id == override_id:
+                if override_id and not use_fallback:
                     use_fallback = True
                 continue
             except Exception:
                 entry.cooldown_until = time.time() + 30
                 actual_calls.append({"model": entry.id, "reason": "fallback_switch_error" if use_fallback else "switch_error"})
-                if override_id and entry.id == override_id:
+                if override_id and not use_fallback:
                     use_fallback = True
                 continue
 
@@ -582,10 +606,15 @@ class ModelPool:
         use_fallback = False
 
         for _ in range(max_attempts):
-            if use_fallback and fb_name:
-                entry, _ = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images)
+            if use_fallback:
+                if not fb_name:
+                    break
+                entry, steps = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images)
             else:
-                entry, _ = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
+                entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
+
+            if steps:
+                actual_calls.extend(steps)
 
             if entry is None:
                 if not use_fallback and fb_name:
@@ -596,18 +625,23 @@ class ModelPool:
 
             try:
                 stream = await self.execute_stream(entry, req)
-                actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
+                last_reason = actual_calls[-1]["reason"] if actual_calls else ""
+                if last_reason in ("selected", "single_override_selected") and actual_calls[-1]["model"] == entry.id:
+                    if use_fallback:
+                        actual_calls[-1]["reason"] = "fallback_selected"
+                else:
+                    actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
                 await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls)
                 return stream, entry, actual_calls
             except RateLimitError:
                 actual_calls.append({"model": entry.id, "reason": "fallback_switch_429" if use_fallback else "switch_429"})
-                if override_id and entry.id == override_id:
+                if override_id and not use_fallback:
                     use_fallback = True
                 continue
             except Exception:
                 entry.cooldown_until = time.time() + 30
                 actual_calls.append({"model": entry.id, "reason": "fallback_switch_error" if use_fallback else "switch_error"})
-                if override_id and entry.id == override_id:
+                if override_id and not use_fallback:
                     use_fallback = True
                 continue
 
