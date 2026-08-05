@@ -1322,12 +1322,28 @@ def start_api_server():
     import threading
 
     def api_loop():
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind(("0.0.0.0", 8651))
-        server.listen(5)
-        server.settimeout(1.0)
-        log.info("📡 API 服务器启动 (127.0.0.1:8651)")
+        server = None
+        # 重试绑定端口（最多3次，间隔5秒）
+        for attempt in range(3):
+            try:
+                server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind(("0.0.0.0", 8651))
+                server.listen(5)
+                server.settimeout(1.0)
+                log.info("📡 API 服务器启动 (127.0.0.1:8651)")
+                break
+            except OSError as e:
+                log.warning(f"⚠️ API 服务器端口 8651 绑定失败 (尝试 {attempt+1}/3): {e}")
+                if server:
+                    server.close()
+                    server = None
+                if attempt < 2:
+                    time.sleep(5)
+
+        if not server:
+            log.error("❌ API 服务器端口 8651 绑定失败，放弃启动")
+            return
 
         while running:
             try:
