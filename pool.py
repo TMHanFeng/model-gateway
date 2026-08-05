@@ -524,13 +524,8 @@ class ModelPool:
     async def execute_stream(self, entry: ModelEntry, req):
         provider = self._get_provider(entry)
         t0 = time.perf_counter()
-        # request_log is written after the stream completes so the real token count
-        # (input + output) lands in the RPM/TPM sliding window — logging 0 up front
-        # undercounted TPM for every streamed call.
-        if entry.token_type == "daily" and entry.billing_mode == "request":
-            await db.add_daily_usage(entry.id, 1)
-        elif entry.token_type == "rolling_5h" and entry.billing_mode == "request":
-            await self._charge_rolling_5h(entry, 1)
+        # 计费在 execute_stream_with_fallback 验证首个分片（真正建连）成功之后进行，
+        # 避免"连接即失败"的流式请求被错误计入配额。
         raw = provider.chat_stream(req, entry.name)
         return self._wrap_stream(entry, raw, t0)
 
@@ -593,7 +588,7 @@ class ModelPool:
                 entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
 
             if steps:
-                actual_calls.extend(steps)
+                actual_calls.extend(s for s in steps if s["reason"] != "already_tried")
 
             if entry is None:
                 # Main pool / single model cannot serve — escalate to fallback pool once.
@@ -647,7 +642,7 @@ class ModelPool:
                 entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
 
             if steps:
-                actual_calls.extend(steps)
+                actual_calls.extend(s for s in steps if s["reason"] != "already_tried")
 
             if entry is None:
                 if not use_fallback and fb_name:
@@ -658,6 +653,29 @@ class ModelPool:
 
             try:
                 stream = await self.execute_stream(entry, req)
+                # 预取首个分片：真正发起上游连接并检查 HTTP 状态。
+                # 连接失败 / 429 / HTTP 错误会在此处抛出，从而触发下面的回退逻辑；
+                # 否则流式请求会"假成功"（日志显示选中但实际无响应、不兜底）。
+                got_first = False
+                first = None
+                try:
+                    first = await stream.__anext__()
+                    got_first = True
+                except StopAsyncIteration:
+                    got_first = False
+
+                async def _replay(got=got_first, first=first, rest=stream):
+                    if got:
+                        yield first
+                    async for chunk in rest:
+                        yield chunk
+
+                # 流建立成功后才计费（按次计费计 1 次；按 token 计费由 _wrap_stream 结束时按实际 token 计）
+                if entry.token_type == "daily" and entry.billing_mode == "request":
+                    await db.add_daily_usage(entry.id, 1)
+                elif entry.token_type == "rolling_5h" and entry.billing_mode == "request":
+                    await self._charge_rolling_5h(entry, 1)
+
                 last_reason = actual_calls[-1]["reason"] if actual_calls else ""
                 if last_reason in ("selected", "single_override_selected") and actual_calls[-1]["model"] == entry.id:
                     if use_fallback:
@@ -665,7 +683,7 @@ class ModelPool:
                 else:
                     actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
                 await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls)
-                return stream, entry, actual_calls
+                return _replay(), entry, actual_calls
             except RateLimitError:
                 actual_calls.append({"model": entry.id, "reason": "fallback_switch_429" if use_fallback else "switch_429"})
                 if override_id and not use_fallback:
