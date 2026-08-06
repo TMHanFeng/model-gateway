@@ -276,6 +276,7 @@ body {
 .f2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .fg { margin-bottom: 13px; }
 .fg label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#k-pools-checkboxes label.pool-check { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 13px; white-space: normal; overflow: visible; text-overflow: clip; margin-bottom: 0; padding: 3px 0; cursor: pointer; }
 .fg input, .fg select {
   width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line-hi);
   background: var(--bg); color: var(--text); font-size: 13px; font-family: var(--mono);
@@ -1473,7 +1474,7 @@ function renderPoolCheckboxes(checkedArr) {
   const box = document.getElementById('k-pools-checkboxes');
   box.innerHTML = keyPoolCache.map(p => {
     const checked = (checkedArr || []).includes(p) ? ' checked' : '';
-    return `<label style="display:block;padding:3px 0;font-size:13px;cursor:pointer"><input type="checkbox" value="${esc(p)}" data-pool="${esc(p)}"${checked} style="margin-right:6px">${esc(p)}</label>`;
+    return `<label class="pool-check"><input type="checkbox" value="${esc(p)}" data-pool="${esc(p)}"${checked}><span>${esc(p)}</span></label>`;
   }).join('') || '<div class="hint">暂无模型池</div>';
 }
 async function showAddKey() {
