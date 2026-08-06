@@ -416,6 +416,24 @@ body {
   </div>
 </div>
 
+<div class="overlay" id="overlay-usage">
+  <div class="modal" style="width:640px">
+    <h3 id="usage-key-title">API Key 用量历史</h3>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <button class="btn btn-ghost btn-sm" onclick="shiftUsageDate(-1)">‹ 前一天</button>
+      <span id="usage-date-label" class="mono" style="font-size:15px;font-weight:600;color:var(--teal);min-width:110px;text-align:center">--</span>
+      <button class="btn btn-ghost btn-sm" onclick="shiftUsageDate(1)">后一天 ›</button>
+      <button class="btn btn-ghost btn-sm" onclick="usageDate=null;loadKeyUsage()">今天</button>
+      <span style="flex:1"></span>
+      <span style="font-size:13px;color:var(--muted)">当日总量：<b id="usage-total" class="mono" style="color:var(--text)">0</b></span>
+    </div>
+    <div id="usage-hours"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" onclick="closeKeyUsage()">关闭</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="overlay">
   <div class="modal">
     <h3 id="modal-title">添加模型</h3>
@@ -1437,6 +1455,8 @@ async function loadKeys() {
           ${keyTypeBadge(k.type)}
           ${k.enabled ? '<span class="badge b-free">启用</span>' : '<span class="badge b-paid">禁用</span>'}
           <button class="btn btn-ghost btn-sm" onclick="copyKey('${esc(k.secret)}')">复制</button>
+          <button class="btn btn-ghost btn-sm" onclick="showEditKey(${k.id})">编辑</button>
+          <button class="btn btn-ghost btn-sm" onclick="showKeyUsage(${k.id})">用量历史</button>
           <button class="btn btn-ghost btn-sm" onclick="toggleKey(${k.id},${k.enabled ? 0 : 1})">${k.enabled ? '禁用' : '启用'}</button>
           <button class="btn btn-red btn-sm" onclick="delKey(${k.id})">删除</button>
         </div>
@@ -1448,12 +1468,39 @@ async function loadKeys() {
       </div>
     </div>`).join('') || '<div class="hint">暂无 API 密钥，点击右上角创建。</div>';
 }
-async function showAddKey() {
-  await loadKeyPools();
-  document.getElementById('kform').reset();
+let editingKeyId = null;
+function renderPoolCheckboxes(checkedArr) {
   const box = document.getElementById('k-pools-checkboxes');
-  box.innerHTML = keyPoolCache.map(p => `<label style="display:block;padding:3px 0;font-size:13px;cursor:pointer"><input type="checkbox" value="${esc(p)}" style="margin-right:6px">${esc(p)}</label>`).join('') || '<div class="hint">暂无模型池</div>';
+  box.innerHTML = keyPoolCache.map(p => {
+    const checked = (checkedArr || []).includes(p) ? ' checked' : '';
+    return `<label style="display:block;padding:3px 0;font-size:13px;cursor:pointer"><input type="checkbox" value="${esc(p)}" data-pool="${esc(p)}"${checked} style="margin-right:6px">${esc(p)}</label>`;
+  }).join('') || '<div class="hint">暂无模型池</div>';
+}
+async function showAddKey() {
+  editingKeyId = null;
+  document.getElementById('kform').reset();
   document.getElementById('key-modal-title').textContent = '创建 API 密钥';
+  await loadKeyPools();
+  renderPoolCheckboxes([]);
+  onKeyTypeChange();
+  document.getElementById('overlay-key').classList.add('show');
+}
+async function showEditKey(id) {
+  const data = await api('/admin/keys');
+  if (!data) return;
+  const k = data.keys.find(x => x.id === id);
+  if (!k) return;
+  editingKeyId = id;
+  const form = document.getElementById('kform');
+  form.reset();
+  form.name.value = k.name;
+  form.type.value = k.type;
+  form.token_type.value = k.token_type || '';
+  form.billing_mode.value = k.billing_mode || 'token';
+  form.limit_amount.value = k.limit_amount || 0;
+  document.getElementById('key-modal-title').textContent = '编辑 API 密钥';
+  await loadKeyPools();
+  renderPoolCheckboxes(k.type === 'admin' ? [] : (k.allowed_pools || []));
   onKeyTypeChange();
   document.getElementById('overlay-key').classList.add('show');
 }
@@ -1467,13 +1514,22 @@ async function submitKey(e) {
   const form = document.getElementById('kform');
   const body = Object.fromEntries(new FormData(form).entries());
   body.limit_amount = parseInt(body.limit_amount) || 0;
-  body.allowed_pools = [...document.querySelectorAll('#k-pools-checkboxes input:checked')].map(x => x.value);
-  const data = await api('/admin/keys', { method: 'POST', body: JSON.stringify(body) });
+  body.allowed_pools = [...document.querySelectorAll('#k-pools-checkboxes input:checked')].map(x => x.getAttribute('data-pool') || x.value);
+  let data;
+  if (editingKeyId) {
+    data = await api('/admin/keys/' + editingKeyId, { method: 'PUT', body: JSON.stringify(body) });
+  } else {
+    data = await api('/admin/keys', { method: 'POST', body: JSON.stringify(body) });
+  }
   if (!data) return;
   closeKeyModal();
-  const v = document.getElementById('key-created-value');
-  v.value = data.key.secret;
-  document.getElementById('key-created').classList.remove('hidden');
+  if (!editingKeyId && data.key && data.key.secret) {
+    const v = document.getElementById('key-created-value');
+    v.value = data.key.secret;
+    document.getElementById('key-created').classList.remove('hidden');
+  } else {
+    toast('密钥已更新');
+  }
   loadKeys();
 }
 function copyCreatedKey() {
@@ -1495,6 +1551,53 @@ async function delKey(id) {
   if (!confirm('确定删除该 API 密钥吗？使用它的客户端将立即失效。')) return;
   const ok = await api('/admin/keys/' + id, { method: 'DELETE' });
   if (ok) { toast('密钥已删除'); loadKeys(); }
+}
+/* ── 用量历史（1h 粒度，可切换日期，默认今天）── */
+let usageKeyId = null;
+let usageDate = null;
+function usageDateStr() {
+  if (usageDate) return usageDate;
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function shiftUsageDate(delta) {
+  const p = usageDateStr().split('-');
+  const d = new Date(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2]));
+  d.setDate(d.getDate() + delta);
+  usageDate = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  loadKeyUsage();
+}
+async function showKeyUsage(id) {
+  usageKeyId = id;
+  usageDate = null;
+  document.getElementById('usage-key-title').textContent = 'API Key #' + id + ' · 用量历史（1h 粒度）';
+  document.getElementById('overlay-usage').classList.add('show');
+  loadKeyUsage();
+}
+function closeKeyUsage() { document.getElementById('overlay-usage').classList.remove('show'); }
+async function loadKeyUsage() {
+  const el = document.getElementById('usage-hours');
+  const dateEl = document.getElementById('usage-date-label');
+  const totalEl = document.getElementById('usage-total');
+  if (!usageKeyId) return;
+  const ds = usageDateStr();
+  dateEl.textContent = ds;
+  totalEl.textContent = '…';
+  el.innerHTML = '<div class="hint">加载中...</div>';
+  const data = await api('/admin/keys/' + usageKeyId + '/usage?date=' + ds);
+  if (!data) return;
+  totalEl.textContent = data.total.toLocaleString();
+  const max = Math.max(1, ...data.hours.map(h => h.used));
+  el.innerHTML = '<div style="display:grid;grid-template-columns:repeat(12,1fr);gap:6px">' + data.hours.map(h => {
+    const hh = String(h.hour).padStart(2, '0');
+    const pct = h.used > 0 ? Math.max(4, Math.round(h.used / max * 100)) : 0;
+    return `<div style="text-align:center" title="${hh}:00 用量 ${h.used}">
+      <div style="height:70px;background:var(--panel-2);border-radius:4px;display:flex;align-items:flex-end;overflow:hidden">
+        <div style="width:100%;height:${pct}%;background:${h.used > 0 ? 'linear-gradient(180deg,var(--teal),#5eead4)' : 'transparent'};border-radius:4px"></div>
+      </div>
+      <div style="font-size:10px;color:var(--muted);font-family:var(--mono);margin-top:2px">${hh}</div>
+    </div>`;
+  }).join('') + '</div>';
 }
 </script>
 </body>

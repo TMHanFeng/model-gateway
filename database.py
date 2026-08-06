@@ -111,6 +111,14 @@ async def init_db():
                 created_at REAL NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS api_key_hourly_usage (
+                key_id INTEGER NOT NULL,
+                hour_key TEXT NOT NULL,
+                used_amount INTEGER DEFAULT 0,
+                PRIMARY KEY (key_id, hour_key)
+            )
+        """)
         await db.commit()
 
 
@@ -506,3 +514,34 @@ async def delete_user(user_id: int):
         db = await _get_conn()
         await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
         await db.commit()
+
+
+# ── API Key 用量按小时记录（1h 粒度，可查询任意日期）──────────────────
+
+async def add_hourly_usage(key_id: int, hour_key: str, amount: int):
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            """INSERT INTO api_key_hourly_usage (key_id, hour_key, used_amount)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key_id, hour_key) DO UPDATE SET used_amount = used_amount + excluded.used_amount""",
+            (key_id, hour_key, amount),
+        )
+        await db.commit()
+
+
+async def get_hourly_usage(key_id: int, date_str: str) -> dict[str, int]:
+    """返回某日期(YYYY-MM-DD)的 24 小时用量 { 'HH': amount }，无记录的小时返回 0"""
+    prefix = date_str + "-"
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT hour_key, used_amount FROM api_key_hourly_usage WHERE key_id = ? AND hour_key LIKE ?",
+            (key_id, prefix + "%"),
+        )
+        rows = await cursor.fetchall()
+    out = {}
+    for r in rows:
+        hour = str(r["hour_key"]).split("-")[-1]
+        out[hour] = r["used_amount"]
+    return out

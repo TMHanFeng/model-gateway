@@ -652,6 +652,22 @@ async def delete_key(key_id: int, _=Depends(verify_admin)):
     return {"ok": True}
 
 
+@router.get("/keys/{key_id}/usage")
+async def key_usage_history(key_id: int, date: str = "", _=Depends(verify_admin)):
+    """某 API Key 的用量历史：按 1h 粒度返回指定日期(YYYY-MM-DD，默认今天)的 24 小时用量。"""
+    import database as db
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    rec = await db.get_api_key_by_id(key_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail=f"API Key #{key_id} 不存在")
+    if not date:
+        date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    hourly = await db.get_hourly_usage(key_id, date)
+    hours = [{"hour": h, "used": hourly.get(f"{h:02d}", 0)} for h in range(24)]
+    return {"key_id": key_id, "date": date, "hours": hours, "total": sum(x["used"] for x in hours)}
+
+
 # ── 用户（预留：未来普通用户账号体系）──────────────────────────────────
 
 @router.get("/users")

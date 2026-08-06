@@ -30,6 +30,14 @@ def _today() -> str:
     return datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
 
 
+def _hour_key(ts: float | None = None) -> str:
+    """当前北京时间的小时桶键，如 2026-08-05-14"""
+    dt = datetime.now(ZoneInfo("Asia/Shanghai"))
+    if ts is not None:
+        dt = datetime.fromtimestamp(ts, ZoneInfo("Asia/Shanghai"))
+    return dt.strftime("%Y-%m-%d-%H")
+
+
 def is_admin_key(key: dict) -> bool:
     return key.get("type") == "admin"
 
@@ -92,7 +100,7 @@ async def key_usage_available(key: dict) -> tuple[bool, str]:
 
 
 async def charge_key_usage(key: dict, amount: int):
-    """按用户 Key 的限额语义计量用量（管理员 Key / 无限额直接忽略）"""
+    """按用户 Key 的限额语义计量用量（管理员 Key / 无限额直接忽略），并写入小时桶记录。"""
     if is_admin_key(key) or not _has_limit(key):
         return
     key_id = key["id"]
@@ -117,6 +125,9 @@ async def charge_key_usage(key: dict, amount: int):
             s = await db.get_key_usage(key_id)
             if int(key.get("limit_amount", 0)) > 0 and s.get("used_amount", 0) >= int(key.get("limit_amount", 0)):
                 await db.expire_key_usage(key_id)
+
+    # 1h 粒度用量记录（供历史查询）
+    await db.add_hourly_usage(key_id, _hour_key(), amount)
 
 
 async def key_usage_summary(key: dict) -> dict:
