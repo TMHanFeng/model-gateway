@@ -319,6 +319,7 @@ body {
     <div class="tab" data-tab="stats">用量统计</div>
     <div class="tab" data-tab="speed">接口测速</div>
     <div class="tab" data-tab="logs">调用记录</div>
+    <div class="tab" data-tab="keys">API 密钥</div>
   </div>
 
   <div id="tab-models">
@@ -367,6 +368,51 @@ body {
       </div>
     </div>
     <div id="log-list"></div>
+  </div>
+
+  <div id="tab-keys" class="hidden">
+    <div class="toolbar">
+      <div class="hint">API 密钥用于外部客户端调用。管理员密钥无任何限制；用户密钥仅可访问授权的模型池，并可按 daily / 5h / 一次性 计量用量（token 或请求次数）。服务器密码本身即管理员账号，始终有效。</div>
+      <button class="btn btn-amber" onclick="showAddKey()">＋ 创建 API 密钥</button>
+    </div>
+    <div id="key-list"></div>
+    <div id="key-created" class="hidden" style="margin-top:14px">
+      <div class="card" style="border-left-color:var(--teal)">
+        <div class="card-head">
+          <div><div class="card-title">🎉 新密钥已生成</div>
+          <div class="card-sub">请立即复制保存，<span style="color:var(--red)">关闭后将无法再次查看完整密钥</span>。</div></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <input id="key-created-value" readonly style="flex:1;padding:8px 10px;border-radius:6px;border:1px solid var(--line-hi);background:var(--bg);color:var(--teal);font-family:var(--mono);font-size:13px">
+          <button class="btn btn-amber" onclick="copyCreatedKey()">复制</button>
+          <button class="btn btn-ghost" onclick="document.getElementById('key-created').classList.add('hidden')">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay-key">
+  <div class="modal">
+    <h3 id="key-modal-title">创建 API 密钥</h3>
+    <form id="kform" onsubmit="submitKey(event)">
+      <div class="f2">
+        <div class="fg"><label>密钥名称</label><input name="name" required placeholder="如：我的应用"></div>
+        <div class="fg"><label>密钥类型</label><select name="type" id="k-type" onchange="onKeyTypeChange()"><option value="user">用户密钥（受限）</option><option value="admin">管理员密钥（无限制）</option></select></div>
+      </div>
+      <div id="k-pool-fields">
+        <div class="fg"><label>授权模型池（用户密钥仅可访问以下池）</label><div id="k-pools-checkboxes" style="max-height:140px;overflow-y:auto;border:1px solid var(--line-hi);border-radius:6px;padding:8px 10px;background:var(--bg)"></div></div>
+        <div class="f2">
+          <div class="fg"><label>限额类型</label><select name="token_type"><option value="">不限量</option><option value="daily">每日刷新</option><option value="rolling_5h">5h 限额</option><option value="one_time">一次性</option></select></div>
+          <div class="fg"><label>计费模式</label><select name="billing_mode"><option value="token">按 Token</option><option value="request">按请求次数</option></select></div>
+        </div>
+        <div class="fg"><label>限额数值（0=不限）</label><input name="limit_amount" type="number" value="0" min="0"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-amber">创建</button>
+        <button type="button" class="btn btn-ghost" onclick="closeKeyModal()">取消</button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -485,12 +531,13 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
 function switchTab(name, el) {
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   el.classList.add('active');
-  ['models','pools','stats','speed','logs'].forEach(t => document.getElementById('tab-' + t).classList.toggle('hidden', t !== name));
+  ['models','pools','stats','speed','logs','keys'].forEach(t => document.getElementById('tab-' + t).classList.toggle('hidden', t !== name));
   clearInterval(statsTimer);
   if (name === 'models') loadModels();
   if (name === 'pools') loadPools();
   if (name === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 5000); }
   if (name === 'logs') { populateLogFilter(); loadDecisions(); }
+  if (name === 'keys') loadKeys();
 }
 
 function provBadge(p) { return p === 'anthropic' ? '<span class="badge b-anthropic">anthropic</span>' : '<span class="badge b-openai">openai</span>'; }
@@ -1356,6 +1403,99 @@ async function testConnectivity() {
 
 setInterval(() => { document.getElementById('clock').textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false }); }, 1000);
 loadModels();
+
+/* ── API 密钥管理 ── */
+let keyPoolCache = [];
+async function loadKeyPools() {
+  const data = await api('/admin/pools');
+  if (data) keyPoolCache = Object.keys(data.pools || {});
+}
+function keyTypeBadge(t) { return t === 'admin' ? '<span class="badge b-paid">管理员</span>' : '<span class="badge b-openai">用户</span>'; }
+function keyLimitText(k) {
+  if (k.type === 'admin' || !k.token_type || !k.limit_amount) return '<span class="mono" style="color:var(--muted)">无限制</span>';
+  const unit = k.billing_mode === 'request' ? '次' : 'tokens';
+  const tname = { daily: '每日', rolling_5h: '5h', one_time: '一次性' }[k.token_type] || k.token_type;
+  const u = k.usage || {};
+  const pct = u.limit > 0 ? Math.min(100, u.used / u.limit * 100) : 0;
+  const cls = u.exhausted ? 'full' : pct >= 75 ? 'warn' : '';
+  return `<span class="mono">${tname}·${u.used.toLocaleString()}/${u.limit.toLocaleString()}${unit}</span>
+    <span class="bar-track"><span class="bar-fill ${cls}" style="width:${pct}%"></span></span><span class="mono">${pct.toFixed(0)}%</span>
+    ${u.exhausted ? '<span class="chip chip-err">已用尽</span>' : ''}`;
+}
+async function loadKeys() {
+  const data = await api('/admin/keys');
+  const el = document.getElementById('key-list');
+  if (!data) return;
+  el.innerHTML = data.keys.map(k => `
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">${esc(k.name)} <span style="color:var(--muted);font-size:12px;font-family:var(--mono)">#${k.id}</span></div>
+          <div class="card-sub" style="font-family:var(--mono)">${esc(k.secret)}</div>
+        </div>
+        <div class="btn-row">
+          ${keyTypeBadge(k.type)}
+          ${k.enabled ? '<span class="badge b-free">启用</span>' : '<span class="badge b-paid">禁用</span>'}
+          <button class="btn btn-ghost btn-sm" onclick="copyKey('${esc(k.secret)}')">复制</button>
+          <button class="btn btn-ghost btn-sm" onclick="toggleKey(${k.id},${k.enabled ? 0 : 1})">${k.enabled ? '禁用' : '启用'}</button>
+          <button class="btn btn-red btn-sm" onclick="delKey(${k.id})">删除</button>
+        </div>
+      </div>
+      <div class="grid">
+        <div>授权池 <b>${k.type === 'admin' ? '全部' : (k.allowed_pools || []).map(esc).join('、') || '无'}</b></div>
+        <div>用量 <b>${keyLimitText(k)}</b></div>
+        <div>创建时间 <b>${new Date(k.created_at * 1000).toLocaleString('zh-CN', { hour12: false })}</b></div>
+      </div>
+    </div>`).join('') || '<div class="hint">暂无 API 密钥，点击右上角创建。</div>';
+}
+async function showAddKey() {
+  await loadKeyPools();
+  document.getElementById('kform').reset();
+  const box = document.getElementById('k-pools-checkboxes');
+  box.innerHTML = keyPoolCache.map(p => `<label style="display:block;padding:3px 0;font-size:13px;cursor:pointer"><input type="checkbox" value="${esc(p)}" style="margin-right:6px">${esc(p)}</label>`).join('') || '<div class="hint">暂无模型池</div>';
+  document.getElementById('key-modal-title').textContent = '创建 API 密钥';
+  onKeyTypeChange();
+  document.getElementById('overlay-key').classList.add('show');
+}
+function onKeyTypeChange() {
+  const isUser = document.getElementById('k-type').value === 'user';
+  document.getElementById('k-pool-fields').style.display = isUser ? '' : 'none';
+}
+function closeKeyModal() { document.getElementById('overlay-key').classList.remove('show'); }
+async function submitKey(e) {
+  e.preventDefault();
+  const form = document.getElementById('kform');
+  const body = Object.fromEntries(new FormData(form).entries());
+  body.limit_amount = parseInt(body.limit_amount) || 0;
+  body.allowed_pools = [...document.querySelectorAll('#k-pools-checkboxes input:checked')].map(x => x.value);
+  const data = await api('/admin/keys', { method: 'POST', body: JSON.stringify(body) });
+  if (!data) return;
+  closeKeyModal();
+  const v = document.getElementById('key-created-value');
+  v.value = data.key.secret;
+  document.getElementById('key-created').classList.remove('hidden');
+  loadKeys();
+}
+function copyCreatedKey() {
+  const v = document.getElementById('key-created-value');
+  v.select(); document.execCommand('copy');
+  toast('密钥已复制');
+}
+function copyKey(s) {
+  const ta = document.createElement('textarea');
+  ta.value = s; document.body.appendChild(ta); ta.select();
+  document.execCommand('copy'); ta.remove();
+  toast('密钥已复制');
+}
+async function toggleKey(id, enabled) {
+  const ok = await api('/admin/keys/' + id, { method: 'PUT', body: JSON.stringify({ enabled: !!enabled }) });
+  if (ok) { toast(enabled ? '已启用' : '已禁用'); loadKeys(); }
+}
+async function delKey(id) {
+  if (!confirm('确定删除该 API 密钥吗？使用它的客户端将立即失效。')) return;
+  const ok = await api('/admin/keys/' + id, { method: 'DELETE' });
+  if (ok) { toast('密钥已删除'); loadKeys(); }
+}
 </script>
 </body>
 </html>

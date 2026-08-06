@@ -1,10 +1,13 @@
 import time
+import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, RedirectResponse
 from models import ChatCompletionRequest
 from pool import ModelPool, load_config
 from database import init_db, close_db
+import database as db
+import keyauth
 from scheduler import start_scheduler
 from admin import router as admin_router, GATEWAY_VERSION, GATEWAY_COMMIT
 
@@ -26,16 +29,29 @@ app.include_router(admin_router)
 pool = ModelPool()
 
 
-def verify_key(request: Request):
+async def verify_key(request: Request) -> dict:
+    """认证：服务器密钥(管理员账号) / 管理员 Key / 用户 Key。返回认证上下文。"""
     config = load_config()
     expected = config.get("server", {}).get("api_key", "")
-    if not expected:
-        return
     auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        auth = auth[7:]
-    if auth != expected:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+    # 未配置服务器密钥时保持向后兼容：全部放行
+    if not expected:
+        return {"kind": "server_admin", "key": None}
+    if token and token == expected:
+        return {"kind": "server_admin", "key": None}
+    if token:
+        rec = await db.get_api_key_by_secret(token)
+        if rec and rec.get("enabled"):
+            return {"kind": "key_admin" if rec["type"] == "admin" else "key_user", "key": rec}
+    raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+async def require_admin(auth: dict = Depends(verify_key)):
+    """仅管理员（服务器密钥或管理员 Key）可访问：用量统计 / 测速。"""
+    if auth["kind"] == "key_user":
+        raise HTTPException(status_code=403, detail="用户 API Key 无权访问该接口")
+    return auth
 
 
 def _resolve(model_field: str) -> str | None:
@@ -47,20 +63,57 @@ def _resolve(model_field: str) -> str | None:
     return None
 
 
+def _wrap_key_stream(stream, key: dict, billing_mode: str):
+    """流式响应用户 Key 计量：按 token 捕获 usage，按次则计 1；流结束后入账。"""
+    captured = 0
+
+    async def gen():
+        nonlocal captured
+        try:
+            async for chunk in stream:
+                if isinstance(chunk, str) and chunk.startswith("data: ") and "[DONE]" not in chunk:
+                    try:
+                        obj = json.loads(chunk[6:].strip())
+                        u = obj.get("usage")
+                        if u and u.get("total_tokens"):
+                            captured = u["total_tokens"]
+                    except Exception:
+                        pass
+                yield chunk
+        finally:
+            amount = 1 if billing_mode == "request" else captured
+            if amount > 0:
+                await keyauth.charge_key_usage(key, amount)
+
+    return gen()
+
+
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest, _=Depends(verify_key)):
+async def chat_completions(req: ChatCompletionRequest, auth: dict = Depends(verify_key)):
     pool_name = _resolve(req.model or "auto")
     if pool_name is None:
         raise HTTPException(
             status_code=404,
             detail=f"未知模型池 '{req.model}'：对外仅可调用模型池（如 auto），不能直接指定单个模型",
         )
+
+    key = auth.get("key")
+    is_user_key = auth["kind"] == "key_user"
+    if is_user_key:
+        if not keyauth.is_pool_allowed(key, pool_name):
+            raise HTTPException(status_code=403, detail=f"该 API Key 无权访问模型池 '{pool_name}'")
+        ok, reason = await keyauth.key_usage_available(key)
+        if not ok:
+            raise HTTPException(status_code=429, detail=f"API Key 用量已达限额: {reason}")
+
     has_images = pool._has_images(req)
 
     if req.stream:
         stream, entry, steps = await pool.execute_stream_with_fallback(pool_name, req, None)
         if stream is None:
             raise HTTPException(status_code=503, detail=pool.failure_detail(steps, has_images))
+        if is_user_key:
+            stream = _wrap_key_stream(stream, key, key.get("billing_mode", "token"))
 
         async def generate():
             async for chunk in stream:
@@ -71,25 +124,34 @@ async def chat_completions(req: ChatCompletionRequest, _=Depends(verify_key)):
     response, tokens, steps = await pool.execute_with_fallback(pool_name, req, None)
     if response is None:
         raise HTTPException(status_code=503, detail=pool.failure_detail(steps, has_images))
+    if is_user_key:
+        amount = 1 if key.get("billing_mode") == "request" else response.usage.total_tokens
+        if amount > 0:
+            await keyauth.charge_key_usage(key, amount)
     return response
 
 
 @app.get("/v1/models")
-async def list_models(_=Depends(verify_key)):
+async def list_models(auth: dict = Depends(verify_key)):
+    if auth["kind"] == "key_user":
+        allowed = keyauth.parse_allowed_pools(auth["key"])
+        pool_names = [p for p in pool.pool_names() if p in allowed]
+    else:
+        pool_names = pool.pool_names()
     data = [
         {"id": pname, "object": "model", "owned_by": "gateway-pool"}
-        for pname in pool.pool_names()
+        for pname in pool_names
     ]
     return {"object": "list", "data": data}
 
 
 @app.get("/stats")
-async def stats(_=Depends(verify_key)):
+async def stats(_=Depends(require_admin)):
     return {"models": await pool.get_stats()}
 
 
 @app.post("/speedtest")
-async def speedtest(request: Request, _=Depends(verify_key)):
+async def speedtest(request: Request, _=Depends(require_admin)):
     body = {}
     try:
         body = await request.json()

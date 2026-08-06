@@ -78,6 +78,39 @@ async def init_db():
                 window_start REAL NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                secret TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL DEFAULT 'user',
+                allowed_pools TEXT DEFAULT '[]',
+                token_type TEXT DEFAULT '',
+                billing_mode TEXT DEFAULT 'token',
+                limit_amount INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                created_at REAL NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS api_key_usage (
+                key_id INTEGER PRIMARY KEY,
+                used_amount INTEGER DEFAULT 0,
+                window_start REAL,
+                created_at REAL,
+                expired INTEGER DEFAULT 0,
+                last_reset_date TEXT DEFAULT ''
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT DEFAULT 'user',
+                created_at REAL NOT NULL
+            )
+        """)
         await db.commit()
 
 
@@ -286,3 +319,190 @@ async def get_decisions(pool_name: str | None = None, limit: int = 100) -> list[
                 d["steps"] = []
             out.append(d)
         return out
+
+
+# ── API Key 管理 ──────────────────────────────────────────────────────
+
+async def create_api_key(name: str, secret: str, ktype: str, allowed_pools: list,
+                         token_type: str, billing_mode: str, limit_amount: int) -> int:
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            """INSERT INTO api_keys (name, secret, type, allowed_pools, token_type, billing_mode, limit_amount, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (name, secret, ktype, json.dumps(allowed_pools, ensure_ascii=False),
+             token_type, billing_mode, limit_amount, time.time()),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def list_api_keys() -> list[dict]:
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT * FROM api_keys ORDER BY id DESC"
+        )
+        rows = await cursor.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["allowed_pools"] = json.loads(d["allowed_pools"])
+            except Exception:
+                d["allowed_pools"] = []
+            out.append(d)
+        return out
+
+
+async def get_api_key_by_secret(secret: str) -> dict | None:
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT * FROM api_keys WHERE secret = ?", (secret,)
+        )
+        r = await cursor.fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        try:
+            d["allowed_pools"] = json.loads(d["allowed_pools"])
+        except Exception:
+            d["allowed_pools"] = []
+        return d
+
+
+async def get_api_key_by_id(key_id: int) -> dict | None:
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT * FROM api_keys WHERE id = ?", (key_id,)
+        )
+        r = await cursor.fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        try:
+            d["allowed_pools"] = json.loads(d["allowed_pools"])
+        except Exception:
+            d["allowed_pools"] = []
+        return d
+
+
+async def update_api_key(key_id: int, fields: dict):
+    allowed = {"name", "type", "allowed_pools", "token_type", "billing_mode", "limit_amount", "enabled"}
+    sets = []
+    vals = []
+    for k in allowed:
+        if k in fields:
+            v = fields[k]
+            if k == "allowed_pools":
+                v = json.dumps(v, ensure_ascii=False)
+            sets.append(f"{k} = ?")
+            vals.append(v)
+    if not sets:
+        return
+    vals.append(key_id)
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            f"UPDATE api_keys SET {', '.join(sets)} WHERE id = ?", vals
+        )
+        await db.commit()
+
+
+async def delete_api_key(key_id: int):
+    async with _lock:
+        db = await _get_conn()
+        await db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+        await db.execute("DELETE FROM api_key_usage WHERE key_id = ?", (key_id,))
+        await db.commit()
+
+
+# ── API Key 用量（daily / rolling_5h / one_time 语义，与模型一致）──────
+
+async def get_key_usage(key_id: int) -> dict | None:
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT * FROM api_key_usage WHERE key_id = ?", (key_id,)
+        )
+        r = await cursor.fetchone()
+        if not r:
+            return None
+        return dict(r)
+
+
+async def init_key_usage(key_id: int):
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            """INSERT OR IGNORE INTO api_key_usage (key_id, used_amount, last_reset_date)
+               VALUES (?, 0, ?)""",
+            (key_id, ""),
+        )
+        await db.commit()
+
+
+async def add_key_usage(key_id: int, amount: int):
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            "UPDATE api_key_usage SET used_amount = used_amount + ? WHERE key_id = ?",
+            (amount, key_id),
+        )
+        await db.commit()
+
+
+async def reset_key_usage(key_id: int):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            """INSERT INTO api_key_usage (key_id, used_amount, window_start, created_at, expired, last_reset_date)
+               VALUES (?, 0, ?, ?, 0, ?)
+               ON CONFLICT(key_id) DO UPDATE SET
+                   used_amount = 0, window_start = excluded.window_start,
+                   created_at = excluded.created_at, expired = 0, last_reset_date = excluded.last_reset_date""",
+            (key_id, time.time(), time.time(), today),
+        )
+        await db.commit()
+
+
+async def expire_key_usage(key_id: int):
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            "UPDATE api_key_usage SET expired = 1 WHERE key_id = ?", (key_id,)
+        )
+        await db.commit()
+
+
+# ── 用户（预留：未来普通用户账号体系）──────────────────────────────────
+
+async def create_user(username: str, password_hash: str, role: str = "user") -> int:
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+            (username, password_hash, role, time.time()),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def list_users() -> list[dict]:
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute("SELECT id, username, role, created_at FROM users ORDER BY id")
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def delete_user(user_id: int):
+    async with _lock:
+        db = await _get_conn()
+        await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        await db.commit()

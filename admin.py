@@ -548,3 +548,138 @@ async def test_model(request: Request, _=Depends(verify_admin)):
         return {"ok": True, "result": result}
     finally:
         await provider.close()
+
+
+# ── API Key 管理 ─────────────────────────────────────────────────────
+
+@router.get("/keys")
+async def list_keys(_=Depends(verify_admin)):
+    import database as db
+    import keyauth as ka
+    keys = await db.list_api_keys()
+    out = []
+    for k in keys:
+        summary = await ka.key_usage_summary(k)
+        out.append({**k, "usage": summary})
+    return {"keys": out}
+
+
+@router.post("/keys")
+async def create_key(request: Request, _=Depends(verify_admin)):
+    import database as db
+    import keyauth as ka
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="缺少密钥名称")
+    ktype = body.get("type", "user")
+    if ktype not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="type 必须为 admin 或 user")
+    allowed_pools = body.get("allowed_pools") or []
+    if not isinstance(allowed_pools, list):
+        raise HTTPException(status_code=400, detail="allowed_pools 必须为数组")
+    token_type = body.get("token_type", "")
+    if token_type not in ("", "daily", "rolling_5h", "one_time"):
+        raise HTTPException(status_code=400, detail="token_type 非法")
+    billing_mode = body.get("billing_mode", "token")
+    if billing_mode not in ("token", "request"):
+        raise HTTPException(status_code=400, detail="billing_mode 必须为 token 或 request")
+    limit_amount = int(body.get("limit_amount") or 0)
+    if limit_amount < 0:
+        raise HTTPException(status_code=400, detail="limit_amount 不能为负")
+    if ktype == "admin":
+        token_type, billing_mode, limit_amount = "", "token", 0
+        allowed_pools = []
+
+    secret = ka.generate_key()
+    key_id = await db.create_api_key(name, secret, ktype, allowed_pools,
+                                     token_type, billing_mode, limit_amount)
+    rec = await db.get_api_key_by_id(key_id)
+    return {"ok": True, "key": rec}
+
+
+@router.put("/keys/{key_id}")
+async def update_key(key_id: int, request: Request, _=Depends(verify_admin)):
+    import database as db
+    body = await request.json()
+    fields = {}
+    if "name" in body:
+        nm = (body["name"] or "").strip()
+        if nm:
+            fields["name"] = nm
+    if "type" in body:
+        if body["type"] not in ("admin", "user"):
+            raise HTTPException(status_code=400, detail="type 必须为 admin 或 user")
+        fields["type"] = body["type"]
+    if "enabled" in body:
+        fields["enabled"] = 1 if body["enabled"] else 0
+    if "allowed_pools" in body:
+        if not isinstance(body["allowed_pools"], list):
+            raise HTTPException(status_code=400, detail="allowed_pools 必须为数组")
+        fields["allowed_pools"] = body["allowed_pools"]
+    if "token_type" in body:
+        if body["token_type"] not in ("", "daily", "rolling_5h", "one_time"):
+            raise HTTPException(status_code=400, detail="token_type 非法")
+        fields["token_type"] = body["token_type"]
+    if "billing_mode" in body:
+        if body["billing_mode"] not in ("token", "request"):
+            raise HTTPException(status_code=400, detail="billing_mode 必须为 token 或 request")
+        fields["billing_mode"] = body["billing_mode"]
+    if "limit_amount" in body:
+        v = int(body["limit_amount"] or 0)
+        if v < 0:
+            raise HTTPException(status_code=400, detail="limit_amount 不能为负")
+        fields["limit_amount"] = v
+    # 管理员 Key 强制无限制
+    if fields.get("type") == "admin":
+        fields["allowed_pools"] = []
+        fields["token_type"] = ""
+        fields["limit_amount"] = 0
+    if not fields:
+        raise HTTPException(status_code=400, detail="没有可更新的字段")
+    await db.update_api_key(key_id, fields)
+    rec = await db.get_api_key_by_id(key_id)
+    return {"ok": True, "key": rec}
+
+
+@router.delete("/keys/{key_id}")
+async def delete_key(key_id: int, _=Depends(verify_admin)):
+    import database as db
+    rec = await db.get_api_key_by_id(key_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail=f"API Key #{key_id} 不存在")
+    await db.delete_api_key(key_id)
+    return {"ok": True}
+
+
+# ── 用户（预留：未来普通用户账号体系）──────────────────────────────────
+
+@router.get("/users")
+async def list_users(_=Depends(verify_admin)):
+    import database as db
+    return {"users": await db.list_users()}
+
+
+@router.post("/users")
+async def create_user(request: Request, _=Depends(verify_admin)):
+    """预留接口：创建用户（当前仅管理员账号，普通用户体系待后续启用）"""
+    import database as db
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    password = str(body.get("password") or "")
+    role = body.get("role", "user")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="缺少 username / password")
+    if role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="role 必须为 admin 或 user")
+    import hashlib
+    pwd_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    uid = await db.create_user(username, pwd_hash, role)
+    return {"ok": True, "id": uid}
+
+
+@router.delete("/users/{user_id}")
+async def delete_user(user_id: int, _=Depends(verify_admin)):
+    import database as db
+    await db.delete_user(user_id)
+    return {"ok": True}
