@@ -276,7 +276,9 @@ body {
 .f2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .fg { margin-bottom: 13px; }
 .fg label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#k-pools-checkboxes label.pool-check { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 13px; white-space: normal; overflow: visible; text-overflow: clip; margin-bottom: 0; padding: 3px 0; cursor: pointer; }
+#k-pools-checkboxes label.pool-check { display: flex; align-items: center; justify-content: flex-start; gap: 6px; color: var(--text); font-size: 13px; white-space: normal; overflow: visible; text-overflow: clip; margin-bottom: 0; padding: 3px 0; cursor: pointer; }
+#k-pools-checkboxes input[type="checkbox"] { width: auto; min-width: 0; height: auto; padding: 0; margin: 0; flex: 0 0 auto; }
+#k-pools-checkboxes input[type="checkbox"]:focus { outline: none; box-shadow: none; }
 .fg input, .fg select {
   width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line-hi);
   background: var(--bg); color: var(--text); font-size: 13px; font-family: var(--mono);
@@ -337,8 +339,12 @@ body {
   <div id="tab-pools" class="hidden">
     <div class="toolbar">
       <div class="hint">拖拽 ⠿ 调整池内优先级（越靠前越先调用）；悬停 ⓘ 查看该接口的限额与刷新详情；测速结果会标注在接口后方。</div>
-      <button class="btn btn-amber" onclick="showAddPool()">＋ 新增模型池</button>
+      <div class="btn-row">
+        <button class="btn btn-ghost" id="btn-pool-mode" onclick="togglePoolMode()">🔀 用户专属池模式</button>
+        <button class="btn btn-amber" id="btn-add-pool" onclick="showAddPool()">＋ 新增模型池</button>
+      </div>
     </div>
+    <div id="pool-mode-note" class="hidden" style="margin-bottom:12px;font-size:12.5px;color:var(--amber);background:var(--amber-dim);border:1px solid rgba(245,165,36,.3);padding:8px 12px;border-radius:6px">🔒 当前为「用户专属池」模式：仅显示各密钥的专属池。创建/删除请在「API 密钥」页的密钥编辑界面操作；此处可拖拽排序、加入/移除模型。</div>
     <div id="pool-list"></div>
   </div>
 
@@ -409,8 +415,12 @@ body {
         </div>
         <div class="fg"><label>限额数值（0=不限）</label><input name="limit_amount" type="number" value="0" min="0"></div>
       </div>
+      <div id="k-own-pool-fields" class="hidden" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">👤 用户专属模型池</div>
+        <div id="k-own-pool-status" style="font-size:12.5px;color:var(--muted)">加载中...</div>
+      </div>
       <div class="modal-actions">
-        <button type="submit" class="btn btn-amber">创建</button>
+        <button type="submit" class="btn btn-amber" id="k-submit-btn">创建</button>
         <button type="button" class="btn btn-ghost" onclick="closeKeyModal()">取消</button>
       </div>
     </form>
@@ -652,6 +662,15 @@ let modelLookup = {};
 let poolLookup = {};
 let speedCache = JSON.parse(localStorage.getItem('gw_speed') || '{}');
 let dragSrc = null;
+let poolMode = 'normal'; // 'normal' | 'user'
+
+function togglePoolMode() {
+  poolMode = poolMode === 'normal' ? 'user' : 'normal';
+  document.getElementById('btn-pool-mode').textContent = poolMode === 'normal' ? '🔀 用户专属池模式' : '🔀 普通池模式';
+  document.getElementById('btn-add-pool').style.display = poolMode === 'normal' ? '' : 'none';
+  document.getElementById('pool-mode-note').classList.toggle('hidden', poolMode !== 'user');
+  loadPools();
+}
 
 async function loadPools() {
   const [pdata, mdata, provdata] = await Promise.all([api('/admin/pools'), api('/admin/models'), api('/admin/providers')]);
@@ -662,18 +681,25 @@ async function loadPools() {
   if (provdata) provdata.providers.forEach(p => providerLookup[p.id] = p);
   poolLookup = pdata.pools;
 
-  document.getElementById('pool-list').innerHTML = Object.entries(pdata.pools).map(([name, pool]) => {
+  const entries = Object.entries(pdata.pools).filter(([name, pool]) => {
+    const isDedicated = !!pool.owner_key_id;
+    return poolMode === 'user' ? isDedicated : !isDedicated;
+  });
+
+  document.getElementById('pool-list').innerHTML = entries.map(([name, pool]) => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
     const availPools = Object.keys(pdata.pools).filter(p => p !== name && p !== '兜底池' && !ids.includes('pool:' + p));
     const isAuto = name === 'auto';
     const isFallback = name === '兜底池';
+    const isDedicated = !!pool.owner_key_id;
     const isDraggable = !isAuto; // auto is fixed at top
+    const dedicatedTag = isDedicated ? `<span class="badge b-5h">👤 专属池 · Key#${esc(pool.owner_key_id)}</span>` : '';
     return `
     <div class="card" data-pool-card="${name}" ${isDraggable ? 'draggable="true"' : ''}>
       <div class="card-head">
         <div>
-          <div class="card-title">${isDraggable ? '<span class="drag-handle" title="拖拽排序">⠿</span>' : (isAuto ? '<span class="drag-handle" style="opacity:.3;cursor:not-allowed" title="auto 池固定在顶端">⠿</span>' : '')}池：${name}<span class="callable-tag">model="${name}" 可调用</span>${isFallback ? '<span class="badge b-openai">🛟 兜底池</span>' : ''}</div>
+          <div class="card-title">${isDraggable ? '<span class="drag-handle" title="拖拽排序">⠿</span>' : (isAuto ? '<span class="drag-handle" style="opacity:.3;cursor:not-allowed" title="auto 池固定在顶端">⠿</span>' : '')}池：${name}<span class="callable-tag">model="${name}" 可调用</span>${isFallback ? '<span class="badge b-openai">🛟 兜底池</span>' : ''}${dedicatedTag}</div>
           <div class="card-sub">${pool.strategy === 'sequential' ? '策略：按序调用' : (pool.strategy || '')} · 共 ${ids.length} 项${pool.auto_order ? ' · 自动择优' : ''}</div>
         </div>
         <div class="btn-row">
@@ -683,7 +709,7 @@ async function loadPools() {
             <span class="sw-label">自动择优</span>
           </label>
           <button class="btn btn-ghost btn-sm" onclick="speedPool('${name}')">⚡ 测速本池</button>
-          ${isAuto ? `<button class="btn btn-amber btn-sm" onclick="toggleSingleMode('${name}')" id="single-btn-${name}" title="开启后，auto池只使用选定的单个模型；关闭后恢复正常。池内布局不变。">🎯 一键单模型</button><span class="badge b-openai">内置</span>` : (isFallback ? '' : `<button class="btn btn-ghost btn-sm" onclick="renamePool('${name}')">✏️ 重命名</button><button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`)}
+          ${isAuto ? `<button class="btn btn-amber btn-sm" onclick="toggleSingleMode('${name}')" id="single-btn-${name}" title="开启后，auto池只使用选定的单个模型；关闭后恢复正常。池内布局不变。">🎯 一键单模型</button><span class="badge b-openai">内置</span>` : (isFallback ? '' : (isDedicated ? '' : `<button class="btn btn-ghost btn-sm" onclick="renamePool('${name}')">✏️ 重命名</button><button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`))}
         </div>
       </div>
       ${isAuto ? `
@@ -1464,6 +1490,7 @@ async function loadKeys() {
       </div>
       <div class="grid">
         <div>授权池 <b>${k.type === 'admin' ? '全部' : (k.allowed_pools || []).map(esc).join('、') || '无'}</b></div>
+        <div>专属池 <b>${k.own_pool ? esc(k.own_pool) : '无'}</b></div>
         <div>用量 <b>${keyLimitText(k)}</b></div>
         <div>创建时间 <b>${new Date(k.created_at * 1000).toLocaleString('zh-CN', { hour12: false })}</b></div>
       </div>
@@ -1481,6 +1508,8 @@ async function showAddKey() {
   editingKeyId = null;
   document.getElementById('kform').reset();
   document.getElementById('key-modal-title').textContent = '创建 API 密钥';
+  document.getElementById('k-submit-btn').textContent = '创建';
+  document.getElementById('k-own-pool-fields').classList.add('hidden');
   await loadKeyPools();
   renderPoolCheckboxes([]);
   onKeyTypeChange();
@@ -1500,16 +1529,58 @@ async function showEditKey(id) {
   form.billing_mode.value = k.billing_mode || 'token';
   form.limit_amount.value = k.limit_amount || 0;
   document.getElementById('key-modal-title').textContent = '编辑 API 密钥';
+  document.getElementById('k-submit-btn').textContent = '保存';
   await loadKeyPools();
   renderPoolCheckboxes(k.type === 'admin' ? [] : (k.allowed_pools || []));
   onKeyTypeChange();
   document.getElementById('overlay-key').classList.add('show');
+  loadKeyOwnPool();
 }
 function onKeyTypeChange() {
   const isUser = document.getElementById('k-type').value === 'user';
   document.getElementById('k-pool-fields').style.display = isUser ? '' : 'none';
+  const isEdit = editingKeyId !== null;
+  document.getElementById('k-own-pool-fields').classList.toggle('hidden', !(isEdit && isUser));
 }
 function closeKeyModal() { document.getElementById('overlay-key').classList.remove('show'); }
+async function loadKeyOwnPool() {
+  const st = document.getElementById('k-own-pool-status');
+  st.innerHTML = '加载中...';
+  if (editingKeyId === null) return;
+  const data = await api('/admin/keys/' + editingKeyId + '/pool');
+  if (!data) return;
+  if (!data.pool) {
+    st.innerHTML = `尚未创建专属模型池。
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <input id="k-own-pool-name" placeholder="专属池名称" style="flex:1;padding:7px 10px;border-radius:6px;border:1px solid var(--line-hi);background:var(--bg);color:var(--text);font-size:12.5px">
+        <button class="btn btn-amber btn-sm" onclick="createKeyOwnPool()">创建</button>
+      </div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:5px">创建后自动加入该密钥的授权池；功能与普通池一致，可在「模型池」页切换到专属池模式编辑。</div>`;
+  } else {
+    st.innerHTML = `专属池：<b class="mono" style="color:var(--teal)">${esc(data.pool.name)}</b>（${(data.pool.model_ids || []).length} 个模型）已创建
+      <div style="margin-top:8px">
+        <button class="btn btn-red btn-sm" onclick="deleteKeyOwnPool()">🗑 删除专属池</button>
+        <span style="font-size:11.5px;color:var(--muted);margin-left:8px">编辑请在「模型池」页切换到专属池模式</span>
+      </div>`;
+  }
+}
+async function createKeyOwnPool() {
+  const name = document.getElementById('k-own-pool-name').value.trim();
+  if (!name) { toast('请输入专属池名称', true); return; }
+  const data = await api('/admin/keys/' + editingKeyId + '/pool', { method: 'POST', body: JSON.stringify({ name: name }) });
+  if (!data) return;
+  toast('专属池已创建');
+  loadKeyOwnPool();
+  loadKeys();
+}
+async function deleteKeyOwnPool() {
+  if (!confirm('确定删除该密钥的专属模型池吗？删除后不可恢复。')) return;
+  const data = await api('/admin/keys/' + editingKeyId + '/pool', { method: 'DELETE' });
+  if (!data) return;
+  toast('专属池已删除');
+  loadKeyOwnPool();
+  loadKeys();
+}
 async function submitKey(e) {
   e.preventDefault();
   const form = document.getElementById('kform');

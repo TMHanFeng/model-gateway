@@ -122,6 +122,7 @@ class ModelPool:
                 "auto_order": bool(pool_cfg.get("auto_order", False)),
                 "fallback_pool": pool_cfg.get("fallback_pool"),
                 "strategy": pool_cfg.get("strategy", "sequential"),
+                "owner_key_id": pool_cfg.get("owner_key_id"),
             }
 
         # Auto-create 兜底池 (fallback pool): empty by default, user manually adds models.

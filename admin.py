@@ -341,6 +341,8 @@ async def create_pool(request: Request, _=Depends(verify_admin)):
     pools = config.setdefault("pools", {})
     if name in pools:
         raise HTTPException(status_code=409, detail=f"Pool '{name}' already exists")
+    if body.get("owner_key_id"):
+        raise HTTPException(status_code=400, detail="专属模型池请在密钥编辑界面创建")
 
     pools[name] = {
         "strategy": body.get("strategy", "sequential"),
@@ -364,6 +366,8 @@ async def delete_pool(pool_name: str, _=Depends(verify_admin)):
     pools = config.get("pools", {})
     if pool_name not in pools:
         raise HTTPException(status_code=404, detail=f"Pool '{pool_name}' not found")
+    if pools[pool_name].get("owner_key_id"):
+        raise HTTPException(status_code=400, detail="专属模型池请在密钥编辑界面删除")
 
     del pools[pool_name]
     save_config(config)
@@ -441,6 +445,8 @@ async def rename_pool(pool_name: str, request: Request, _=Depends(verify_admin))
     pools = config.get("pools", {})
     if pool_name not in pools:
         raise HTTPException(status_code=404, detail=f"Pool '{pool_name}' not found")
+    if pools[pool_name].get("owner_key_id"):
+        raise HTTPException(status_code=400, detail="专属模型池不允许重命名")
     if new_name in pools:
         raise HTTPException(status_code=409, detail=f"Pool '{new_name}' already exists")
 
@@ -557,10 +563,17 @@ async def list_keys(_=Depends(verify_admin)):
     import database as db
     import keyauth as ka
     keys = await db.list_api_keys()
+    config = load_config()
+    pools = config.get("pools", {})
+    pool_by_key = {}
+    for pname, pcfg in pools.items():
+        oid = pcfg.get("owner_key_id")
+        if oid:
+            pool_by_key[str(oid)] = pname
     out = []
     for k in keys:
         summary = await ka.key_usage_summary(k)
-        out.append({**k, "usage": summary})
+        out.append({**k, "usage": summary, "own_pool": pool_by_key.get(str(k["id"]))})
     return {"keys": out}
 
 
@@ -648,7 +661,101 @@ async def delete_key(key_id: int, _=Depends(verify_admin)):
     rec = await db.get_api_key_by_id(key_id)
     if not rec:
         raise HTTPException(status_code=404, detail=f"API Key #{key_id} 不存在")
+    # 同时清理该密钥的专属模型池及引用
+    config = load_config()
+    pools = config.get("pools", {})
+    targets = [n for n, p in pools.items() if p.get("owner_key_id") == str(key_id)]
+    for t in targets:
+        del pools[t]
+        for pcfg in pools.values():
+            pcfg["model_ids"] = [x for x in pcfg.get("model_ids", []) if x != t and x != f"pool:{t}"]
+    if targets:
+        save_config(config)
     await db.delete_api_key(key_id)
+    _sync_pool()
+    return {"ok": True}
+
+
+# ── 用户专属模型池（仅密钥编辑界面可创建/删除，功能与普通池一致）──────
+
+def _find_key_pool(config: dict, key_id: int) -> tuple[str, dict] | None:
+    pools = config.get("pools", {})
+    for name, pcfg in pools.items():
+        if pcfg.get("owner_key_id") == str(key_id):
+            return name, pcfg
+    return None
+
+
+@router.get("/keys/{key_id}/pool")
+async def get_key_pool(key_id: int, _=Depends(verify_admin)):
+    import database as db
+    rec = await db.get_api_key_by_id(key_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail=f"API Key #{key_id} 不存在")
+    found = _find_key_pool(load_config(), key_id)
+    if not found:
+        return {"ok": True, "pool": None}
+    name, pcfg = found
+    return {"ok": True, "pool": {**pcfg, "name": name}}
+
+
+@router.post("/keys/{key_id}/pool")
+async def create_key_pool(key_id: int, request: Request, _=Depends(verify_admin)):
+    import database as db
+    rec = await db.get_api_key_by_id(key_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail=f"API Key #{key_id} 不存在")
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="缺少专属池名称")
+    if "/" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="池名称不能包含 / 或 \\ 字符")
+
+    config = load_config()
+    pools = config.setdefault("pools", {})
+    if _find_key_pool(config, key_id):
+        raise HTTPException(status_code=409, detail="该密钥已存在专属模型池")
+    if name in pools:
+        raise HTTPException(status_code=409, detail=f"池名称 '{name}' 已存在")
+
+    pools[name] = {
+        "strategy": "sequential",
+        "model_ids": [],
+        "auto_order": False,
+        "owner_key_id": str(key_id),
+    }
+    # 自动加入该密钥的授权池，使其可被调用
+    allowed = list(rec["allowed_pools"])
+    if name not in allowed:
+        allowed.append(name)
+        await db.update_api_key(key_id, {"allowed_pools": allowed})
+    save_config(config)
+    restart_scheduler()
+    _sync_pool()
+    return {"ok": True, "pool": pools[name]}
+
+
+@router.delete("/keys/{key_id}/pool")
+async def delete_key_pool(key_id: int, _=Depends(verify_admin)):
+    import database as db
+    config = load_config()
+    found = _find_key_pool(config, key_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="该密钥没有专属模型池")
+    name, _ = found
+    pools = config.get("pools", {})
+    del pools[name]
+    for pcfg in pools.values():
+        pcfg["model_ids"] = [x for x in pcfg.get("model_ids", []) if x != name and x != f"pool:{name}"]
+    # 从该密钥授权池移除
+    rec = await db.get_api_key_by_id(key_id)
+    if rec:
+        allowed = [x for x in rec["allowed_pools"] if x != name]
+        await db.update_api_key(key_id, {"allowed_pools": allowed})
+    save_config(config)
+    restart_scheduler()
+    _sync_pool()
     return {"ok": True}
 
 
