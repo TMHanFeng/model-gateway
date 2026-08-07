@@ -569,7 +569,7 @@ class ModelPool:
             return "池为空或无匹配模型"
         return "所有候选模型均不可用：用量用尽 / RPM·TPM 触顶 / 冷却 / 超上下文"
 
-    async def execute_with_fallback(self, pool_name: str, req, requested_model: str | None = None):
+    async def execute_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = ""):
         tried: set[str] = set()
         estimated = self._estimate_tokens(req)
         has_images = self._has_images(req)
@@ -607,7 +607,7 @@ class ModelPool:
                         actual_calls[-1]["reason"] = "fallback_selected"
                 else:
                     actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
-                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls)
+                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
                 return response, tokens, actual_calls
             except RateLimitError:
                 actual_calls.append({"model": entry.id, "reason": "fallback_switch_429" if use_fallback else "switch_429"})
@@ -621,10 +621,10 @@ class ModelPool:
                     use_fallback = True
                 continue
 
-        await db.log_decision(pool_name, requested_model, None, estimated, actual_calls)
+        await db.log_decision(pool_name, requested_model, None, estimated, actual_calls, caller)
         return None, 0, actual_calls
 
-    async def execute_stream_with_fallback(self, pool_name: str, req, requested_model: str | None = None):
+    async def execute_stream_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = ""):
         tried: set[str] = set()
         estimated = self._estimate_tokens(req)
         has_images = self._has_images(req)
@@ -683,7 +683,7 @@ class ModelPool:
                         actual_calls[-1]["reason"] = "fallback_selected"
                 else:
                     actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
-                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls)
+                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
                 return _replay(), entry, actual_calls
             except RateLimitError:
                 actual_calls.append({"model": entry.id, "reason": "fallback_switch_429" if use_fallback else "switch_429"})
@@ -697,7 +697,7 @@ class ModelPool:
                     use_fallback = True
                 continue
 
-        await db.log_decision(pool_name, requested_model, None, estimated, actual_calls)
+        await db.log_decision(pool_name, requested_model, None, estimated, actual_calls, caller)
         return None, None, actual_calls
 
     async def speedtest(self, model_ids: list[str] | None = None) -> list[dict]:

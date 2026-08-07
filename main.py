@@ -99,6 +99,10 @@ async def chat_completions(req: ChatCompletionRequest, auth: dict = Depends(veri
 
     key = auth.get("key")
     is_user_key = auth["kind"] == "key_user"
+    if auth["kind"] == "server_admin":
+        caller = "管理员"
+    else:
+        caller = key.get("name", "") if key else ""
     if is_user_key:
         if not keyauth.is_pool_allowed(key, pool_name):
             raise HTTPException(status_code=403, detail=f"该 API Key 无权访问模型池 '{pool_name}'")
@@ -109,7 +113,7 @@ async def chat_completions(req: ChatCompletionRequest, auth: dict = Depends(veri
     has_images = pool._has_images(req)
 
     if req.stream:
-        stream, entry, steps = await pool.execute_stream_with_fallback(pool_name, req, None)
+        stream, entry, steps = await pool.execute_stream_with_fallback(pool_name, req, None, caller)
         if stream is None:
             raise HTTPException(status_code=503, detail=pool.failure_detail(steps, has_images))
         if is_user_key:
@@ -121,7 +125,7 @@ async def chat_completions(req: ChatCompletionRequest, auth: dict = Depends(veri
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
-    response, tokens, steps = await pool.execute_with_fallback(pool_name, req, None)
+    response, tokens, steps = await pool.execute_with_fallback(pool_name, req, None, caller)
     if response is None:
         raise HTTPException(status_code=503, detail=pool.failure_detail(steps, has_images))
     if is_user_key:

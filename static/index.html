@@ -1227,6 +1227,7 @@ async function loadDecisions() {
       <div class="log-card">
         <div class="log-head">
           <span class="log-time">${t}</span>
+          ${d.caller ? `<span class="log-pool" style="color:var(--teal);background:var(--teal-dim)">👤 ${esc(d.caller)}</span>` : ''}
           <span class="log-pool">池 ${esc(d.pool_name)}</span>
           ${d.requested ? `<span class="rsn rsn-neutral">指定 ${esc(d.requested)}</span>` : ''}
           <span class="rsn rsn-neutral">估算 ${d.estimated_tokens} tok</span>
@@ -1664,10 +1665,11 @@ async function loadKeyUsage() {
     const hh = String(h.hour).padStart(2, '0');
     const pct = h.used > 0 ? Math.max(4, Math.round(h.used / max * 100)) : 0;
     return `<div style="text-align:center" title="${hh}:00 用量 ${h.used}">
-      <div style="height:70px;background:var(--panel-2);border-radius:4px;display:flex;align-items:flex-end;overflow:hidden">
+      <div style="height:60px;background:var(--panel-2);border-radius:4px;display:flex;align-items:flex-end;overflow:hidden">
         <div style="width:100%;height:${pct}%;background:${h.used > 0 ? 'linear-gradient(180deg,var(--teal),#5eead4)' : 'transparent'};border-radius:4px"></div>
       </div>
-      <div style="font-size:10px;color:var(--muted);font-family:var(--mono);margin-top:2px">${hh}</div>
+      <div style="font-size:10px;color:var(--muted);font-family:var(--mono);margin-top:3px">${hh}</div>
+      <div style="font-size:10px;font-family:var(--mono);font-weight:600;color:${h.used > 0 ? 'var(--teal)' : 'var(--muted)'}">${h.used > 0 ? h.used.toLocaleString() : '0'}</div>
     </div>`;
   }).join('') + '</div>';
 }

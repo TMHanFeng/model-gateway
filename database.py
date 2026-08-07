@@ -68,9 +68,14 @@ async def init_db():
                 requested TEXT,
                 selected TEXT,
                 estimated_tokens INTEGER,
-                steps TEXT
+                steps TEXT,
+                caller TEXT
             )
         """)
+        # 老库迁移：decision_log 补充 caller 列
+        cols = [r[1] for r in await (await db.execute("PRAGMA table_info(decision_log)")).fetchall()]
+        if "caller" not in cols:
+            await db.execute("ALTER TABLE decision_log ADD COLUMN caller TEXT")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS rolling5h_state (
                 model_name TEXT PRIMARY KEY,
@@ -292,12 +297,12 @@ async def reset_5h_window(model_name: str):
         await db.commit()
 
 
-async def log_decision(pool_name: str, requested: str | None, selected: str | None, estimated: int, steps: list):
+async def log_decision(pool_name: str, requested: str | None, selected: str | None, estimated: int, steps: list, caller: str = ""):
     async with _lock:
         db = await _get_conn()
         await db.execute(
-            "INSERT INTO decision_log (ts, pool_name, requested, selected, estimated_tokens, steps) VALUES (?,?,?,?,?,?)",
-            (time.time(), pool_name, requested or "", selected or "", estimated, json.dumps(steps, ensure_ascii=False)),
+            "INSERT INTO decision_log (ts, pool_name, requested, selected, estimated_tokens, steps, caller) VALUES (?,?,?,?,?,?,?)",
+            (time.time(), pool_name, requested or "", selected or "", estimated, json.dumps(steps, ensure_ascii=False), caller),
         )
         await db.execute(
             "DELETE FROM decision_log WHERE id NOT IN (SELECT id FROM decision_log ORDER BY id DESC LIMIT 500)"
