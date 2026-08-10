@@ -374,7 +374,8 @@ select { max-width: 100%; }
   .f2, .f3 { grid-template-columns: 1fr; }
   .usage-grid { grid-template-columns: repeat(6, 1fr); }
   .nav-inner { padding: 0 14px; gap: 10px; }
-  .version { display: none; }
+  /* 窄屏不隐藏版本号，仅压缩展示（版本信息始终可见） */
+  .version { font-size: 10.5px; padding: 2px 6px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
