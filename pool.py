@@ -506,6 +506,7 @@ class ModelPool:
 
         tokens_used = response.usage.total_tokens
         await db.log_request(entry.id, tokens_used)
+        await db.add_model_call(entry.id, tokens_used)
 
         if entry.token_type == "one_time":
             charge = 1 if entry.billing_mode == "request" else tokens_used
@@ -546,6 +547,7 @@ class ModelPool:
         finally:
             self._record_latency(entry, (time.perf_counter() - t0) * 1000)
             await db.log_request(entry.id, captured)
+            await db.add_model_call(entry.id, captured)
             if captured > 0:
                 if entry.token_type == "one_time":
                     await db.add_one_time_usage(entry.id, captured)
@@ -718,6 +720,7 @@ class ModelPool:
                 # Record usage from speed test
                 tokens = r.get("tokens", 0)
                 if tokens > 0:
+                    await db.add_model_call(entry.id, tokens)
                     if entry.token_type == "one_time":
                         await db.add_one_time_usage(entry.id, tokens)
                     elif entry.token_type == "rolling_5h":
@@ -752,6 +755,9 @@ class ModelPool:
                 "current_tpm": await db.get_tpm(entry.id),
                 "latency_ms": entry.latency_ms,
             }
+            daily_stats = await db.get_model_daily_stats(entry.id)
+            s["today_requests"] = daily_stats["request_count"]
+            s["today_tokens"] = daily_stats["total_tokens"]
             if entry.token_type == "one_time":
                 state = await db.get_one_time_state(entry.id)
                 if state:

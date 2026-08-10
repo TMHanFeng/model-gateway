@@ -6,6 +6,14 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "gateway.db"
 
+
+def _bj_today() -> str:
+    """今日日期（YYYY-MM-DD，北京时间自然日）。
+    与 keyauth._today 一致（不 import keyauth 避免循环依赖，独立实现）。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+
 # Persistent connection + lock: avoids the per-query connect/close overhead that
 # dominated request latency (every _check_available call used to open 1-4 new
 # connections). WAL + NORMAL synchronous keep writes fast and readers unblocked.
@@ -94,7 +102,31 @@ async def init_db():
                 billing_mode TEXT DEFAULT 'token',
                 limit_amount INTEGER DEFAULT 0,
                 enabled INTEGER DEFAULT 1,
-                created_at REAL NOT NULL
+                created_at REAL NOT NULL,
+                expire_seconds INTEGER DEFAULT 0,
+                rotated_at REAL,
+                previous_secret TEXT,
+                previous_secret_expires REAL
+            )
+        """)
+        # 老库迁移：api_keys 补充 expire_seconds / rotated_at / 宽限期列
+        kcols = [r[1] for r in await (await db.execute("PRAGMA table_info(api_keys)")).fetchall()]
+        if "expire_seconds" not in kcols:
+            await db.execute("ALTER TABLE api_keys ADD COLUMN expire_seconds INTEGER DEFAULT 0")
+        if "rotated_at" not in kcols:
+            await db.execute("ALTER TABLE api_keys ADD COLUMN rotated_at REAL")
+        if "previous_secret" not in kcols:
+            await db.execute("ALTER TABLE api_keys ADD COLUMN previous_secret TEXT")
+        if "previous_secret_expires" not in kcols:
+            await db.execute("ALTER TABLE api_keys ADD COLUMN previous_secret_expires REAL")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS key_rotation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_id INTEGER NOT NULL,
+                old_prefix TEXT,
+                new_prefix TEXT,
+                ts REAL NOT NULL,
+                note TEXT
             )
         """)
         await db.execute("""
@@ -122,6 +154,15 @@ async def init_db():
                 hour_key TEXT NOT NULL,
                 used_amount INTEGER DEFAULT 0,
                 PRIMARY KEY (key_id, hour_key)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS model_daily_stats (
+                model_name TEXT NOT NULL,
+                date TEXT NOT NULL,
+                request_count INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                PRIMARY KEY (model_name, date)
             )
         """)
         await db.commit()
@@ -205,6 +246,42 @@ async def get_tpm(model_name: str) -> int:
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
+
+
+# ── 模型调用统计（请求次数 / token 用量，与计费量 token_usage 分离）────
+
+async def add_model_call(model_name: str, tokens: int):
+    """记录一次模型调用：当日 request_count+1、total_tokens+tokens。
+    日期用北京时间自然日（_bj_today），与配额刷新（scheduler Asia/Shanghai）对齐；
+    tokens 为该次调用实际 token 数，可为 0。"""
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            """INSERT INTO model_daily_stats (model_name, date, request_count, total_tokens)
+               VALUES (?, ?, 1, ?)
+               ON CONFLICT(model_name, date) DO UPDATE SET
+                   request_count = request_count + 1,
+                   total_tokens = total_tokens + excluded.total_tokens""",
+            (model_name, _bj_today(), tokens),
+        )
+        await db.commit()
+
+
+async def get_model_daily_stats(model_name: str, date_str: str | None = None) -> dict:
+    """返回某模型指定日期（默认今天，北京时间自然日 _bj_today）的
+    {"request_count": n, "total_tokens": n}，无记录时返回 {"request_count": 0, "total_tokens": 0}。"""
+    if date_str is None:
+        date_str = _bj_today()
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT request_count, total_tokens FROM model_daily_stats WHERE model_name = ? AND date = ?",
+            (model_name, date_str),
+        )
+        row = await cursor.fetchone()
+    if not row:
+        return {"request_count": 0, "total_tokens": 0}
+    return {"request_count": row[0], "total_tokens": row[1]}
 
 
 async def init_one_time(model_name: str):
@@ -337,14 +414,15 @@ async def get_decisions(pool_name: str | None = None, limit: int = 100) -> list[
 # ── API Key 管理 ──────────────────────────────────────────────────────
 
 async def create_api_key(name: str, secret: str, ktype: str, allowed_pools: list,
-                         token_type: str, billing_mode: str, limit_amount: int) -> int:
+                         token_type: str, billing_mode: str, limit_amount: int,
+                         expire_seconds: int = 0) -> int:
     async with _lock:
         db = await _get_conn()
         cursor = await db.execute(
-            """INSERT INTO api_keys (name, secret, type, allowed_pools, token_type, billing_mode, limit_amount, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO api_keys (name, secret, type, allowed_pools, token_type, billing_mode, limit_amount, expire_seconds, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (name, secret, ktype, json.dumps(allowed_pools, ensure_ascii=False),
-             token_type, billing_mode, limit_amount, time.time()),
+             token_type, billing_mode, limit_amount, expire_seconds, time.time()),
         )
         await db.commit()
         return cursor.lastrowid
@@ -385,6 +463,33 @@ async def get_api_key_by_secret(secret: str) -> dict | None:
         return d
 
 
+async def get_api_key_by_secret_or_previous(secret: str) -> dict | None:
+    """认证查找：优先匹配当前 secret，其次匹配宽限期内的 previous_secret。
+    返回记录与 get_api_key_by_secret 同构（allowed_pools 已解析）；均不匹配返回 None。"""
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT * FROM api_keys WHERE secret = ?", (secret,)
+        )
+        r = await cursor.fetchone()
+        if not r:
+            cursor = await db.execute(
+                """SELECT * FROM api_keys
+                   WHERE previous_secret = ? AND previous_secret_expires IS NOT NULL
+                     AND previous_secret_expires > ?""",
+                (secret, time.time()),
+            )
+            r = await cursor.fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        try:
+            d["allowed_pools"] = json.loads(d["allowed_pools"])
+        except Exception:
+            d["allowed_pools"] = []
+        return d
+
+
 async def get_api_key_by_id(key_id: int) -> dict | None:
     async with _lock:
         db = await _get_conn()
@@ -402,8 +507,52 @@ async def get_api_key_by_id(key_id: int) -> dict | None:
         return d
 
 
+async def rotate_key_secret(key_id: int, old_secret: str, new_secret: str, grace_seconds: int) -> bool:
+    """到期自动轮换：把 secret 换成 new_secret 并记录轮换时间，旧 secret 转入宽限期。
+    previous_secret 保留旧值，previous_secret_expires = now + grace_seconds：
+    宽限期内旧 secret 仍可认证（客户端无感过渡），到期后彻底失效。
+    保留 api_key_usage 用量累计（按 key_id 继续累计，跨轮换延续限额周期，不删除）。
+    CAS（WHERE secret = ?）：并发两个请求都判定过期时，仅第一个真正轮换成功（返回 True）；
+    第二个因 secret 已被替换而影响 0 行（返回 False），避免旧 secret 宽限期被二次覆盖丢失。"""
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            """UPDATE api_keys
+               SET secret = ?, rotated_at = ?, previous_secret = secret,
+                   previous_secret_expires = ?
+               WHERE id = ? AND secret = ?""",
+            (new_secret, time.time(), time.time() + grace_seconds, key_id, old_secret),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
+
+async def log_key_rotation(key_id: int, old_prefix: str, new_prefix: str, note: str = "") -> None:
+    """记录密钥轮换审计日志（只存 secret 前 8 字符前缀，绝不含明文）。"""
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            "INSERT INTO key_rotation_log (key_id, old_prefix, new_prefix, ts, note) VALUES (?, ?, ?, ?, ?)",
+            (key_id, old_prefix, new_prefix, time.time(), note),
+        )
+        await db.commit()
+
+
+async def get_key_rotations(key_id: int, limit: int = 20) -> list[dict]:
+    """查询某密钥的轮换记录（按时间倒序，新到旧）。"""
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT * FROM key_rotation_log WHERE key_id = ? ORDER BY ts DESC LIMIT ?",
+            (key_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
 async def update_api_key(key_id: int, fields: dict):
-    allowed = {"name", "type", "allowed_pools", "token_type", "billing_mode", "limit_amount", "enabled"}
+    allowed = {"name", "type", "allowed_pools", "token_type", "billing_mode", "limit_amount", "enabled",
+               "expire_seconds", "rotated_at"}
     sets = []
     vals = []
     for k in allowed:
@@ -429,6 +578,8 @@ async def delete_api_key(key_id: int):
         db = await _get_conn()
         await db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
         await db.execute("DELETE FROM api_key_usage WHERE key_id = ?", (key_id,))
+        await db.execute("DELETE FROM api_key_hourly_usage WHERE key_id = ?", (key_id,))
+        await db.execute("DELETE FROM key_rotation_log WHERE key_id = ?", (key_id,))
         await db.commit()
 
 

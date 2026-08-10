@@ -1,6 +1,6 @@
 # Model Gateway — 本地模型自动切换网关
 
-一个运行在本地的 LLM API 网关，对外暴露 **OpenAI 兼容接口**，对内聚合多个上游模型提供商，自动完成**配额管理、限流保护、故障切换、多模态降级**，并附带一个可视化管理后台。
+一个运行在本地的 LLM API 网关，对外暴露 **OpenAI 兼容接口与 Anthropic Messages 兼容接口**，对内聚合多个上游模型提供商，自动完成**配额管理、限流保护、故障切换、多模态降级**，并附带一个可视化管理后台。
 
 ---
 
@@ -14,7 +14,7 @@
 - **双计费模式**：按 Token 或按请求次数计费；人工标注免费（绿）/付费（红）
 - **一次性令牌**：到期或用完即永久失效，不刷新
 - **可视化管理后台**：模型/池的增删改、拖拽排序、用量图表、接口测速、调用记录审计
-- **流式支持**：SSE 流式响应透传，Anthropic 自动转换为 OpenAI chunk 格式
+- **流式支持**：SSE 流式响应透传，Anthropic 自动转换为 OpenAI chunk 格式；同时支持客户端以 Anthropic Messages 格式调用（自动转换）
 
 ---
 
@@ -73,6 +73,16 @@ API 服务地址:  http://127.0.0.1:8650/v1
 | `池名:模型名` | 在指定池中匹配该模型 |
 | `模型名`（如 `gpt-4o`） | 大池子：所有同名模型按序尝试 |
 | `标签/模型名`（如 `openai/gpt-4o`） | 精确指定某个模型实例 |
+
+### Anthropic Messages 格式调用
+
+客户端也可以直接用 Anthropic Messages 格式调用（例如 Anthropic SDK），网关自动转换：
+
+- **请求体**：Anthropic Messages 格式——顶层 `system`（字符串或块列表）、`messages` 内容块列表（`text` / `image` 块）、`stop_sequences` 等，网关自动转换为内部 OpenAI 格式
+- **认证**：`x-api-key: <密钥>`（Anthropic SDK 方式）或 `Authorization: Bearer <密钥>` 均可
+- **端点**：`/v1/chat/completions` 或 `/v1/messages` 均可
+- **响应**：自动转回 Anthropic 格式（含流式事件 `message_start` / `content_block_delta` / `content_block_stop` / `message_delta` / `message_stop`，`message_delta.usage.output_tokens` 反映真实 Token 用量）
+- **工具调用**：Anthropic 格式暂不支持 `tools` / `tool_choice`（返回 400 明确拒绝，请使用 OpenAI 格式）
 
 ---
 
@@ -225,7 +235,8 @@ Anthropic 适配器自动完成格式转换：
 
 | 端点 | 方法 | 说明 |
 |---|---|---|
-| `/v1/chat/completions` | POST | 对话（支持 `stream`） |
+| `/v1/chat/completions` | POST | 对话（支持 `stream`，OpenAI 与 Anthropic 格式均可） |
+| `/v1/messages` | POST | Anthropic Messages 格式对话（同 `/v1/chat/completions` 处理逻辑，自动转换） |
 | `/v1/models` | GET | 模型与池列表 |
 | `/health` | GET | 健康检查 |
 | `/stats` | GET | 各模型用量统计 |
@@ -255,6 +266,11 @@ SQLite（`gateway.db`）持久化：
 - `request_log`：最近 60 秒请求记录（RPM/TPM 滑动窗口）
 - `one_time_state`：一次性模型的用量、创建时间、是否过期
 - `decision_log`：最近 500 条调用决策记录（选模过程与切换依据）
+- `api_keys`：用户/管理员 API 密钥（含 `expire_seconds` 过期时长、`rotated_at` 轮换时间、`previous_secret` 旧密钥）
+- `key_rotation_log`：密钥轮换审计日志（仅存前 8 字符前缀，不存完整密钥）
+- `model_daily_stats`：模型每日调用次数 / Token 用量统计
+
+> **API 密钥轮换**：密钥可设置过期时长（小时），到期自动轮换新 secret，旧 secret 宽限期（约过期时长的 20%，1~24 小时）内仍可认证。
 
 ---
 

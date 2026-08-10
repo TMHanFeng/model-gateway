@@ -597,16 +597,26 @@ async def create_key(request: Request, _=Depends(verify_admin)):
     billing_mode = body.get("billing_mode", "token")
     if billing_mode not in ("token", "request"):
         raise HTTPException(status_code=400, detail="billing_mode 必须为 token 或 request")
-    limit_amount = int(body.get("limit_amount") or 0)
+    try:
+        limit_amount = int(body.get("limit_amount") or 0)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="limit_amount 必须为数字")
     if limit_amount < 0:
         raise HTTPException(status_code=400, detail="limit_amount 不能为负")
+    try:
+        expire_seconds = int(body.get("expire_seconds") or 0)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="expire_seconds 必须为数字")
+    if expire_seconds < 0:
+        raise HTTPException(status_code=400, detail="expire_seconds 不能为负")
     if ktype == "admin":
-        token_type, billing_mode, limit_amount = "", "token", 0
+        token_type, billing_mode, limit_amount, expire_seconds = "", "token", 0, 0
         allowed_pools = []
 
     secret = ka.generate_key()
     key_id = await db.create_api_key(name, secret, ktype, allowed_pools,
-                                     token_type, billing_mode, limit_amount)
+                                     token_type, billing_mode, limit_amount,
+                                     expire_seconds=expire_seconds)
     rec = await db.get_api_key_by_id(key_id)
     return {"ok": True, "key": rec}
 
@@ -615,6 +625,9 @@ async def create_key(request: Request, _=Depends(verify_admin)):
 async def update_key(key_id: int, request: Request, _=Depends(verify_admin)):
     import database as db
     body = await request.json()
+    rec0 = await db.get_api_key_by_id(key_id)
+    if not rec0:
+        raise HTTPException(status_code=404, detail=f"API Key #{key_id} 不存在")
     fields = {}
     if "name" in body:
         nm = (body["name"] or "").strip()
@@ -639,15 +652,32 @@ async def update_key(key_id: int, request: Request, _=Depends(verify_admin)):
             raise HTTPException(status_code=400, detail="billing_mode 必须为 token 或 request")
         fields["billing_mode"] = body["billing_mode"]
     if "limit_amount" in body:
-        v = int(body["limit_amount"] or 0)
+        try:
+            v = int(body["limit_amount"] or 0)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="limit_amount 必须为数字")
         if v < 0:
             raise HTTPException(status_code=400, detail="limit_amount 不能为负")
         fields["limit_amount"] = v
+    if "expire_seconds" in body:
+        try:
+            v = int(body["expire_seconds"] or 0)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="expire_seconds 必须为数字")
+        if v < 0:
+            raise HTTPException(status_code=400, detail="expire_seconds 不能为负")
+        cur_v = rec0.get("expire_seconds") or 0
+        if v != cur_v:
+            fields["expire_seconds"] = v
+            # 过期时长被修改时重置轮换时间，从 created_at 重新计时新周期
+            fields["rotated_at"] = None
     # 管理员 Key 强制无限制
     if fields.get("type") == "admin":
         fields["allowed_pools"] = []
         fields["token_type"] = ""
         fields["limit_amount"] = 0
+        fields["expire_seconds"] = 0
+        fields["rotated_at"] = None
     if not fields:
         raise HTTPException(status_code=400, detail="没有可更新的字段")
     await db.update_api_key(key_id, fields)
@@ -674,6 +704,15 @@ async def delete_key(key_id: int, _=Depends(verify_admin)):
     await db.delete_api_key(key_id)
     _sync_pool()
     return {"ok": True}
+
+
+@router.get("/keys/{key_id}/rotations")
+async def get_key_rotations(key_id: int, _=Depends(verify_admin)):
+    import database as db
+    rec = await db.get_api_key_by_id(key_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail=f"API Key #{key_id} 不存在")
+    return {"rotations": await db.get_key_rotations(key_id)}
 
 
 # ── 用户专属模型池（仅密钥编辑界面可创建/删除，功能与普通池一致）──────

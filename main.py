@@ -3,6 +3,7 @@ import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, RedirectResponse
+from pydantic import ValidationError
 from models import ChatCompletionRequest
 from pool import ModelPool, load_config
 from database import init_db, close_db
@@ -10,6 +11,12 @@ import database as db
 import keyauth
 from scheduler import start_scheduler
 from admin import router as admin_router, GATEWAY_VERSION, GATEWAY_COMMIT
+from format_adapter import (
+    is_anthropic_request,
+    anthropic_to_openai,
+    openai_to_anthropic_response,
+    openai_sse_to_anthropic,
+)
 
 
 @asynccontextmanager
@@ -35,14 +42,19 @@ async def verify_key(request: Request) -> dict:
     expected = config.get("server", {}).get("api_key", "")
     auth = request.headers.get("Authorization", "")
     token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+    # Anthropic SDK 用 x-api-key 请求头认证：无 Bearer token 时兜底
+    if not token:
+        token = request.headers.get("x-api-key", "").strip()
     # 未配置服务器密钥时保持向后兼容：全部放行
     if not expected:
         return {"kind": "server_admin", "key": None}
     if token and token == expected:
         return {"kind": "server_admin", "key": None}
     if token:
-        rec = await db.get_api_key_by_secret(token)
+        rec = await db.get_api_key_by_secret_or_previous(token)
         if rec and rec.get("enabled"):
+            # 到期自动轮换：旧 secret 在宽限期内仍可认证，用轮换后的新记录继续本次认证（用户无感）
+            rec = await keyauth.maybe_rotate_expired(rec) or rec
             return {"kind": "key_admin" if rec["type"] == "admin" else "key_user", "key": rec}
     raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -88,8 +100,34 @@ def _wrap_key_stream(stream, key: dict, billing_mode: str):
     return gen()
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest, auth: dict = Depends(verify_key)):
+async def _chat_handler(request: Request, auth: dict):
+    # 请求体大小预检：Content-Length 超 20MB 直接拒绝（在解析 JSON 之前）
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="请求体过大（上限 20MB）")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    is_anthropic = is_anthropic_request(dict(request.headers), body)
+    if is_anthropic:
+        # Anthropic 格式暂不支持工具调用（tool_use 转换未实现）：显式拒绝而非静默降级
+        if body.get("tools") or body.get("tool_choice"):
+            raise HTTPException(
+                status_code=400,
+                detail="Anthropic 格式暂不支持工具调用（tool_use 转换未实现），请使用 OpenAI 格式",
+            )
+        body = anthropic_to_openai(body)
+
+    try:
+        req = ChatCompletionRequest(**body)
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail="请求格式错误: " + str(e.errors(include_input=False, include_url=False))[:500],
+        )
+
     pool_name = _resolve(req.model or "auto")
     if pool_name is None:
         raise HTTPException(
@@ -118,6 +156,8 @@ async def chat_completions(req: ChatCompletionRequest, auth: dict = Depends(veri
             raise HTTPException(status_code=503, detail=pool.failure_detail(steps, has_images))
         if is_user_key:
             stream = _wrap_key_stream(stream, key, key.get("billing_mode", "token"))
+        if is_anthropic:
+            stream = openai_sse_to_anthropic(stream)
 
         async def generate():
             async for chunk in stream:
@@ -132,7 +172,20 @@ async def chat_completions(req: ChatCompletionRequest, auth: dict = Depends(veri
         amount = 1 if key.get("billing_mode") == "request" else response.usage.total_tokens
         if amount > 0:
             await keyauth.charge_key_usage(key, amount)
+    if is_anthropic:
+        return openai_to_anthropic_response(response.model_dump())
     return response
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request, auth: dict = Depends(verify_key)):
+    return await _chat_handler(request, auth)
+
+
+@app.post("/v1/messages")
+async def messages_endpoint(request: Request, auth: dict = Depends(verify_key)):
+    # Anthropic Messages 格式端点：同处理逻辑（is_anthropic 因 anthropic-version 头为 True → 响应自动转 Anthropic）
+    return await _chat_handler(request, auth)
 
 
 @app.get("/v1/models")

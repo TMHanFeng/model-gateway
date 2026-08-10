@@ -351,6 +351,11 @@ body {
   <div id="tab-stats" class="hidden">
     <div class="toolbar">
       <div class="hint">各模型配额使用情况，每 5 秒自动刷新。</div>
+      <div class="btn-row" style="margin-left:auto">
+        <button class="btn btn-sm btn-amber" id="stat-dim-billing" onclick="setStatDim('billing')">计费量</button>
+        <button class="btn btn-sm" id="stat-dim-requests" onclick="setStatDim('requests')">调用次数</button>
+        <button class="btn btn-sm" id="stat-dim-tokens" onclick="setStatDim('tokens')">Token 用量</button>
+      </div>
       <button class="btn btn-ghost btn-sm" onclick="loadStats()">手动刷新</button>
     </div>
     <div id="stats-grid" class="stats-grid"></div>
@@ -414,6 +419,7 @@ body {
           <div class="fg"><label>计费模式</label><select name="billing_mode"><option value="token">按 Token</option><option value="request">按请求次数</option></select></div>
         </div>
         <div class="fg"><label>限额数值（0=不限）</label><input name="limit_amount" type="number" value="0" min="0"></div>
+        <div class="fg"><label>过期时长（小时，0=永不过期）</label><input name="expire_hours" type="number" value="0" min="0"></div>
       </div>
       <div id="k-own-pool-fields" class="hidden" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
         <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">👤 用户专属模型池</div>
@@ -527,6 +533,7 @@ body {
 <script>
 let editingId = null;
 let statsTimer = null;
+let statDim = 'billing';
 
 function getKey() {
   let k = localStorage.getItem('gw_key');
@@ -1097,6 +1104,7 @@ async function clearSingleMode(name) {
 }
 
 function fmtDur(sec){sec=Math.max(0,Math.floor(sec||0));var h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);return h>0?(h+'h '+m+'m'):(m+'m')}
+function setStatDim(d){statDim=d;['billing','requests','tokens'].forEach(x=>{document.getElementById('stat-dim-'+x).classList.toggle('btn-amber',x===d);document.getElementById('stat-dim-'+x).classList.toggle('btn-ghost',x!==d)});loadStats();}
 async function loadStats() {
   const data = await api('/stats');
   if (!data) return;
@@ -1114,12 +1122,27 @@ async function loadStats() {
       return bp - ap;
     })
     .map((m, i) => {
-    const used = m._used;
+    const dim = statDim;
+    const isBilling = dim === 'billing';
+    let used = m._used;
     const limit = m._limit;
-    const unit = m.unit || 'tokens';
-    const pct = limit > 0 ? Math.min(100, used / limit * 100) : 0;
-    const cls = m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : '');
-    const pctText = m.expired ? '已失效' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量');
+    let unit = m.unit || 'tokens';
+    let numsTitle = '';
+    let limitText = limit ? limit.toLocaleString() : '∞';
+    if (dim === 'requests') {
+      used = m.today_requests ?? 0;
+      unit = '次';
+      numsTitle = '当日调用次数';
+      limitText = '—';
+    } else if (dim === 'tokens') {
+      used = m.today_tokens ?? 0;
+      unit = 'tokens';
+      numsTitle = '当日 Token 用量';
+      limitText = '—';
+    }
+    const pct = isBilling && limit > 0 ? Math.min(100, used / limit * 100) : 0;
+    const cls = !isBilling ? '' : (m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : ''));
+    const pctText = !isBilling ? '—' : (m.expired ? '已失效' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量'));
     const billing = m.billing_mode === 'request' ? '按次计费' : '按 Token 计费';
     const typeBadge = m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>'
       : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>'
@@ -1137,10 +1160,10 @@ async function loadStats() {
           </div>
           <div class="stat-badges">${freeBadge}${typeBadge}</div>
         </div>
-        <div class="stat-nums">
+        <div class="stat-nums" title="${numsTitle}">
           <span class="stat-used">${used.toLocaleString()}</span>
           <span class="stat-sep">/</span>
-          <span class="stat-limit">${limit ? limit.toLocaleString() : '∞'}</span>
+          <span class="stat-limit">${limitText}</span>
           <span class="stat-unit">${unit}</span>
         </div>
         <div class="stat-bar"><div class="stat-fill" data-pct="${pct}"></div></div>
@@ -1468,6 +1491,22 @@ function keyLimitText(k) {
     <span class="bar-track"><span class="bar-fill ${cls}" style="width:${pct}%"></span></span><span class="mono">${pct.toFixed(0)}%</span>
     ${u.exhausted ? '<span class="chip chip-err">已用尽</span>' : ''}`;
 }
+function keyExpiryText(k) {
+  // 过期状态：永不过期 / 距到期 Xh Ym / 已到期（自动轮换中）；有轮换记录时附上次轮换时间
+  const exp = k.expire_seconds > 0 ? (k.rotated_at || k.created_at || 0) + k.expire_seconds : null;
+  const rot = k.rotated_at ? `<span class="mono" style="color:var(--muted)">· 上次轮换 ${new Date(k.rotated_at * 1000).toLocaleString('zh-CN', { hour12: false })}</span>` : '';
+  let grace = '';
+  if (k.previous_secret_expires) {
+    const now = Date.now() / 1000;
+    grace = k.previous_secret_expires > now
+      ? `<span class="mono" style="color:var(--muted)">· 旧密钥宽限至 ${new Date(k.previous_secret_expires * 1000).toLocaleString('zh-CN', { hour12: false })}</span>`
+      : `<span style="color:var(--red)">旧密钥已失效</span>`;
+  }
+  if (exp === null) return `<b>永不过期</b> ${grace}`;
+  const remain = exp - Date.now() / 1000;
+  if (remain > 0) return `<b>距到期 ${Math.floor(remain / 3600)}h ${Math.floor((remain % 3600) / 60)}m</b> ${rot} ${grace}`;
+  return `<b style="color:var(--red)">已到期（自动轮换中）</b> ${rot} ${grace}`;
+}
 async function loadKeys() {
   const data = await api('/admin/keys');
   const el = document.getElementById('key-list');
@@ -1493,6 +1532,7 @@ async function loadKeys() {
         <div>授权池 <b>${k.type === 'admin' ? '全部' : (k.allowed_pools || []).map(esc).join('、') || '无'}</b></div>
         <div>专属池 <b>${k.own_pool ? esc(k.own_pool) : '无'}</b></div>
         <div>用量 <b>${keyLimitText(k)}</b></div>
+        <div>过期 ${keyExpiryText(k)}</div>
         <div>创建时间 <b>${new Date(k.created_at * 1000).toLocaleString('zh-CN', { hour12: false })}</b></div>
       </div>
     </div>`).join('') || '<div class="hint">暂无 API 密钥，点击右上角创建。</div>';
@@ -1529,6 +1569,7 @@ async function showEditKey(id) {
   form.token_type.value = k.token_type || '';
   form.billing_mode.value = k.billing_mode || 'token';
   form.limit_amount.value = k.limit_amount || 0;
+  form.expire_hours.value = k.expire_seconds ? Math.floor(k.expire_seconds / 3600) : 0;
   document.getElementById('key-modal-title').textContent = '编辑 API 密钥';
   document.getElementById('k-submit-btn').textContent = '保存';
   await loadKeyPools();
@@ -1587,6 +1628,8 @@ async function submitKey(e) {
   const form = document.getElementById('kform');
   const body = Object.fromEntries(new FormData(form).entries());
   body.limit_amount = parseInt(body.limit_amount) || 0;
+  body.expire_seconds = (parseInt(body.expire_hours) || 0) * 3600;
+  delete body.expire_hours;
   body.allowed_pools = [...document.querySelectorAll('#k-pools-checkboxes input:checked')].map(x => x.getAttribute('data-pool') || x.value);
   let data;
   if (editingKeyId) {

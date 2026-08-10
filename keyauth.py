@@ -42,6 +42,36 @@ def is_admin_key(key: dict) -> bool:
     return key.get("type") == "admin"
 
 
+async def maybe_rotate_expired(key: dict) -> dict | None:
+    """到期自动轮换密钥 secret：同一 key id 生成新 secret，旧 secret 进入宽限期仍可认证。
+
+    - expire_seconds <= 0 表示永不过期，返回 None
+    - 基准时间 base 取 rotated_at（轮换后重新计时），无轮换时退回 created_at
+    - 未到期返回 None；已到期则轮换并返回轮换后的新记录（含新 secret）
+    - 轮换后旧 secret 进入宽限期（expire_seconds 的 20%，下限 1h、上限 24h）
+      仍可认证，实现客户端无感过渡；宽限期后旧 secret 彻底失效
+    - 不依赖锁：并发下两请求同时判定过期时，rotate_key_secret 的 CAS
+      （WHERE secret = ?）保证仅第一个真正轮换成功，第二个影响 0 行直接返回
+      当前记录，旧 secret 宽限期不被二次覆盖丢失
+    - 只写审计日志前缀（前 8 字符），绝不含明文 secret
+    """
+    expire_seconds = key.get("expire_seconds", 0)
+    if not expire_seconds or expire_seconds <= 0:
+        return None
+    base = key.get("rotated_at") or key.get("created_at") or 0
+    if base <= 0:
+        return None
+    if time.time() - base < expire_seconds:
+        return None
+    old_secret = key["secret"]
+    new_secret = generate_key()
+    grace = max(3600, min(int(expire_seconds * 0.2), 86400))
+    rotated = await db.rotate_key_secret(key["id"], old_secret, new_secret, grace)
+    if rotated:
+        await db.log_key_rotation(key["id"], old_prefix=old_secret[:8], new_prefix=new_secret[:8], note="到期自动轮换")
+    return await db.get_api_key_by_id(key["id"])
+
+
 def _has_limit(key: dict) -> bool:
     return key.get("token_type") in ("daily", "rolling_5h", "one_time") and key.get("limit_amount", 0) > 0
 
