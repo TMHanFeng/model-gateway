@@ -207,6 +207,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 26px 24px 80px; }
 .pool-item .pi-id { font-family: var(--mono); font-size: 12.5px; flex: 1; word-break: break-all; }
 .pool-item .pi-tags { display: flex; gap: 5px; }
 .drag-over { outline: 1.5px dashed var(--cyan); outline-offset: 2px; }
+.dragging { opacity: 0.4; }
 
 .add-model-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 select, input, textarea {
@@ -291,7 +292,8 @@ select { max-width: 100%; }
 .bar-fill.full { background: linear-gradient(90deg, var(--red), #ef4444); }
 .pool-check { display: flex; align-items: center; gap: 7px; padding: 5px 8px; border-radius: 7px; font-size: 12.5px; cursor: pointer; }
 .pool-check:hover { background: rgba(120, 160, 220, 0.08); }
-.pool-check input { accent-color: var(--teal); }
+.pool-check input { accent-color: var(--teal); margin: 0; flex-shrink: 0; width: 15px; height: 15px; }
+.pool-check span { line-height: 1.4; }
 .checkbox-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 2px; max-height: 180px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 8px 10px; background: rgba(10, 16, 24, 0.6); }
 
 /* 用量历史条形图 */
@@ -608,11 +610,12 @@ select { max-width: 100%; }
       <div id="k-pool-fields">
         <div class="fg"><label>授权模型池（用户密钥仅可访问以下池）</label><div class="checkbox-grid" id="k-pools-checkboxes"></div></div>
         <div class="f3">
-          <div class="fg"><label>限额类型</label><select name="token_type"><option value="">不限量</option><option value="daily">每日刷新</option><option value="rolling_5h">5h 限额</option><option value="one_time">一次性</option></select></div>
+          <div class="fg"><label>限额类型</label><select name="token_type" id="k-token-type" onchange="onKeyLimitTypeChange()"><option value="">不限量</option><option value="daily">每日刷新</option><option value="rolling_5h">5h 限额</option><option value="one_time">一次性</option></select></div>
           <div class="fg"><label>计费模式</label><select name="billing_mode"><option value="token">按 Token</option><option value="request">按请求次数</option></select></div>
-          <div class="fg"><label>限额数值（0=不限）</label><input name="limit_amount" type="number" value="0" min="0"></div>
+          <div class="fg"><label id="k-limit-label">限额数值（0=不限）</label><input name="limit_amount" type="number" value="0" min="0"></div>
         </div>
-        <div class="fg"><label>过期时长（小时，0=永不过期）</label><input name="expire_hours" type="number" value="0" min="0"></div>
+        <div id="k-limit-hint" class="hint hidden" style="margin-bottom:13px"></div>
+        <div class="fg"><label>密钥到期时长（小时，0=永不过期；到期自动轮换新密钥，与上方限额窗口无关）</label><input name="expire_hours" type="number" value="0" min="0"></div>
       </div>
       <div id="k-own-pool-fields" class="hidden" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
         <div style="font-size:13px;font-weight:600;margin-bottom:8px">👤 用户专属模型池</div>
@@ -774,43 +777,45 @@ function latTag(id) {
 
 async function loadModels() {
   const [mdata, provdata] = await Promise.all([api('/admin/models'), api('/admin/providers')]);
-  if (!mdata) return;
+  if (!mdata || !provdata) return;
   providerLookup = {};
-  if (provdata) provdata.providers.forEach(p => providerLookup[p.id] = p);
-  const byProv = {};
-  mdata.models.forEach(m => {
-    const k = m.provider_id || '__inline__';
-    (byProv[k] = byProv[k] || []).push(m);
-  });
-  const inline = byProv['__inline__'] || [];
-  const html = Object.entries(byProv).filter(([k]) => k !== '__inline__').map(([pid, models], pi) => {
-    const p = providerLookup[pid];
-    return `
-    <div class="card provider-card" style="animation-delay:${pi * 50}ms">
+  provdata.providers.forEach(p => providerLookup[p.id] = p);
+
+  const models = mdata.models;
+  const providers = provdata.providers; // 顺序即 reorder 持久化后的顺序，渲染必须以此为准
+  let html = '';
+  providers.forEach((p, i) => {
+    const pmodels = models.filter(m => m.provider_id === p.id);
+    html += `
+    <div class="card provider-card" draggable="true" data-provider-drag="${esc(p.id)}" style="animation-delay:${i * 50}ms;cursor:grab" title="拖拽排序供应商">
       <div class="card-head provider-head">
         <div>
-          <div class="card-title" draggable="true" data-provider-drag="${esc(pid)}" style="cursor:grab" title="拖拽排序供应商">⠿ ${esc(p ? p.name : pid)} ${provBadge(p ? p.protocol : '')}</div>
-          <div class="card-sub mono">${esc(pid)} · ${esc(p ? p.base_url : '')}</div>
+          <div class="card-title"><span class="drag-handle">⠿</span> ${esc(p.name)} ${provBadge(p.protocol)}</div>
+          <div class="card-sub mono">${esc(p.id)} · ${esc(p.base_url)}</div>
         </div>
         <div class="btn-row">
-          <button class="btn btn-ghost btn-sm" onclick="editProvider('${esc(pid).replace(/'/g, "\\'")}')">编辑</button>
-          <button class="btn btn-red btn-sm" onclick="delProvider('${esc(pid).replace(/'/g, "\\'")}')">删除</button>
-          <button class="btn btn-amber btn-sm" onclick="showAddUnder('${esc(pid).replace(/'/g, "\\'")}')">＋ 添加模型</button>
+          <button class="btn btn-ghost btn-sm" onclick="editProvider('${esc(p.id).replace(/'/g, "\\'")}')">编辑</button>
+          <button class="btn btn-red btn-sm" onclick="delProvider('${esc(p.id).replace(/'/g, "\\'")}')">删除</button>
+          <button class="btn btn-amber btn-sm" onclick="showAddUnder('${esc(p.id).replace(/'/g, "\\'")}')">＋ 添加模型</button>
         </div>
       </div>
-      ${models.map((m, i) => modelRowHTML(m, i)).join('') || '<div class="hint">该供应商下暂无模型。</div>'}
+      ${pmodels.map((m, i2) => modelRowHTML(m, i2)).join('') || '<div class="hint">该供应商下暂无模型。</div>'}
     </div>`;
-  }).join('');
-
-  const inlineHTML = inline.length ? `
-  <div class="card provider-card">
-    <div class="card-head provider-head">
-      <div><div class="card-title">独立模型（内联连接）</div><div class="card-sub">未挂载到任何供应商</div></div>
-    </div>
-    ${inline.map((m, i) => modelRowHTML(m, i)).join('')}
-  </div>` : '';
-
-  document.getElementById('models-list').innerHTML = html + inlineHTML + (mdata.models.length ? '' : '<div class="hint">暂无模型，点击右上角添加。</div>');
+  });
+  const standalone = models.filter(m => !m.provider_id);
+  if (standalone.length) {
+    html += `
+    <div class="card provider-card">
+      <div class="card-head provider-head">
+        <div><div class="card-title">独立模型（内联连接）</div><div class="card-sub">未挂载到任何供应商</div></div>
+      </div>
+      ${standalone.map((m, i) => modelRowHTML(m, i)).join('')}
+    </div>`;
+  }
+  if (!providers.length && !standalone.length) {
+    html = '<div class="hint">暂无模型。点击右上角「添加供应商」后在其下添加模型，或添加独立模型。</div>';
+  }
+  document.getElementById('models-list').innerHTML = html;
   bindProviderDrag();
 }
 
@@ -1333,25 +1338,30 @@ function bindProviderDrag() {
   if (!list) return;
   let dragged = null;
   list.addEventListener('dragstart', e => {
-    const el = e.target.closest('[data-provider-drag]');
+    const el = e.target.closest('.provider-card[draggable]');
     if (!el) { e.preventDefault(); return; }
-    dragged = el.closest('.card');
+    dragged = el;
+    dragged.classList.add('dragging');
     dragged.style.opacity = '0.4';
     e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', el.dataset.providerDrag); } catch (err) {}
   });
   list.addEventListener('dragover', e => {
     e.preventDefault();
     const card = e.target.closest('.provider-card');
     if (!card || card === dragged) return;
-    const rect = card.getBoundingClientRect();
-    const before = e.clientY < rect.top + rect.height / 2;
-    list.insertBefore(dragged, before ? card : card.nextSibling);
+    if (dragged && list.contains(dragged)) {
+      const rect = card.getBoundingClientRect();
+      const before = e.clientY < rect.top + rect.height / 2;
+      list.insertBefore(dragged, before ? card : card.nextSibling);
+    }
   });
   list.addEventListener('dragend', async e => {
     if (!dragged) return;
+    dragged.classList.remove('dragging');
     dragged.style.opacity = '';
     dragged = null;
-    const ids = [...list.querySelectorAll('[data-provider-drag]')].map(el => el.dataset.providerDrag);
+    const ids = [...list.querySelectorAll('.provider-card[draggable]')].map(el => el.dataset.providerDrag);
     const ok = await api('/admin/providers/reorder', { method: 'PUT', body: JSON.stringify({ provider_ids: ids }) });
     if (ok) { await api('/admin/reload', { method: 'POST' }); toast('供应商顺序已更新'); }
     loadModels();
@@ -1528,9 +1538,10 @@ function keyLimitText(k) {
   const u = k.usage || {};
   const pct = u.limit > 0 ? Math.min(100, u.used / u.limit * 100) : 0;
   const cls = u.exhausted ? 'full' : pct >= 75 ? 'warn' : '';
+  const resetTag = u.window_reset ? '<span class="chip chip-ok" style="margin-left:4px">窗口已刷新</span>' : '';
   return `<span class="mono">${tname}·${(u.used || 0).toLocaleString()}/${u.limit.toLocaleString()}${unit}</span>
     <span class="bar-track"><span class="bar-fill ${cls}" style="width:${pct}%"></span></span><span class="mono">${pct.toFixed(0)}%</span>
-    ${u.exhausted ? '<span class="chip chip-err">已用尽</span>' : ''}`;
+    ${u.exhausted ? '<span class="chip chip-err">已用尽</span>' : ''}${resetTag}`;
 }
 function keyExpiryText(k) {
   const exp = k.expire_seconds > 0 ? (k.rotated_at || k.created_at || 0) + k.expire_seconds : null;
@@ -1591,6 +1602,24 @@ function onKeyTypeChange() {
   document.getElementById('k-pool-fields').style.display = isUser ? '' : 'none';
   const isEdit = editingKeyId !== null;
   document.getElementById('k-own-pool-fields').classList.toggle('hidden', !(isEdit && isUser));
+  onKeyLimitTypeChange();
+}
+function onKeyLimitTypeChange() {
+  const ttype = document.getElementById('k-token-type').value;
+  const hint = document.getElementById('k-limit-hint');
+  const label = document.getElementById('k-limit-label');
+  const hints = {
+    daily: '每日 00:00 自动刷新窗口，无需手动重置；只需填写每天限额数值。',
+    rolling_5h: '5h 窗口自动滚动刷新（首次调用起算 5 小时），无需手动填时长；只需填写窗口内限额数值。',
+    one_time: '一次性限额：用完即永久失效，不刷新。',
+    '': '不限量：不限制用量。',
+  };
+  hint.textContent = hints[ttype] || '';
+  hint.classList.toggle('hidden', !hints[ttype]);
+  label.textContent = ttype === 'daily' ? '每日限额数值（0=不限）'
+    : ttype === 'rolling_5h' ? '5h 窗口限额数值（0=不限）'
+    : ttype === 'one_time' ? '一次性限额数值（0=不限）'
+    : '限额数值（0=不限）';
 }
 async function showAddKey() {
   editingKeyId = null;

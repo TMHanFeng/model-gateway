@@ -161,16 +161,40 @@ async def charge_key_usage(key: dict, amount: int):
 
 
 async def key_usage_summary(key: dict) -> dict:
-    """供管理后台展示：当前已用量 / 限额 / 类型 / 是否超限"""
+    """供管理后台展示：当前窗口的有效已用量 / 限额 / 类型 / 是否超限。
+
+    按限额语义归一化（后台逻辑，非仅前端显示）：
+    - daily：日期变化即新周期，旧用量不显示（返回 0）
+    - rolling_5h：5h 窗口过期即新周期，旧用量不显示（返回 0）
+    - one_time：已失效时显示最终用量并标记 exhausted
+    """
     if is_admin_key(key) or not _has_limit(key):
         return {"used": 0, "limit": 0, "token_type": "", "billing_mode": "token", "exhausted": False}
     state = await db.get_key_usage(key["id"])
+    ttype = key.get("token_type", "")
     used = state.get("used_amount", 0) if state else 0
+    now = time.time()
+    window_reset = False
+    if ttype == "daily":
+        # 日期已变化 → 新的一天，用量归零展示
+        if state is None or state.get("last_reset_date") != _today():
+            used = 0
+            window_reset = True
+    elif ttype == "rolling_5h":
+        # 窗口已过期 → 新窗口，用量归零展示
+        ws = state.get("window_start") if state else None
+        if ws is None or (now - ws) >= ROLLING_5H_SECONDS:
+            used = 0
+            window_reset = True
+    elif ttype == "one_time":
+        # 一次性：不归零（展示最终用量，失效标记由 exhausted 表达）
+        pass
     ok, _ = await key_usage_available(key)
     return {
         "used": used,
         "limit": int(key.get("limit_amount", 0)),
-        "token_type": key.get("token_type", ""),
+        "token_type": ttype,
         "billing_mode": key.get("billing_mode", "token"),
         "exhausted": not ok,
+        "window_reset": window_reset,
     }
