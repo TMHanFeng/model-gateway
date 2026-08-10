@@ -1,8 +1,9 @@
 import time
 import json
+from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import StreamingResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse
 from pydantic import ValidationError
 from models import ChatCompletionRequest
 from pool import ModelPool, load_config
@@ -10,7 +11,7 @@ from database import init_db, close_db
 import database as db
 import keyauth
 from scheduler import start_scheduler
-from admin import router as admin_router, GATEWAY_VERSION, GATEWAY_COMMIT
+from admin import router as admin_router, GATEWAY_VERSION, GATEWAY_COMMIT, get_gateway_version
 from format_adapter import (
     is_anthropic_request,
     anthropic_to_openai,
@@ -227,6 +228,14 @@ async def health():
 @app.get("/version")
 async def version_info():
     return {"version": GATEWAY_VERSION, "commit": GATEWAY_COMMIT}
+
+
+@app.get("/hfadmin", response_class=HTMLResponse)
+async def hfadmin_page():
+    """HF 科技感管理面板：与 /admin 共用同一套后端 API（verify_admin 认证），
+    页面本身无需认证（与原 /admin 一致），所有 /admin/* API 均受 Bearer 保护。"""
+    html = (Path(__file__).parent / "static" / "hfadmin.html").read_text(encoding="utf-8")
+    return html.replace("__GATEWAY_VERSION__", get_gateway_version())
 
 
 if __name__ == "__main__":
