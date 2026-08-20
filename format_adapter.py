@@ -128,11 +128,20 @@ def anthropic_to_openai(body: dict) -> dict:
             nm["content"] = content
         elif isinstance(content, list):
             blocks = []
+            has_non_text = False
             for block in content:
                 conv = _block_to_openai(block)
                 if conv is not None:
                     blocks.append(conv)
-            nm["content"] = blocks if blocks else ""
+                    if conv.get("type") != "text":
+                        has_non_text = True
+            if not blocks:
+                nm["content"] = ""
+            elif has_non_text:
+                nm["content"] = blocks  # multimodal: keep as list
+            else:
+                # text-only: flatten to joined string (OpenAI-compatible APIs prefer string)
+                nm["content"] = "".join(b.get("text", "") for b in blocks)
         else:
             nm["content"] = ""
         new_messages.append(nm)

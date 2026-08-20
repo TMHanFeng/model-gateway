@@ -604,6 +604,41 @@ async function loadModels() {
   }
   document.getElementById('model-list').innerHTML = html;
   bindProviderDrag();
+  bindModelDrag();
+}
+
+/* 拖拽：模型管理列表内排序（问题 5 修复） */
+function bindModelDrag() {
+  const list = document.getElementById('model-list');
+  if (!list) return;
+  let dragged = null;
+  list.addEventListener('dragstart', e => {
+    const row = e.target.closest('.model-row[draggable]');
+    if (!row) { e.preventDefault(); return; }
+    e.stopPropagation();
+    dragged = row;
+    row.style.opacity = '0.4';
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  list.addEventListener('dragover', e => {
+    const row = e.target.closest('.model-row[draggable]');
+    if (!row || row === dragged || !dragged) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = row.getBoundingClientRect();
+    const before = e.clientY < rect.top + rect.height / 2;
+    row.parentNode.insertBefore(dragged, before ? row : row.nextSibling);
+  });
+  list.addEventListener('dragend', async e => {
+    if (!dragged) return;
+    dragged.style.opacity = '';
+    const row = dragged;
+    dragged = null;
+    const ids = [...list.querySelectorAll('.model-row[draggable]')].map(el => el.dataset.modelId);
+    if (!ids.length) return;
+    const ok = await api('/admin/models/reorder', { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
+    if (ok) { toast('模型顺序已更新'); }
+  });
 }
 
 function providerCardHTML(p, pmodels, i) {
@@ -636,7 +671,7 @@ function modelRowHTML(m, i) {
   const conn = p ? esc(p.base_url) : esc(m.base_url || '');
   const proto = p ? p.protocol : m.provider;
   return `
-    <div class="model-row" style="animation-delay:${i * 30}ms">
+    <div class="model-row" draggable="true" data-model-id="${esc(m.id)}" style="animation-delay:${i * 30}ms">
       <div class="card-head">
         <div>
           <div class="card-title">${esc(m.id)}</div>

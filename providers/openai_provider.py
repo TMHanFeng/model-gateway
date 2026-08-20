@@ -74,6 +74,26 @@ class OpenAIProvider:
         resp.raise_for_status()
         data = resp.json()
 
+        # === Issue 6 诊断日志（DEBUG 级别，默认不输出）===
+        import logging
+        logger = logging.getLogger(__name__)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"[openai upstream raw] model={model_name} status={resp.status_code} body={data}")
+        # Issue 6: 上游有 completion_tokens 但 content 为空 — 始终打 WARNING 便于排查
+        try:
+            _first = (data.get("choices") or [{}])[0]
+            _msg = _first.get("message") or {}
+            _content = _msg.get("content")
+            _tokens = (data.get("usage") or {}).get("completion_tokens", 0)
+            if _tokens > 0 and not _content:
+                logger.warning(
+                    f"[openai empty content] model={model_name} completion_tokens={_tokens} "
+                    f"finish_reason={_first.get('finish_reason')} content_repr={repr(_content)[:200]} "
+                    f"has_tool_calls={bool(_msg.get('tool_calls'))}"
+                )
+        except Exception:
+            pass
+
         usage = data.get("usage", {})
         return ChatCompletionResponse(
             id=data.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),

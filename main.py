@@ -19,6 +19,9 @@ from format_adapter import (
     openai_sse_to_anthropic,
 )
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -167,6 +170,9 @@ async def _chat_handler(request: Request, auth: dict):
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     response, tokens, steps = await pool.execute_with_fallback(pool_name, req, None, caller)
+    # === Issue 6 诊断日志（DEBUG 级别，默认不输出）===
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"[gateway return] {response.model_dump_json()[:500] if response else None}")
     if response is None:
         raise HTTPException(status_code=503, detail=pool.failure_detail(steps, has_images))
     if is_user_key:

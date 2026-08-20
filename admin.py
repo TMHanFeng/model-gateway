@@ -405,6 +405,33 @@ async def reorder_pools(request: Request, _=Depends(verify_admin)):
     return {"ok": True, "pools": list(new_pools.keys())}
 
 
+@router.put("/models/reorder")
+async def reorder_models(request: Request, _=Depends(verify_admin)):
+    """Reorder models. Body: {model_ids: [...]} must contain exactly all existing model IDs."""
+    body = await request.json()
+    new_order = body.get("model_ids", [])
+    if not isinstance(new_order, list):
+        raise HTTPException(status_code=400, detail="model_ids must be a list")
+
+    config = load_config()
+    models = config.get("models", [])
+    existing_ids = {m["id"] for m in models}
+    if set(new_order) != existing_ids:
+        missing = existing_ids - set(new_order)
+        extra = set(new_order) - existing_ids
+        raise HTTPException(
+            status_code=400,
+            detail=f"model_ids must contain exactly all existing model IDs. Missing: {sorted(missing)}, Extra: {sorted(extra)}",
+        )
+
+    by_id = {m["id"]: m for m in models}
+    config["models"] = [by_id[mid] for mid in new_order]
+    save_config(config)
+    restart_scheduler()
+    _sync_pool()
+    return {"ok": True}
+
+
 @router.put("/pools/{pool_name}")
 async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin)):
     body = await request.json()
