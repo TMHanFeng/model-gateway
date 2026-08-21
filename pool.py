@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from dataclasses import dataclass, field
+import httpx
 from providers.openai_provider import OpenAIProvider, RateLimitError
 from providers.anthropic_provider import AnthropicProvider
 import database as db
@@ -540,7 +541,7 @@ class ModelPool:
             try:
                 response = await provider.chat(req, entry.name)
             except RateLimitError:
-                entry.cooldown_until = time.time() + 60
+                entry.cooldown_until = time.time() + 30
                 raise
         self._record_latency(entry, (time.perf_counter() - t0) * 1000)
 
@@ -665,15 +666,21 @@ class ModelPool:
                 continue
             except Exception as e:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-                entry.cooldown_until = time.time() + 30
                 error_type = type(e).__name__
+                # 按异常类型决定冷却时长：429→30s（响应 Retry-After 时另议），5xx→15s，网络抖动→10s，其他→30s
+                status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+                if isinstance(e, httpx.HTTPStatusError) and status is not None and 500 <= status < 600:
+                    cooldown_sec = 15
+                elif isinstance(e, (httpx.TimeoutException, httpx.ConnectError)):
+                    cooldown_sec = 10
+                else:
+                    cooldown_sec = 30
+                entry.cooldown_until = time.time() + cooldown_sec
                 detail = {
-                    "cooldown_sec": 30,
+                    "cooldown_sec": cooldown_sec,
                     "error_type": error_type,
                     "latency_ms": latency_ms,
                 }
-                # 提取 HTTP status / message 等更多细节
-                status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
                 if status is not None:
                     detail["status"] = status
                 err_msg = str(e)
@@ -757,9 +764,21 @@ class ModelPool:
                 if override_id and not use_fallback:
                     use_fallback = True
                 continue
-            except Exception:
-                entry.cooldown_until = time.time() + 30
-                actual_calls.append({"model": entry.id, "reason": "fallback_switch_error" if use_fallback else "switch_error"})
+            except Exception as e:
+                # 按异常类型分发冷却：5xx→15s，网络→10s，其他→30s（429 在 execute() 单独处理为 30s）
+                status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+                if isinstance(e, httpx.HTTPStatusError) and status is not None and 500 <= status < 600:
+                    cooldown_sec = 15
+                elif isinstance(e, (httpx.TimeoutException, httpx.ConnectError)):
+                    cooldown_sec = 10
+                else:
+                    cooldown_sec = 30
+                entry.cooldown_until = time.time() + cooldown_sec
+                actual_calls.append({
+                    "model": entry.id,
+                    "reason": "fallback_switch_error" if use_fallback else "switch_error",
+                    "detail": {"cooldown_sec": cooldown_sec, "error_type": type(e).__name__},
+                })
                 if override_id and not use_fallback:
                     use_fallback = True
                 continue
