@@ -167,7 +167,7 @@ API 服务地址:  http://127.0.0.1:8650/v1
       "max_concurrency": 0,       // 最大并发（0=不限，默认 0）；`Semaphore`0 会全阻塞，代码已替换为 (1<<31) 许可
       "token_type": "daily",      // daily 或 one_time
       "billing_mode": "token",    // token 或 request
-      "is_free": false,           // 免费(绿)/付费(红)标注
+      "is_free": true,            // 默认免费（v2.3.3 起）；付费模型显式设为 false
       "modality": "vision",       // text（纯文本）或 vision（多模态）
       "refresh_time": "00:00",    // 每日刷新时间（北京时间，固定时区）
       "timezone": "Asia/Shanghai",
@@ -222,16 +222,33 @@ API 服务地址:  http://127.0.0.1:8650/v1
 
 ### 调用记录的原因标签
 
-| 标签 | 含义 |
+**v2.3.4 起**：每条 step 除静态标签外还携带 `detail` 对象，前端渲染时**追加具体数值**（用 ` · ` 分隔），鼠标悬停看完整信息。无需 SQLite 迁移——`steps` 已经是 JSON 列。
+
+| 标签 + detail 示例 | 含义 |
 |---|---|
 | 选中调用 | 最终选中该模型 |
-| 用量已用尽 / RPM 触顶 / TPM 触顶 | 配额或限流排除 |
-| 不支持图片 | 纯文本模型遇到图片请求 |
-| 超上下文窗口 | 请求过长 |
-| 冷却中 | 上游刚报错，临时跳过 |
-| 一次性已失效 | 一次性模型到期/用完 |
+| 用量已尽 · 1,500/1,000 (150%) | 配额或限流排除 |
+| RPM 触顶 · 60/60 RPM | RPM 触发上限 |
+| TPM 触顶 · 120,000/100,000 TPM | TPM 触发上限 |
+| 冷却中 · 剩 45s | 上游刚报错，临时跳过 |
+| 超上下文窗口 · 请求估算 150,000 tok，上限 128,000 | 请求过长 |
+| 不支持图片 · 模型为 text，请求含图 | 纯文本模型遇到图片请求 |
+| 一次性已失效 · 已用 50,000/50,000 | 一次性模型到期/用完 |
+| 一次性已失效 · 已存活 3700s / TTL 3600s | 同上，TTL 触发 |
 | 子池无可用接口 | 嵌套子池内全部不可用 |
-| 上游限流/错误 → 切换 | 调用失败后切换到下一个 |
+| 上游限流 → 切换 · HTTP 429 · 234ms · 冷却 60s | 上游 429 限流后切换 |
+| 上游错误 → 切换 · TimeoutError · HTTP 500 · 2300ms · 冷却 30s | 上游错误后切换 |
+
+`detail` 字段（后端自动填充）：
+
+- `quota_exhausted`: `{used, limit}` (daily) / `{used, limit, window_remaining_sec}` (rolling_5h)
+- `rpm_limited` / `tpm_limited`: `{current, limit}`
+- `cooldown`: `{remaining_sec}`
+- `context_exceeded`: `{estimated, window}`
+- `no_vision`: `{modality}`
+- `one_time_expired`: `{used, limit}` / `{age_sec, ttl_sec}` / `{expire_date}`
+- `switch_429` / `fallback_switch_429`: `{status: 429, latency_ms, cooldown_sec}`
+- `switch_error` / `fallback_switch_error`: `{error_type, status?, latency_ms, cooldown_sec, error?}`
 
 ---
 
@@ -301,8 +318,8 @@ SQLite（`gateway.db`）持久化：
 
 ## 版本
 
-- 当前最新：**`v2.3.2`**（gitee tag）— 兜底池可配置化 + 延迟阈值可配置 + 新建模型并发默认 0
-- 历史：`v2.3bate`（修问题 1/2/3/4/5/6 诊断）→ `v2.2.1bate` → `v2.2bate` → ...
+- 当前最新：**`v2.3.4`**（gitee tag）— 调用记录 step.detail 透传具体数值（限流/RPM/错误类型/HTTP 状态/延迟）
+- 历史：`v2.3.3`（新建模型默认免费 `is_free=true`）→ `v2.3.2`（兜底池可配置化 + 延迟阈值 + 并发默认 0）→ `v2.3bate`（修问题 1/2/3/4/5/6 诊断）→ `v2.2.1bate` → ...
 - 版本号由 `git tag` 决定，启动时通过 `/version` 接口读取并展示在前端页脚
 
 ---
