@@ -433,6 +433,17 @@ body {
   </div>
 </div>
 
+<div class="overlay" id="overlay-fallback-targets">
+  <div class="modal">
+    <h3>🛟 选择兜底对象 <span class="badge b-openai">兜底池</span></h3>
+    <div class="hint" style="margin-bottom:12px">勾选的池在自身调用失败/耗尽时，会回退到兜底池继续尝试。<b>auto 池强制兜底，不可取消。</b></div>
+    <div id="fallback-target-list" style="max-height:300px;overflow-y:auto"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" onclick="closeModal('overlay-fallback-targets')">取消</button>
+      <button type="button" class="btn btn-amber" onclick="saveFallbackTargets()">保存</button>
+    </div>
+  </div>
+</div>
 <div class="overlay" id="overlay-usage">
   <div class="modal" style="width:640px">
     <h3 id="usage-key-title">API Key 用量历史</h3>
@@ -487,7 +498,7 @@ body {
         <div class="fg"><label>TPM 限制（0=不限）</label><input name="tpm_limit" type="number" value="0"></div>
       </div>
       <div class="f2">
-        <div class="fg"><label>最大并发数</label><input name="max_concurrency" type="number" value="10"></div>
+        <div class="fg"><label>最大并发数（0=不限）</label><input name="max_concurrency" type="number" value="0"></div>
         <div class="fg"><label>刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
       </div>
       <div id="once-fields">
@@ -693,7 +704,7 @@ function modelRowHTML(m, i) {
         <div>每日上限 <b>${m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : '') : '不限'}</b></div>
         <div>RPM <b>${m.rpm_limit || '不限'}</b></div>
         <div>TPM <b>${m.tpm_limit || '不限'}</b></div>
-        <div>并发 <b>${m.max_concurrency || 10}</b></div>
+        <div>并发 <b>${m.max_concurrency ? m.max_concurrency : '不限'}</b></div>
         <div>刷新 <b>${m.refresh_time || '—'}（北京时间）</b></div>
         ${m.token_type === 'one_time' && m.expire_date ? `<div>过期日期 <b>${esc(m.expire_date)}</b></div>` : ''}
       </div>
@@ -750,8 +761,12 @@ async function loadPools() {
             <span class="track"></span>
             <span class="sw-label">自动择优</span>
           </label>
+          <label class="threshold-ctl" title="自动择优模式下，延迟超过此值(ms)的模型排到末尾；0=不限制">
+            阈值 <input type="number" min="0" step="100" style="width:70px" value="${pool.slow_latency_threshold ?? 3000}"
+              onchange="setSlowThreshold('${name}', this.value)">
+          </label>
           <button class="btn btn-ghost btn-sm" onclick="speedPool('${name}')">⚡ 测速本池</button>
-          ${isAuto ? `<button class="btn btn-amber btn-sm" onclick="toggleSingleMode('${name}')" id="single-btn-${name}" title="开启后，auto池只使用选定的单个模型；关闭后恢复正常。池内布局不变。">🎯 一键单模型</button><span class="badge b-openai">内置</span>` : (isFallback ? '' : (isDedicated ? '' : `<button class="btn btn-ghost btn-sm" onclick="renamePool('${name}')">✏️ 重命名</button><button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`))}
+          ${isAuto ? `<button class="btn btn-amber btn-sm" onclick="toggleSingleMode('${name}')" id="single-btn-${name}" title="开启后，auto池只使用选定的单个模型；关闭后恢复正常。池内布局不变。">🎯 一键单模型</button><span class="badge b-openai">内置</span>` : (isFallback ? `<button class="btn btn-ghost btn-sm" onclick="openFallbackTargets()">🛟 选择兜底对象</button>` : (isDedicated ? '' : `<button class="btn btn-ghost btn-sm" onclick="renamePool('${name}')">✏️ 重命名</button><button class="btn btn-red btn-sm" onclick="delPool('${name}')">删除池</button>`))}
         </div>
       </div>
       ${isAuto ? `
@@ -1080,6 +1095,41 @@ async function toggleAutoOrder(name, enabled) {
   if (!p) { toast('池 "' + name + '" 不存在，请刷新页面重试', true); return; }
   const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: p.model_ids, auto_order: enabled }) });
   if (ok) { await api('/admin/reload', { method: 'POST' }); toast(enabled ? '池 ' + name + ' 已开启自动择优' : '池 ' + name + ' 已关闭自动择优'); loadPools(); }
+}
+async function setSlowThreshold(name, val) {
+  const v = parseInt(val);
+  if (isNaN(v) || v < 0) { toast('阈值必须为非负数字', true); loadPools(); return; }
+  const data = await api('/admin/pools');
+  if (!data || !data.pools[name]) return;
+  const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: data.pools[name].model_ids, slow_latency_threshold: v }) });
+  if (ok) { await api('/admin/reload', { method: 'POST' }); toast(v === 0 ? '池 ' + name + ' 延迟阈值：不限制' : '池 ' + name + ' 延迟阈值：' + v + 'ms'); loadPools(); }
+}
+async function openFallbackTargets() {
+  const data = await api('/admin/pools');
+  if (!data) return;
+  const list = document.getElementById('fallback-target-list');
+  const rows = Object.entries(data.pools)
+    .filter(([n]) => n !== '兜底池')
+    .map(([n, p]) => {
+      const isAuto = n === 'auto';
+      const checked = isAuto ? 'checked disabled' : (p.fallback_pool === '兜底池' ? 'checked' : '');
+      const tag = isAuto ? ' <span class="badge b-openai">内置·强制</span>' : '';
+      return `<label style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)">
+        <input type="checkbox" value="${esc(n)}" ${checked}> ${esc(n)}${tag}
+      </label>`;
+    }).join('');
+  list.innerHTML = rows || '<div class="hint">暂无其他池</div>';
+  document.getElementById('overlay-fallback-targets').classList.add('show');
+}
+async function saveFallbackTargets() {
+  const checked = [...document.querySelectorAll('#fallback-target-list input[type=checkbox]:checked')].map(el => el.value);
+  const ok = await api('/admin/pools/fallback_targets', { method: 'PUT', body: JSON.stringify({ pool_names: checked }) });
+  if (ok) {
+    closeModal('overlay-fallback-targets');
+    await api('/admin/reload', { method: 'POST' });
+    toast('兜底对象已更新（' + checked.length + ' 个池）');
+    loadPools();
+  }
 }
 
 function collectPoolModels(poolName, pools, visiting) {
@@ -1421,7 +1471,7 @@ async function editModel(id) {
   f.modality.value = m.modality || 'text';
   f.daily_token_limit.value = m.daily_token_limit || 0; f.rpm_limit.value = m.rpm_limit || 0;
   f.tpm_limit.value = m.tpm_limit || 0; f.context_window.value = m.context_window || 0;
-  f.max_concurrency.value = m.max_concurrency || 10; f.refresh_time.value = m.refresh_time || '';
+  f.max_concurrency.value = m.max_concurrency ?? 10; f.refresh_time.value = m.refresh_time || '';
   f.max_tokens.value = m.max_tokens || 0; f.ttl_seconds.value = m.ttl_seconds || 0;
   f.expire_date.value = m.expire_date || '';
   onTokenTypeChange();
@@ -1433,7 +1483,7 @@ async function editModel(id) {
   document.getElementById('overlay').classList.add('show');
 }
 
-function closeModal() { document.getElementById('overlay').classList.remove('show'); }
+function closeModal(id) { document.getElementById(id || 'overlay').classList.remove('show'); }
 
 async function submitModel(e) {
   e.preventDefault();

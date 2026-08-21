@@ -122,7 +122,7 @@ async def add_model(request: Request, _=Depends(verify_admin)):
         "refresh_time": body.get("refresh_time", ""),
         "timezone": "Asia/Shanghai",
         "context_window": body.get("context_window", 0),
-        "max_concurrency": body.get("max_concurrency", 10),
+        "max_concurrency": body.get("max_concurrency", 0),
         "billing_mode": body.get("billing_mode", "token"),
         "is_free": bool(body.get("is_free", False)),
         "modality": body.get("modality", "text"),
@@ -405,6 +405,47 @@ async def reorder_pools(request: Request, _=Depends(verify_admin)):
     return {"ok": True, "pools": list(new_pools.keys())}
 
 
+@router.put("/pools/fallback_targets")
+async def set_fallback_targets(request: Request, _=Depends(verify_admin)):
+    """设置兜底池为哪些池兜底。Body: {pool_names: [...]} — 这些池的 fallback_pool 将指向兜底池；
+    未列出的非 auto 池若当前指向兜底池则清空。auto 池强制兜底（不可取消）。"""
+    body = await request.json()
+    pool_names = body.get("pool_names", [])
+    if not isinstance(pool_names, list):
+        raise HTTPException(status_code=400, detail="pool_names must be a list")
+
+    config = load_config()
+    pools = config.get("pools", {})
+    valid = {n for n in pool_names if n in pools and n != "auto" and n != "兜底池"}
+    if set(pool_names) - valid - {"auto", "兜底池"}:
+        missing = sorted(set(pool_names) - valid - {"auto", "兜底池"})
+        raise HTTPException(status_code=400, detail=f"未知池名: {missing}")
+
+    changed = False
+    for pname in pools:
+        if pname == "auto":
+            # auto 池强制兜底
+            if pools[pname].get("fallback_pool") != "兜底池":
+                pools[pname]["fallback_pool"] = "兜底池"
+                changed = True
+        elif pname == "兜底池":
+            continue
+        else:
+            target = "兜底池" if pname in valid else None
+            cur = pools[pname].get("fallback_pool")
+            if target is None and cur == "兜底池":
+                pools[pname]["fallback_pool"] = None
+                changed = True
+            elif target == "兜底池" and cur != "兜底池":
+                pools[pname]["fallback_pool"] = "兜底池"
+                changed = True
+
+    if changed:
+        save_config(config)
+        _sync_pool()
+    return {"ok": True, "targets": sorted(valid)}
+
+
 @router.put("/models/reorder")
 async def reorder_models(request: Request, _=Depends(verify_admin)):
     """Reorder models. Body: {model_ids: [...]} must contain exactly all existing model IDs."""
@@ -448,6 +489,11 @@ async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin))
         pools[pool_name]["strategy"] = body["strategy"]
     if "auto_order" in body:
         pools[pool_name]["auto_order"] = bool(body["auto_order"])
+    if "slow_latency_threshold" in body:
+        try:
+            pools[pool_name]["slow_latency_threshold"] = int(body["slow_latency_threshold"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="slow_latency_threshold 必须为数字（0=不限）")
 
     save_config(config)
     restart_scheduler()

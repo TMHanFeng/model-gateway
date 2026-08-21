@@ -28,7 +28,7 @@ class ModelEntry:
     refresh_time: str = ""
     timezone: str = "Asia/Shanghai"
     context_window: int = 0
-    max_concurrency: int = 10
+    max_concurrency: int = 0  # 0 = unlimited (no semaphore gating)
     billing_mode: str = "token"
     is_free: bool = False
     modality: str = "text"
@@ -42,7 +42,10 @@ class ModelEntry:
 
     def __post_init__(self):
         if self.semaphore is None:
-            self.semaphore = asyncio.Semaphore(self.max_concurrency)
+            # max_concurrency=0 means "unlimited". asyncio.Semaphore(0) blocks all
+            # acquires, so substitute a very large permit count (effectively unlimited).
+            permits = self.max_concurrency if self.max_concurrency > 0 else (1 << 31)
+            self.semaphore = asyncio.Semaphore(permits)
 
 
 ROLLING_5H_SECONDS = 5 * 3600
@@ -106,7 +109,7 @@ class ModelPool:
                 refresh_time=m.get("refresh_time", ""),
                 timezone="Asia/Shanghai",
                 context_window=m.get("context_window", 0),
-                max_concurrency=m.get("max_concurrency", 10),
+                max_concurrency=m.get("max_concurrency", 0),
                 billing_mode=m.get("billing_mode", "token"),
                 is_free=m.get("is_free", False),
                 modality=m.get("modality", "text"),
@@ -122,6 +125,7 @@ class ModelPool:
                 "auto_order": bool(pool_cfg.get("auto_order", False)),
                 "fallback_pool": pool_cfg.get("fallback_pool"),
                 "strategy": pool_cfg.get("strategy", "sequential"),
+                "slow_latency_threshold": int(pool_cfg.get("slow_latency_threshold", 3000)),
                 "owner_key_id": pool_cfg.get("owner_key_id"),
             }
 
@@ -134,6 +138,7 @@ class ModelPool:
                 "auto_order": (legacy_pool or {}).get("auto_order", False),
                 "fallback_pool": None,
                 "strategy": (legacy_pool or {}).get("strategy", "sequential"),
+                "slow_latency_threshold": int((legacy_pool or {}).get("slow_latency_threshold", 3000)),
             }
             # Persist the migration so config.json stays in sync
             if "pools" in self.config:
@@ -307,25 +312,26 @@ class ModelPool:
     # auto-order selection instead of being pushed to infinity.
     _UNTESTED_LATENCY = 1500.0
 
-    def _unit_latency(self, kind: str, val, visiting: set) -> float:
+    def _unit_latency(self, kind: str, val, visiting: set, threshold: int = 3000) -> float:
         if kind == "model":
             lat = val.latency_ms
             if lat is None:
                 return self._UNTESTED_LATENCY
-            # Hard deprioritize slow models (>3s) so the next model is preferred.
-            if lat > 3000:
+            # Hard deprioritize slow models (> threshold) so the next model is preferred.
+            if threshold > 0 and lat > threshold:
                 return float("inf")
             return lat
         name = val
         if name in visiting:
             return float("inf")
         meta = self.pools.get(name) or {}
+        sub_threshold = int(meta.get("slow_latency_threshold", 3000))
         best = float("inf")
         for raw in meta.get("model_ids", []):
             if raw.startswith("pool:"):
-                best = min(best, self._unit_latency("pool", raw[5:], visiting | {name}))
+                best = min(best, self._unit_latency("pool", raw[5:], visiting | {name}, sub_threshold))
             elif raw in self.registry:
-                best = min(best, self._unit_latency("model", self.registry[raw], visiting))
+                best = min(best, self._unit_latency("model", self.registry[raw], visiting, sub_threshold))
         return best
 
     def _time_to_expiry(self, entry: ModelEntry) -> float:
@@ -363,7 +369,7 @@ class ModelPool:
                 pass
         return float("inf")
 
-    def _auto_order_key(self, kind: str, val, visiting: set):
+    def _auto_order_key(self, kind: str, val, visiting: set, threshold: int = 3000):
         """Sort key for auto_order: (time-to-expiry, latency). Lower = chosen first.
         Prefers models whose quota is about to be lost, then faster ones.
         Untested models get a moderate default latency so they still participate."""
@@ -371,19 +377,20 @@ class ModelPool:
             lat = val.latency_ms
             if lat is None:
                 lat = self._UNTESTED_LATENCY
-            elif lat > 3000:
+            elif threshold > 0 and lat > threshold:
                 lat = float("inf")
             return (self._time_to_expiry(val), lat)
         name = val
         if name in visiting:
             return (float("inf"), float("inf"))
         meta = self.pools.get(name) or {}
+        sub_threshold = int(meta.get("slow_latency_threshold", 3000))
         best = (float("inf"), float("inf"))
         for raw in meta.get("model_ids", []):
             if raw.startswith("pool:"):
-                child = self._auto_order_key("pool", raw[5:], visiting | {name})
+                child = self._auto_order_key("pool", raw[5:], visiting | {name}, sub_threshold)
             elif raw in self.registry:
-                child = self._auto_order_key("model", self.registry[raw], visiting)
+                child = self._auto_order_key("model", self.registry[raw], visiting, sub_threshold)
             else:
                 continue
             if child < best:
@@ -434,7 +441,8 @@ class ModelPool:
                 units.append(("model", self.registry[raw]))
 
         if meta.get("auto_order"):
-            units = sorted(units, key=lambda u: self._auto_order_key(u[0], u[1], visiting))
+            threshold = int(meta.get("slow_latency_threshold", 3000))
+            units = sorted(units, key=lambda u: self._auto_order_key(u[0], u[1], visiting, threshold))
 
         steps = []
         for kind, val in units:
