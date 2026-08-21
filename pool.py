@@ -541,7 +541,7 @@ class ModelPool:
             try:
                 response = await provider.chat(req, entry.name)
             except RateLimitError:
-                entry.cooldown_until = time.time() + 30
+                entry.cooldown_until = time.time() + 20
                 raise
         self._record_latency(entry, (time.perf_counter() - t0) * 1000)
 
@@ -655,7 +655,7 @@ class ModelPool:
                 return response, tokens, actual_calls
             except RateLimitError:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-                detail = {"cooldown_sec": 60, "status": 429, "latency_ms": latency_ms}
+                detail = {"cooldown_sec": 20, "status": 429, "latency_ms": latency_ms}
                 actual_calls.append({
                     "model": entry.id,
                     "reason": "fallback_switch_429" if use_fallback else "switch_429",
@@ -760,7 +760,11 @@ class ModelPool:
                 await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
                 return _replay(), entry, actual_calls
             except RateLimitError:
-                actual_calls.append({"model": entry.id, "reason": "fallback_switch_429" if use_fallback else "switch_429"})
+                actual_calls.append({
+                    "model": entry.id,
+                    "reason": "fallback_switch_429" if use_fallback else "switch_429",
+                    "detail": {"cooldown_sec": 20, "status": 429},
+                })
                 if override_id and not use_fallback:
                     use_fallback = True
                 continue
