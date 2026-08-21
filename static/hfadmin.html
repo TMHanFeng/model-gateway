@@ -242,14 +242,6 @@ select { max-width: 100%; }
   position: absolute; right: 8px; font-size: 11px; color: var(--muted);
   pointer-events: none; font-family: var(--mono);
 }
-.th-presets { display: inline-flex; gap: 3px; }
-.th-preset {
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px;
-  padding: 3px 8px; font-size: 11px; color: var(--muted); cursor: pointer;
-  font-family: var(--mono); transition: all 150ms var(--ease-out);
-}
-.th-preset:hover { border-color: var(--teal); color: var(--teal); background: var(--teal-dim); }
-.th-preset.active { background: var(--teal-dim); border-color: var(--teal); color: var(--teal); }
 .th-hint { font-size: 11px; color: var(--muted); font-style: italic; margin-left: 2px; transition: color 150ms var(--ease-out); }
 .th-hint.ok { color: var(--teal); font-style: normal; }
 .th-hint.warn { color: var(--amber); font-style: normal; }
@@ -1178,11 +1170,6 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
                 onchange="setSlowThreshold('${esc(name).replace(/'/g, "\\'")}', this.value); updateThHint('${esc(name).replace(/'/g, "\\'")}', this.value); this.blur();">
               <span class="th-unit">ms</span>
             </div>
-            <div class="th-presets">
-              <button type="button" class="th-preset" data-th-val="0" onclick="setSlowThreshold('${esc(name).replace(/'/g, "\\'")}', 0); updateThHint('${esc(name).replace(/'/g, "\\'")}', 0);">不限</button>
-              <button type="button" class="th-preset" data-th-val="1500" onclick="setSlowThreshold('${esc(name).replace(/'/g, "\\'")}', 1500); updateThHint('${esc(name).replace(/'/g, "\\'")}', 1500);">1.5s</button>
-              <button type="button" class="th-preset" data-th-val="3000" onclick="setSlowThreshold('${esc(name).replace(/'/g, "\\'")}', 3000); updateThHint('${esc(name).replace(/'/g, "\\'")}', 3000);">3s</button>
-            </div>
             <span class="th-hint" data-th-hint="${esc(name).replace(/'/g, "\\'")}"></span>
           </div>
           <button class="btn btn-ghost btn-sm" onclick="speedPool('${esc(name).replace(/'/g, "\\'")}')">⚡ 测速本池</button>
@@ -1322,12 +1309,6 @@ function updateThHint(name, val) {
     else if (v <= 1000) { hint.textContent = '> ' + (v / 1000).toFixed(1) + 's 即降级（激进）'; hint.className = 'th-hint warn'; }
     else if (v <= 3000) { hint.textContent = '> ' + (v / 1000).toFixed(1) + 's 即降级'; hint.className = 'th-hint ok'; }
     else { hint.textContent = '> ' + (v / 1000).toFixed(1) + 's 即降级（宽松）'; hint.className = 'th-hint'; }
-  }
-  const wrap = hint ? hint.closest('.threshold-ctl') : null;
-  if (wrap) {
-    wrap.querySelectorAll('.th-preset').forEach(b => {
-      b.classList.toggle('active', parseInt(b.dataset.thVal) === v);
-    });
   }
 }
 async function openFallbackTargets() {
