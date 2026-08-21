@@ -222,6 +222,38 @@ select { max-width: 100%; }
 .fg { display: flex; flex-direction: column; gap: 5px; margin-bottom: 13px; }
 .fg label { font-size: 12px; color: var(--muted); }
 .fg input, .fg select, .fg textarea { width: 100%; }
+
+/* 延迟阈值输入控件（pool 卡片自动择优旁） */
+.threshold-ctl { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); padding: 4px 0; }
+.th-label { display: inline-flex; align-items: center; gap: 3px; }
+.th-input-wrap { position: relative; display: inline-flex; align-items: center; }
+.th-input-wrap .th-input {
+  width: 76px; padding: 5px 24px 5px 9px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 7px; color: var(--text);
+  font-size: 12.5px; font-family: var(--mono); outline: none; text-align: right;
+  transition: border-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out), background 180ms var(--ease-out);
+}
+.th-input-wrap .th-input:hover { border-color: rgba(120, 200, 255, 0.5); }
+.th-input-wrap .th-input:focus {
+  border-color: var(--teal); background: rgba(45, 212, 191, 0.06);
+  box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.18);
+}
+.th-input-wrap .th-unit {
+  position: absolute; right: 8px; font-size: 11px; color: var(--muted);
+  pointer-events: none; font-family: var(--mono);
+}
+.th-presets { display: inline-flex; gap: 3px; }
+.th-preset {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px;
+  padding: 3px 8px; font-size: 11px; color: var(--muted); cursor: pointer;
+  font-family: var(--mono); transition: all 150ms var(--ease-out);
+}
+.th-preset:hover { border-color: var(--teal); color: var(--teal); background: var(--teal-dim); }
+.th-preset.active { background: var(--teal-dim); border-color: var(--teal); color: var(--teal); }
+.th-hint { font-size: 11px; color: var(--muted); font-style: italic; margin-left: 2px; transition: color 150ms var(--ease-out); }
+.th-hint.ok { color: var(--teal); font-style: normal; }
+.th-hint.warn { color: var(--amber); font-style: normal; }
+
 .f2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .f3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
 .hint { font-size: 12.5px; color: var(--muted); }
@@ -1103,6 +1135,15 @@ async function loadPools() {
     return poolMode === 'user' ? isDedicated : !isDedicated;
   });
 
+
+// 初始化所有 threshold 控件的 hint 文字与预设 active 状态
+document.querySelectorAll('.threshold-ctl').forEach(ctl => {
+  const hint = ctl.querySelector('.th-hint');
+  if (!hint) return;
+  const input = ctl.querySelector('.th-input');
+  const name = hint.dataset.thHint;
+  if (input && name) updateThHint(name, input.value);
+});
   document.getElementById('pool-list').innerHTML = entries.map(([name, pool], pi) => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
@@ -1130,10 +1171,20 @@ async function loadPools() {
             <input type="checkbox" ${pool.auto_order ? 'checked' : ''} onchange="toggleAutoOrder('${esc(name).replace(/'/g, "\\'")}', this.checked)">
             <span class="track"></span><span class="sw-label">自动择优</span>
           </label>
-          <label class="threshold-ctl" title="自动择优模式下，延迟超过此值(ms)的模型排到末尾；0=不限制">
-            阈值 <input type="number" min="0" step="100" style="width:70px" value="${pool.slow_latency_threshold ?? 3000}"
-              onchange="setSlowThreshold('${esc(name).replace(/'/g, "\\'")}', this.value)">
-          </label>
+          <div class="threshold-ctl" title="自动择优模式下，超过此延迟(ms)的模型排到末尾；0=不限">
+            <span class="th-label">⏱ 阈值</span>
+            <div class="th-input-wrap">
+              <input type="number" class="th-input" min="0" step="100" value="${pool.slow_latency_threshold ?? 3000}"
+                onchange="setSlowThreshold('${esc(name).replace(/'/g, "\\'")}', this.value); updateThHint('${esc(name).replace(/'/g, "\\'")}', this.value); this.blur();">
+              <span class="th-unit">ms</span>
+            </div>
+            <div class="th-presets">
+              <button type="button" class="th-preset" data-th-val="0" onclick="setSlowThreshold('${esc(name).replace(/'/g, "\\'")}', 0); updateThHint('${esc(name).replace(/'/g, "\\'")}', 0);">不限</button>
+              <button type="button" class="th-preset" data-th-val="1500" onclick="setSlowThreshold('${esc(name).replace(/'/g, "\\'")}', 1500); updateThHint('${esc(name).replace(/'/g, "\\'")}', 1500);">1.5s</button>
+              <button type="button" class="th-preset" data-th-val="3000" onclick="setSlowThreshold('${esc(name).replace(/'/g, "\\'")}', 3000); updateThHint('${esc(name).replace(/'/g, "\\'")}', 3000);">3s</button>
+            </div>
+            <span class="th-hint" data-th-hint="${esc(name).replace(/'/g, "\\'")}"></span>
+          </div>
           <button class="btn btn-ghost btn-sm" onclick="speedPool('${esc(name).replace(/'/g, "\\'")}')">⚡ 测速本池</button>
           ${isAuto ? `<button class="btn btn-amber btn-sm" onclick="openSingleMode()">🎯 一键单模型</button>` : ''}
           ${isFallback ? `<button class="btn btn-ghost btn-sm" onclick="openFallbackTargets()">🛟 选择兜底对象</button>` : ''}
@@ -1261,6 +1312,23 @@ async function setSlowThreshold(name, val) {
   if (!data || !data.pools[name]) return;
   const ok = await api('/admin/pools/' + pathEnc(name), { method: 'PUT', body: JSON.stringify({ model_ids: data.pools[name].model_ids, slow_latency_threshold: v }) });
   if (ok) { await api('/admin/reload', { method: 'POST' }); toast(v === 0 ? name + ' 延迟阈值：不限制' : name + ' 延迟阈值：' + v + 'ms'); loadPools(); }
+}
+// 根据当前阈值更新下方提示文字 + 预设按钮高亮
+function updateThHint(name, val) {
+  const v = parseInt(val);
+  const hint = document.querySelector('[data-th-hint="' + name.replace(/"/g, '\\"') + '"]');
+  if (hint) {
+    if (isNaN(v) || v <= 0) { hint.textContent = '不限速'; hint.className = 'th-hint ok'; }
+    else if (v <= 1000) { hint.textContent = '> ' + (v / 1000).toFixed(1) + 's 即降级（激进）'; hint.className = 'th-hint warn'; }
+    else if (v <= 3000) { hint.textContent = '> ' + (v / 1000).toFixed(1) + 's 即降级'; hint.className = 'th-hint ok'; }
+    else { hint.textContent = '> ' + (v / 1000).toFixed(1) + 's 即降级（宽松）'; hint.className = 'th-hint'; }
+  }
+  const wrap = hint ? hint.closest('.threshold-ctl') : null;
+  if (wrap) {
+    wrap.querySelectorAll('.th-preset').forEach(b => {
+      b.classList.toggle('active', parseInt(b.dataset.thVal) === v);
+    });
+  }
 }
 async function openFallbackTargets() {
   const data = await api('/admin/pools');
