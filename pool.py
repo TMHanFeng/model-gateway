@@ -249,8 +249,10 @@ class ModelPool:
                         return True
         return False
 
-    async def _check_available(self, entry: ModelEntry, estimated_tokens: int = 0, has_images: bool = False) -> tuple[bool, str]:
+    async def _check_available(self, entry: ModelEntry, estimated_tokens: int = 0, has_images: bool = False) -> tuple[bool, str, dict | None]:
+        """返回 (ok, reason, detail)。detail 用于调用记录展示具体数值（已用/上限、冷却剩余秒等）。"""
         now = time.time()
+        detail = None
 
         if entry.token_type == "one_time":
             state = await db.get_one_time_state(entry.id)
@@ -259,54 +261,75 @@ class ModelPool:
                 state = {"used_tokens": 0, "created_at": now, "expired": 0}
             entry.one_time_created_at = state["created_at"]  # cache for _time_to_expiry
             if state["expired"]:
-                return False, "one_time_expired"
+                return False, "one_time_expired", {"reason_detail": "已标记过期"}
             if entry.expire_date:
                 try:
                     today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
                     if today > datetime.strptime(entry.expire_date, "%Y-%m-%d").date():
                         await db.expire_one_time(entry.id)
-                        return False, "one_time_expired"
+                        return False, "one_time_expired", {"reason_detail": f"过期日期 {entry.expire_date} 已过"}
                 except ValueError:
                     pass
             if entry.ttl_seconds > 0 and (now - state["created_at"]) > entry.ttl_seconds:
                 await db.expire_one_time(entry.id)
-                return False, "one_time_expired"
+                age = int(now - state["created_at"])
+                return False, "one_time_expired", {
+                    "reason_detail": f"TTL 已过",
+                    "age_sec": age,
+                    "ttl_sec": entry.ttl_seconds,
+                }
             if entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
                 await db.expire_one_time(entry.id)
-                return False, "one_time_expired"
+                return False, "one_time_expired", {
+                    "reason_detail": "用量触顶",
+                    "used": state["used_tokens"],
+                    "limit": entry.max_tokens,
+                }
         elif entry.token_type == "rolling_5h":
             state = await db.get_5h_state(entry.id)
             if state is not None and (now - state["window_start"]) < ROLLING_5H_SECONDS:
                 entry.rolling5h_window_start = state["window_start"]
                 if entry.daily_token_limit > 0 and state["used_amount"] >= entry.daily_token_limit:
-                    return False, "quota_exhausted"
+                    remaining = int(ROLLING_5H_SECONDS - (now - state["window_start"]))
+                    return False, "quota_exhausted", {
+                        "used": state["used_amount"],
+                        "limit": entry.daily_token_limit,
+                        "window_remaining_sec": remaining,
+                    }
             else:
                 entry.rolling5h_window_start = None
         elif entry.daily_token_limit > 0:
             used = await db.get_daily_usage(entry.id)
             if used >= entry.daily_token_limit:
-                return False, "quota_exhausted"
+                return False, "quota_exhausted", {
+                    "used": used,
+                    "limit": entry.daily_token_limit,
+                }
 
         if entry.rpm_limit > 0:
             rpm = await db.get_rpm(entry.id)
             if rpm >= entry.rpm_limit:
-                return False, "rpm_limited"
+                return False, "rpm_limited", {"current": rpm, "limit": entry.rpm_limit}
 
         if entry.tpm_limit > 0:
             tpm = await db.get_tpm(entry.id)
             if tpm >= entry.tpm_limit:
-                return False, "tpm_limited"
+                return False, "tpm_limited", {"current": tpm, "limit": entry.tpm_limit}
 
         if has_images and entry.modality != "vision":
-            return False, "no_vision"
+            return False, "no_vision", {"modality": entry.modality}
 
         if entry.cooldown_until > now:
-            return False, "cooldown"
+            remaining = int(entry.cooldown_until - now)
+            return False, "cooldown", {"remaining_sec": remaining}
 
         if entry.context_window > 0 and estimated_tokens > entry.context_window:
-            return False, "context_exceeded"
+            return False, "context_exceeded", {
+                "estimated": estimated_tokens,
+                "window": entry.context_window,
+            }
 
-        return True, "ok"
+        return True, "ok", None
 
     # Untested models get a moderate default so they still participate in
     # auto-order selection instead of being pushed to infinity.
@@ -426,11 +449,14 @@ class ModelPool:
         if override_id and override_id not in exclude:
             entry = self.registry.get(override_id)
             if entry:
-                ok, reason = await self._check_available(entry, estimated_tokens, has_images)
+                ok, reason, detail = await self._check_available(entry, estimated_tokens, has_images)
                 if ok:
                     steps = [{"model": override_id, "reason": "single_override_selected"}]
                     return entry, steps
-                return None, [{"model": override_id, "reason": f"single_override_unavailable:{reason}"}]
+                step = {"model": override_id, "reason": f"single_override_unavailable:{reason}"}
+                if detail:
+                    step["detail"] = detail
+                return None, [step]
             return None, [{"model": override_id, "reason": "single_override_not_found"}]
 
         units = []
@@ -451,11 +477,14 @@ class ModelPool:
                 if entry.id in exclude:
                     steps.append({"model": entry.id, "reason": "already_tried"})
                     continue
-                ok, reason = await self._check_available(entry, estimated_tokens, has_images)
+                ok, reason, detail = await self._check_available(entry, estimated_tokens, has_images)
                 if ok:
                     steps.append({"model": entry.id, "reason": "selected"})
                     return entry, steps
-                steps.append({"model": entry.id, "reason": reason})
+                step = {"model": entry.id, "reason": reason}
+                if detail:
+                    step["detail"] = detail
+                steps.append(step)
             else:
                 sub_entry, sub_steps = await self._select_from_pool(val, estimated_tokens, exclude, has_images, visiting)
                 steps.extend(sub_steps)
@@ -477,11 +506,14 @@ class ModelPool:
                 if entry.id in exclude:
                     steps.append({"model": entry.id, "reason": "already_tried"})
                     continue
-                ok, reason = await self._check_available(entry, estimated_tokens, has_images)
+                ok, reason, detail = await self._check_available(entry, estimated_tokens, has_images)
                 if ok:
                     steps.append({"model": entry.id, "reason": "selected"})
                     return entry, steps
-                steps.append({"model": entry.id, "reason": reason})
+                step = {"model": entry.id, "reason": reason}
+                if detail:
+                    step["detail"] = detail
+                steps.append(step)
             return None, steps
 
         return await self._select_from_pool(pool_name, estimated_tokens, exclude, has_images)
@@ -609,6 +641,7 @@ class ModelPool:
                 break
             tried.add(entry.id)
 
+            t0 = time.perf_counter()
             try:
                 response, tokens = await self.execute(entry, req)
                 last_reason = actual_calls[-1]["reason"] if actual_calls else ""
@@ -620,13 +653,37 @@ class ModelPool:
                 await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
                 return response, tokens, actual_calls
             except RateLimitError:
-                actual_calls.append({"model": entry.id, "reason": "fallback_switch_429" if use_fallback else "switch_429"})
+                latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+                detail = {"cooldown_sec": 60, "status": 429, "latency_ms": latency_ms}
+                actual_calls.append({
+                    "model": entry.id,
+                    "reason": "fallback_switch_429" if use_fallback else "switch_429",
+                    "detail": detail,
+                })
                 if override_id and not use_fallback:
                     use_fallback = True
                 continue
-            except Exception:
+            except Exception as e:
+                latency_ms = round((time.perf_counter() - t0) * 1000, 1)
                 entry.cooldown_until = time.time() + 30
-                actual_calls.append({"model": entry.id, "reason": "fallback_switch_error" if use_fallback else "switch_error"})
+                error_type = type(e).__name__
+                detail = {
+                    "cooldown_sec": 30,
+                    "error_type": error_type,
+                    "latency_ms": latency_ms,
+                }
+                # 提取 HTTP status / message 等更多细节
+                status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+                if status is not None:
+                    detail["status"] = status
+                err_msg = str(e)
+                if err_msg and len(err_msg) < 200:
+                    detail["error"] = err_msg
+                actual_calls.append({
+                    "model": entry.id,
+                    "reason": "fallback_switch_error" if use_fallback else "switch_error",
+                    "detail": detail,
+                })
                 if override_id and not use_fallback:
                     use_fallback = True
                 continue

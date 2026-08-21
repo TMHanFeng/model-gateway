@@ -1285,10 +1285,10 @@ async function runSpeed() {
   toast('测速完成');
 }
 
-const REASON_LABELS = {
+const REASON_BASE = {
   selected: ['选中调用', 'rsn-selected'],
   ok: ['可用', 'rsn-selected'],
-  quota_exhausted: ['用量已用尽', 'rsn-skip'],
+  quota_exhausted: ['用量已尽', 'rsn-skip'],
   rpm_limited: ['RPM 触顶', 'rsn-skip'],
   tpm_limited: ['TPM 触顶', 'rsn-skip'],
   cooldown: ['冷却中', 'rsn-warn'],
@@ -1300,10 +1300,61 @@ const REASON_LABELS = {
   cycle: ['循环引用已跳过', 'rsn-warn'],
   switch_429: ['上游限流 → 切换', 'rsn-warn'],
   switch_error: ['上游错误 → 切换', 'rsn-warn'],
+  fallback_selected: ['兜底池选中', 'rsn-selected'],
+  fallback_switch_429: ['兜底上游限流 → 切换', 'rsn-warn'],
+  fallback_switch_error: ['兜底上游错误 → 切换', 'rsn-warn'],
 };
-function reasonChip(reason) {
-  const [label, cls] = REASON_LABELS[reason] || [reason, 'rsn-neutral'];
-  return `<span class="rsn ${cls}">${label}</span>`;
+
+function formatDetail(reason, d) {
+  if (!d) return '';
+  const fmtNum = (n) => (typeof n === 'number' ? n.toLocaleString('en-US') : n);
+  const tail = (s) => ' · ' + s;
+  switch (reason) {
+    case 'quota_exhausted':
+      if (d.used != null && d.limit != null) {
+        const pct = d.limit > 0 ? Math.round(d.used / d.limit * 100) : 0;
+        return tail(`${fmtNum(d.used)}/${fmtNum(d.limit)} (${pct}%)`);
+      }
+      if (d.reason_detail) return tail(d.reason_detail);
+      return '';
+    case 'rpm_limited':
+      return d.current != null ? tail(`${fmtNum(d.current)}/${fmtNum(d.limit)} RPM`) : '';
+    case 'tpm_limited':
+      return d.current != null ? tail(`${fmtNum(d.current)}/${fmtNum(d.limit)} TPM`) : '';
+    case 'cooldown':
+      return d.remaining_sec != null ? tail(`剩 ${d.remaining_sec}s`) : '';
+    case 'context_exceeded':
+      return d.estimated != null ? tail(`请求估算 ${fmtNum(d.estimated)} tok，上限 ${fmtNum(d.window)}`) : '';
+    case 'no_vision':
+      return tail(`模型为 ${d.modality || 'text'}，请求含图`);
+    case 'one_time_expired':
+      if (d.used != null && d.limit != null) return tail(`已用 ${fmtNum(d.used)}/${fmtNum(d.limit)}`);
+      if (d.age_sec != null && d.ttl_sec != null) return tail(`已存活 ${d.age_sec}s / TTL ${d.ttl_sec}s`);
+      if (d.expire_date) return tail(`到期 ${d.expire_date}`);
+      return d.reason_detail ? tail(d.reason_detail) : '';
+    case 'switch_429':
+    case 'fallback_switch_429':
+      if (d.latency_ms != null) return tail(`HTTP 429 · ${d.latency_ms}ms · 冷却 ${d.cooldown_sec}s`);
+      return d.cooldown_sec != null ? tail(`HTTP 429 · 冷却 ${d.cooldown_sec}s`) : '';
+    case 'switch_error':
+    case 'fallback_switch_error': {
+      const parts = [];
+      if (d.error_type) parts.push(d.error_type);
+      if (d.status != null) parts.push('HTTP ' + d.status);
+      if (d.latency_ms != null) parts.push(d.latency_ms + 'ms');
+      if (d.cooldown_sec != null) parts.push('冷却 ' + d.cooldown_sec + 's');
+      const tail3 = parts.length ? tail(parts.join(' · ')) : '';
+      return d.error ? tail3 + tail(d.error.slice(0, 80)) : tail3;
+    }
+    default:
+      return '';
+  }
+}
+
+function reasonChip(reason, detail) {
+  const [label, cls] = REASON_BASE[reason] || [reason, 'rsn-neutral'];
+  const extra = formatDetail(reason, detail);
+  return `<span class="rsn ${cls}" title="${esc ? (label + extra).slice(1) : (label + extra).slice(1)}">${label}${extra ? `<span style="opacity:.75">${extra}</span>` : ''}</span>`;
 }
 
 async function populateLogFilter() {
@@ -1329,7 +1380,7 @@ async function loadDecisions() {
       <div class="log-step">
         <span class="s-model">${esc(s.model)}</span>
         <span class="s-arrow">→</span>
-        ${reasonChip(s.reason)}
+        ${reasonChip(s.reason, s.detail)}
       </div>`).join('');
     return `
       <div class="log-card">
