@@ -30,7 +30,7 @@ class ModelEntry:
     context_window: int = 0
     max_concurrency: int = 0  # 0 = unlimited (no semaphore gating)
     billing_mode: str = "token"
-    is_free: bool = False
+    is_free: bool = True
     modality: str = "text"
     provider_id: str = ""
     expire_date: str = ""
@@ -111,7 +111,7 @@ class ModelPool:
                 context_window=m.get("context_window", 0),
                 max_concurrency=m.get("max_concurrency", 0),
                 billing_mode=m.get("billing_mode", "token"),
-                is_free=m.get("is_free", False),
+                is_free=m.get("is_free", True),
                 modality=m.get("modality", "text"),
                 provider_id=pid,
                 expire_date=m.get("expire_date", ""),

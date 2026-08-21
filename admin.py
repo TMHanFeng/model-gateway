@@ -124,7 +124,7 @@ async def add_model(request: Request, _=Depends(verify_admin)):
         "context_window": body.get("context_window", 0),
         "max_concurrency": body.get("max_concurrency", 0),
         "billing_mode": body.get("billing_mode", "token"),
-        "is_free": bool(body.get("is_free", False)),
+        "is_free": bool(body.get("is_free", True)),
         "modality": body.get("modality", "text"),
     }
     if pid:

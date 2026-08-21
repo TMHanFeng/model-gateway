@@ -523,7 +523,7 @@ select { max-width: 100%; }
       <div class="f3">
         <div class="fg"><label>令牌类型</label><select name="token_type" id="f-token-type" onchange="onTokenTypeChange()"><option value="daily">daily（每日刷新）</option><option value="rolling_5h">rolling_5h（5h 限额）</option><option value="one_time">one_time（一次性）</option></select></div>
         <div class="fg"><label>计费模式</label><select name="billing_mode" onchange="onBillingChange()"><option value="token">按 Token 计费</option><option value="request">按请求次数计费</option></select></div>
-        <div class="fg"><label>收费标注</label><select name="is_free"><option value="false">付费模型（红）</option><option value="true">免费模型（绿）</option></select></div>
+        <div class="fg"><label>收费标注</label><select name="is_free"><option value="true">免费模型（绿）</option><option value="false">付费模型（红）</option></select></div>
       </div>
       <div class="f3">
         <div class="fg"><label>模型模态</label><select name="modality"><option value="text">纯文本</option><option value="vision">多模态</option></select></div>
