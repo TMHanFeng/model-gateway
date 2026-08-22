@@ -626,7 +626,7 @@ def pick_latest_remote() -> tuple[str, str]:
     # 两边都拿不到版本 tag，回退 commit 时间戳比较
     refs = {
         "github": "github/main",
-        "origin": "origin/main",
+        "origin": "origin/master",
     }
 
     # 获取每个远程的最新 commit 和时间戳
