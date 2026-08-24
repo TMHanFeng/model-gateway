@@ -34,6 +34,7 @@ class ModelEntry:
     is_free: bool = True
     modality: str = "text"
     provider_id: str = ""
+    proxy_url: str = ""
     expire_date: str = ""
     latency_ms: float | None = None
     cooldown_until: float = 0.0
@@ -82,6 +83,7 @@ class ModelPool:
                 "protocol": p.get("protocol", "openai"),
                 "base_url": p.get("base_url", ""),
                 "api_key": p.get("api_key", ""),
+                "proxy_url": p.get("proxy_url", ""),
             }
 
         for m in self.config.get("models", []):
@@ -91,10 +93,12 @@ class ModelPool:
                 protocol = prov["protocol"]
                 base_url = prov["base_url"]
                 api_key = prov["api_key"]
+                proxy_url = prov.get("proxy_url", "") or m.get("proxy_url", "")
             else:
                 protocol = m.get("provider", "openai")
                 base_url = m.get("base_url", "")
                 api_key = m.get("api_key", "")
+                proxy_url = m.get("proxy_url", "")
             entry = ModelEntry(
                 id=m["id"],
                 name=m["name"],
@@ -115,6 +119,7 @@ class ModelPool:
                 is_free=m.get("is_free", True),
                 modality=m.get("modality", "text"),
                 provider_id=pid,
+                proxy_url=proxy_url,
                 expire_date=m.get("expire_date", ""),
             )
             self.registry[entry.id] = entry
@@ -215,9 +220,9 @@ class ModelPool:
     def _get_provider(self, entry: ModelEntry):
         if entry.id not in self.providers_cache:
             if entry.provider == "anthropic":
-                self.providers_cache[entry.id] = AnthropicProvider(entry.base_url, entry.api_key)
+                self.providers_cache[entry.id] = AnthropicProvider(entry.base_url, entry.api_key, entry.proxy_url)
             else:
-                self.providers_cache[entry.id] = OpenAIProvider(entry.base_url, entry.api_key)
+                self.providers_cache[entry.id] = OpenAIProvider(entry.base_url, entry.api_key, entry.proxy_url)
         return self.providers_cache[entry.id]
 
     async def close_all(self):

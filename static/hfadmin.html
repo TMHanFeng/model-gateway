@@ -590,6 +590,7 @@ select { max-width: 100%; }
         <div class="fg"><label>Base URL</label><input name="base_url" required placeholder="https://api.openai.com/v1"></div>
       </div>
       <div class="fg"><label>API Key</label><input name="api_key" required placeholder="sk-..."></div>
+      <div class="fg"><label>代理地址（可选）</label><input name="proxy_url" placeholder="http://127.0.0.1:7890" title="部分国外模型的供应商可配置 VPN/clash 代理；留空则直连"></div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" onclick="closeModal('overlay-provider')">取消</button>
         <button type="submit" class="btn btn-amber">保存</button>
@@ -829,7 +830,7 @@ async function loadModels() {
       <div class="card-head provider-head">
         <div>
           <div class="card-title"><span class="drag-handle">⠿</span> ${esc(p.name)} ${provBadge(p.protocol)}</div>
-          <div class="card-sub mono">${esc(p.id)} · ${esc(p.base_url)}</div>
+          <div class="card-sub mono">${esc(p.id)} · ${esc(p.base_url)}${p.proxy_url ? ` <span class="badge" style="background:rgba(167,139,250,.14);color:#a78bfa" title="代理: ${esc(p.proxy_url)}">🛡️ 代理</span>` : ''}</div>
         </div>
         <div class="btn-row">
           <button class="btn btn-ghost btn-sm" onclick="editProvider('${esc(p.id).replace(/'/g, "\\'")}')">编辑</button>
@@ -991,7 +992,7 @@ async function editProvider(id) {
   document.getElementById('prov-modal-title').textContent = '编辑供应商';
   const f = document.getElementById('pform');
   f.id.value = p.id; f.name.value = p.name; f.protocol.value = p.protocol;
-  f.base_url.value = p.base_url; f.api_key.value = p.api_key;
+  f.base_url.value = p.base_url; f.api_key.value = p.api_key; f.proxy_url.value = p.proxy_url || '';
   document.getElementById('prov-id').disabled = true;
   document.getElementById('overlay-provider').classList.add('show');
 }

@@ -8,13 +8,16 @@ from .openai_provider import RateLimitError
 
 
 class AnthropicProvider:
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str, proxy_url: str = ""):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.client = httpx.AsyncClient(
+        kwargs = dict(
             timeout=httpx.Timeout(120, connect=10),
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+        self.client = httpx.AsyncClient(**kwargs)
 
     async def close(self):
         await self.client.aclose()

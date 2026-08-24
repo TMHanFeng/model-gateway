@@ -247,6 +247,7 @@ async def add_provider(request: Request, _=Depends(verify_admin)):
         "protocol": body["protocol"],
         "base_url": body["base_url"],
         "api_key": body["api_key"],
+        "proxy_url": body.get("proxy_url", ""),
     }
     providers.append(entry)
     config["providers"] = providers
