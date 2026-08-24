@@ -590,7 +590,14 @@ select { max-width: 100%; }
         <div class="fg"><label>Base URL</label><input name="base_url" required placeholder="https://api.openai.com/v1"></div>
       </div>
       <div class="fg"><label>API Key</label><input name="api_key" required placeholder="sk-..."></div>
-      <div class="fg"><label>代理地址（可选）</label><input name="proxy_url" placeholder="http://127.0.0.1:7890" title="部分国外模型的供应商可配置 VPN/clash 代理；留空则直连"></div>
+      <div class="fg">
+        <label>代理地址（可选）</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input name="proxy_url" placeholder="http://127.0.0.1:7890" title="部分国外模型的供应商可配置 VPN/clash 代理；留空则直连" oninput="onProxyInput(this)">
+          <button type="button" class="btn btn-ghost btn-sm" id="proxy-test-btn" disabled onclick="testProviderProxy()" title="通过代理请求 BaseURL 测延迟，并读取 Clash 当前节点">🔍 连接测试</button>
+        </div>
+        <span id="proxy-test-result" class="th-hint"></span>
+      </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" onclick="closeModal('overlay-provider')">取消</button>
         <button type="submit" class="btn btn-amber">保存</button>
@@ -866,7 +873,7 @@ function bindModelDrag() {
   let dragged = null;
   list.addEventListener('dragstart', e => {
     const row = e.target.closest('.model-row[draggable]');
-    if (!row) { e.preventDefault(); return; }
+    if (!row) return;  // 非模型行拖拽（如供应商卡片），不干预
     // 拖模型时，禁止冒泡触发 provider-card 的拖拽
     e.stopPropagation();
     dragged = row;
@@ -915,6 +922,9 @@ function modelRowHTML(m, i) {
 }
 
 async function speedOne(id) {
+  // 清除本次测速目标的旧缓存，避免显示上次结果
+  delete speedCache[id];
+  localStorage.setItem('gw_speed', JSON.stringify(speedCache));
   toast('测速中：' + id);
   const data = await api('/speedtest', { method: 'POST', body: JSON.stringify({ model_ids: [id] }) });
   if (!data) return;
@@ -983,6 +993,41 @@ function showAddProvider() {
   document.getElementById('prov-id').disabled = false;
   document.getElementById('overlay-provider').classList.add('show');
 }
+// 代理输入框状态联动：有值才启用测试按钮
+function onProxyInput(input) {
+  const btn = document.getElementById('proxy-test-btn');
+  const rst = document.getElementById('proxy-test-result');
+  if (btn) btn.disabled = !(input.value.trim());
+  if (rst) rst.textContent = '';
+}
+// 连接测试：经代理请求 BaseURL 测延迟 + 拉 Clash 节点
+async function testProviderProxy() {
+  const inp = document.querySelector('#pform [name="proxy_url"]') || document.querySelector('[name="proxy_url"]');
+  const baseInp = document.querySelector('#pform [name="base_url"]') || document.querySelector('[name="base_url"]');
+  const btn = document.getElementById('proxy-test-btn');
+  const rst = document.getElementById('proxy-test-result');
+  const proxy = inp ? inp.value.trim() : '';
+  const base = baseInp ? baseInp.value.trim() : '';
+  if (!proxy) return;
+  if (btn) { btn.disabled = true; }
+  if (rst) { rst.textContent = '测试中…'; rst.className = 'th-hint'; }
+  try {
+    const data = await api('/admin/test_proxy', { method: 'POST', body: JSON.stringify({ proxy_url: proxy, base_url: base }) });
+    if (data && data.ok) {
+      const nodes = data.node ? ' · 节点: ' + data.node : ' · 节点: N/A(Clash API 未开)';
+      rst.textContent = '✅ 连通 ' + data.latency_ms + 'ms' + nodes;
+      rst.className = 'th-hint ok';
+    } else {
+      rst.textContent = '❌ 失败: ' + (data && data.error ? data.error : '未知错误');
+      rst.className = 'th-hint warn';
+    }
+  } catch (e) {
+    rst.textContent = '❌ 请求异常: ' + e.message;
+    rst.className = 'th-hint warn';
+  }
+  if (btn) btn.disabled = !(inp.value.trim());
+}
+
 async function editProvider(id) {
   const data = await api('/admin/providers');
   if (!data) return;
@@ -993,6 +1038,10 @@ async function editProvider(id) {
   const f = document.getElementById('pform');
   f.id.value = p.id; f.name.value = p.name; f.protocol.value = p.protocol;
   f.base_url.value = p.base_url; f.api_key.value = p.api_key; f.proxy_url.value = p.proxy_url || '';
+  const _pbt = document.getElementById('proxy-test-btn');
+  if (_pbt) _pbt.disabled = !(f.proxy_url.value.trim());
+  const _pbt2 = document.getElementById('proxy-test-result');
+  if (_pbt2) { _pbt2.textContent = ''; _pbt2.className = 'th-hint'; }
   document.getElementById('prov-id').disabled = true;
   document.getElementById('overlay-provider').classList.add('show');
 }
@@ -1345,6 +1394,9 @@ async function speedPool(name) {
   const pool = data.pools[name];
   const models = pool ? collectPoolModels(name, data.pools) : [];
   if (!models.length) { toast('该池无模型可测速', true); return; }
+  // 清除本次测速目标的旧缓存，避免显示上次结果
+  models.forEach(id => delete speedCache[id]);
+  localStorage.setItem('gw_speed', JSON.stringify(speedCache));
   toast('测速中：' + name + '（' + models.length + ' 个模型）');
   const res = await api('/speedtest', { method: 'POST', body: JSON.stringify({ model_ids: models }) });
   if (res) {
@@ -1489,7 +1541,7 @@ function bindProviderDrag() {
   list.addEventListener('dragover', e => {
     e.preventDefault();
     const card = e.target.closest('.provider-card');
-    if (!card || card === dragged) return;
+    if (!card || card === dragged || e.target.closest('.model-row')) return;
     if (dragged && list.contains(dragged)) {
       const rect = card.getBoundingClientRect();
       const before = e.clientY < rect.top + rect.height / 2;

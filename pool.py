@@ -796,7 +796,10 @@ class ModelPool:
         return None, None, actual_calls
 
     async def speedtest(self, model_ids: list[str] | None = None) -> list[dict]:
-        targets = model_ids or list(self.registry.keys())
+        if model_ids is None:
+            targets = list(self.registry.keys())
+        else:
+            targets = list(model_ids)
         results = []
 
         async def test_one(mid: str):

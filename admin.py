@@ -253,8 +253,30 @@ async def add_provider(request: Request, _=Depends(verify_admin)):
     config["providers"] = providers
     save_config(config)
     restart_scheduler()
+    _sync_pool()
     return {"ok": True, "provider": entry}
 
+
+@router.put("/providers/reorder")
+async def reorder_providers(request: Request, _=Depends(verify_admin)):
+    """Reorder providers. Body: {provider_ids: ['id1', 'id2', ...]}"""
+    body = await request.json()
+    new_order = body.get("provider_ids", [])
+    if not isinstance(new_order, list):
+        raise HTTPException(status_code=400, detail="provider_ids must be a list")
+
+    config = load_config()
+    providers = config.get("providers", [])
+    existing_ids = {p["id"] for p in providers}
+    if set(new_order) != existing_ids:
+        raise HTTPException(status_code=400, detail="provider_ids must contain exactly all existing provider IDs")
+
+    # Rebuild providers list in new order
+    by_id = {p["id"]: p for p in providers}
+    config["providers"] = [by_id[pid] for pid in new_order]
+    save_config(config)
+    restart_scheduler()
+    return {"ok": True}
 
 @router.put("/providers/{provider_id:path}")
 async def update_provider(provider_id: str, request: Request, _=Depends(verify_admin)):
@@ -279,29 +301,8 @@ async def update_provider(provider_id: str, request: Request, _=Depends(verify_a
     config["providers"] = providers
     save_config(config)
     restart_scheduler()
+    _sync_pool()
     return {"ok": True, "provider": providers[idx]}
-
-
-@router.put("/providers/reorder")
-async def reorder_providers(request: Request, _=Depends(verify_admin)):
-    """Reorder providers. Body: {provider_ids: ['id1', 'id2', ...]}"""
-    body = await request.json()
-    new_order = body.get("provider_ids", [])
-    if not isinstance(new_order, list):
-        raise HTTPException(status_code=400, detail="provider_ids must be a list")
-
-    config = load_config()
-    providers = config.get("providers", [])
-    existing_ids = {p["id"] for p in providers}
-    if set(new_order) != existing_ids:
-        raise HTTPException(status_code=400, detail="provider_ids must contain exactly all existing provider IDs")
-
-    # Rebuild providers list in new order
-    by_id = {p["id"]: p for p in providers}
-    config["providers"] = [by_id[pid] for pid in new_order]
-    save_config(config)
-    restart_scheduler()
-    return {"ok": True}
 
 
 @router.delete("/providers/{provider_id:path}")
@@ -628,6 +629,155 @@ async def test_model(request: Request, _=Depends(verify_admin)):
         return {"ok": True, "result": result}
     finally:
         await provider.close()
+
+
+@router.post("/test_proxy")
+async def test_proxy(request: Request, _=Depends(verify_admin)):
+    """测试供应商代理连通性 + 拉取 Clash/Mihomo 当前节点。
+
+    Body: {proxy_url, base_url}（都要）。
+    通过 proxy 请求 base_url 测延迟；再从 Clash 控制 API (http://127.0.0.1:9090)
+    读 GLOBAL.now 获取当前选中节点名。控制 API 不可达时 node 返回 null，不影响延迟结果。
+    """
+    import httpx as _httpx
+    import time as _time
+
+    body = await request.json()
+    proxy_url = (body.get("proxy_url") or "").strip()
+    base_url = (body.get("base_url") or "").strip()
+    if not proxy_url or not base_url:
+        raise HTTPException(status_code=400, detail="缺少 proxy_url / base_url")
+
+    result = {"ok": False, "latency_ms": None, "node": None, "error": None}
+
+    # 1. 通过代理拉 base_url 测延迟（不核验 TLS cert，能连通即算通）
+    try:
+        async with _httpx.AsyncClient(
+            proxy=proxy_url,
+            verify=False,
+            timeout=_httpx.Timeout(15, connect=10),
+        ) as client:
+            t0 = _time.perf_counter()
+            # 请求一个轻量端点判断连通性：/ 或 /v1/models 都行，401 也算通
+            resp = await client.get(base_url.rstrip("/") + "/", follow_redirects=True)
+            latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
+            result["ok"] = resp.status_code < 500  # <500 视为连通（401/403/404 都算代理通）
+            result["latency_ms"] = latency_ms
+            if resp.status_code >= 500:
+                result["error"] = f"上游 HTTP {resp.status_code}"
+            # 记录测试请求的 host，用于查真实出口节点
+            try:
+                from urllib.parse import urlparse
+                result["_test_host"] = urlparse(base_url).hostname or ""
+            except Exception:
+                result["_test_host"] = ""
+            # ★ Fix A: 在 client 仍存活时（连接池未关）解析 Clash 当前节点。
+            # 延迟到 async with 退出后查 /connections，live chain 已消失，Step A 永远扑空。
+            try:
+                await _fetch_clash_node(result, _httpx)
+            except Exception:
+                pass
+    except Exception as e:
+        result["error"] = type(e).__name__ + ": " + str(e)[:160]
+        return result
+
+    return result
+
+
+async def _fetch_clash_node(result: dict, _httpx, probe_host: str = ""):
+    """Resolve the REAL active Clash node.
+
+    1) Query /connections, find the live tunnel whose metadata.host matches our test
+       host, take chains[0] (the actual node). This works in rule mode too.
+    2) Fallback: prefer the user's master selector (e.g. "🌏 当前选择") — follow its
+       `now` recursively (up to 3 hops) until we resolve to a real node, so nested
+       groups like "🌏 当前选择 → 🇸🇬 新加坡自动 → TG-SG-1(hysteria)" map to the
+       actual exit node instead of the first non-DIRECT group in JSON order
+       (which is unreliable when multiple regions are configured).
+       Only if the master group is missing do we fall back to the generic
+       any-Selector/URLTest/Fallback scan.
+    3) Last resort: GLOBAL.now (global mode only).
+    """
+    # 优先使用显式参数；兼容旧调用方（仅传 result 时回退到 result["_test_host"]）
+    probe_host = probe_host or result.get("_test_host") or ""
+
+    for port in (9097, 9090, 9091, 9098, 9898, 6170, 6189):
+        base = f"http://127.0.0.1:{port}"
+        try:
+            async with _httpx.AsyncClient(timeout=1.5) as cc:
+                # Step A: live connection match
+                r = await cc.get(f"{base}/connections")
+                if r.status_code == 200:
+                    conns = r.json().get("connections", [])
+                    for c in conns:
+                        chains = c.get("chains") or []
+                        meta = c.get("metadata") or {}
+                        if probe_host and meta.get("host") == probe_host and chains:
+                            node = chains[0]
+                            if node and node.upper() != "DIRECT":
+                                result["node"] = node
+                                result["node_clash_port"] = port
+                                return
+
+                # Step B: 优先解析用户主选择组，下钻至真实节点
+                r2 = await cc.get(f"{base}/proxies")
+                if r2.status_code == 200:
+                    proxies = r2.json().get("proxies", {})
+                    master_keys = ("🌏 当前选择", "🌍 当前选择", "当前选择")
+                    master_found = False
+                    for mk in master_keys:
+                        if mk in proxies:
+                            master_found = True
+                            target = mk
+                            visited = set()
+                            # 最多下钻 3 层（master → 区域自动组 → 节点）
+                            for _hop in range(3):
+                                if target in visited:
+                                    break
+                                visited.add(target)
+                                grp = proxies.get(target) or {}
+                                now = grp.get("now")
+                                if not now or now.upper() == "DIRECT":
+                                    break
+                                sub = proxies.get(now)
+                                if sub and sub.get("type") in ("Selector", "URLTest", "Fallback"):
+                                    target = now
+                                    continue
+                                # now 指向真实节点（或非已知的 Selector）
+                                result["node"] = now
+                                result["node_clash_port"] = port
+                                return
+                            # 找到主选择组但解析不出节点 → 不再走原循环兜底，
+                            # 避免被同 JSON 顺序中的另一个区域组（如"🇨🇳 台湾自动"）干扰
+                            break
+                    if not master_found:
+                        # 没有任何主选择组 → 走原循环兜底
+                        for pname, p in proxies.items():
+                            if p.get("type") in ("Selector", "URLTest", "Fallback"):
+                                now = p.get("now")
+                                if now and now.upper() != "DIRECT" and now != pname:
+                                    result["node"] = now
+                                    result["node_clash_port"] = port
+                                    return
+        except Exception:
+            continue
+
+    # Step C: GLOBAL.now (only meaningful in global mode)
+    try:
+        async with _httpx.AsyncClient(timeout=1.5) as cc:
+            for port in (9097, 9090, 9091):
+                try:
+                    r = await cc.get(f"http://127.0.0.1:{port}/proxies")
+                    if r.status_code == 200:
+                        gl = r.json().get("proxies", {}).get("GLOBAL") or {}
+                        if gl.get("now"):
+                            result["node"] = gl["now"]
+                            result["node_clash_port"] = port
+                            return
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
 
 # ── API Key 管理 ─────────────────────────────────────────────────────
