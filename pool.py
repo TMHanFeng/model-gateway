@@ -73,6 +73,8 @@ class ModelPool:
         self.providers_cache: dict[str, object] = {}
         # Single-model override: pool_name -> model_id. When set, only that model is used.
         self.single_override: dict[str, str] = {}
+        # 负载均衡（round-robin）：pool_name -> 下一次起始下标
+        self.round_robin: dict[str, int] = {}
         self._load()
 
     def _load(self):
@@ -132,6 +134,7 @@ class ModelPool:
                 "fallback_pool": pool_cfg.get("fallback_pool"),
                 "strategy": pool_cfg.get("strategy", "sequential"),
                 "slow_latency_threshold": int(pool_cfg.get("slow_latency_threshold", 3000)),
+                "load_balance": pool_cfg.get("load_balance", False),
                 "owner_key_id": pool_cfg.get("owner_key_id"),
             }
 
@@ -145,6 +148,7 @@ class ModelPool:
                 "fallback_pool": None,
                 "strategy": (legacy_pool or {}).get("strategy", "sequential"),
                 "slow_latency_threshold": int((legacy_pool or {}).get("slow_latency_threshold", 3000)),
+                "load_balance": (legacy_pool or {}).get("load_balance", False),
             }
             # Persist the migration so config.json stays in sync
             if "pools" in self.config:
@@ -475,6 +479,12 @@ class ModelPool:
         if meta.get("auto_order"):
             threshold = int(meta.get("slow_latency_threshold", 3000))
             units = sorted(units, key=lambda u: self._auto_order_key(u[0], u[1], visiting, threshold))
+        elif meta.get("load_balance"):
+            # 负载均衡：每次从 round_robin 指针处开始轮转（子池也是独立槽位）
+            if units:
+                idx = self.round_robin.get(pool_name, 0) % len(units)
+                units = units[idx:] + units[:idx]
+                self.round_robin[pool_name] = (idx + 1) % len(units)
 
         steps = []
         for kind, val in units:

@@ -7,6 +7,7 @@ gateway.db-wal
 
 # Local user secrets & runtime configs (managed outside VCS)
 config.json
+config.json.bak
 config.yaml
 .env
 *.local

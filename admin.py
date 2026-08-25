@@ -156,6 +156,32 @@ async def add_model(request: Request, _=Depends(verify_admin)):
     return {"ok": True, "model": entry}
 
 
+@router.put("/models/reorder")
+async def reorder_models(request: Request, _=Depends(verify_admin)):
+    """Reorder models. Body: {model_ids: [...]} must contain exactly all existing model IDs."""
+    body = await request.json()
+    new_order = body.get("model_ids", [])
+    if not isinstance(new_order, list):
+        raise HTTPException(status_code=400, detail="model_ids must be a list")
+
+    config = load_config()
+    models = config.get("models", [])
+    existing_ids = {m["id"] for m in models}
+    if set(new_order) != existing_ids:
+        missing = existing_ids - set(new_order)
+        extra = set(new_order) - existing_ids
+        raise HTTPException(
+            status_code=400,
+            detail=f"model_ids must contain exactly all existing model IDs. Missing: {sorted(missing)}, Extra: {sorted(extra)}",
+        )
+
+    by_id = {m["id"]: m for m in models}
+    config["models"] = [by_id[mid] for mid in new_order]
+    save_config(config)
+    restart_scheduler()
+    _sync_pool()
+    return {"ok": True}
+
 @router.put("/models/{model_id:path}")
 async def update_model(model_id: str, request: Request, _=Depends(verify_admin)):
     body = await request.json()
@@ -326,8 +352,10 @@ async def delete_provider(provider_id: str, _=Depends(verify_admin)):
 @router.get("/pools")
 async def get_pools(_=Depends(verify_admin)):
     from main import pool
-    # Return from in-memory pool.pools (includes auto-created 兜底池)
-    return {"pools": pool.pools}
+    # Return from in-memory pool.pools (includes auto-created 兜底池).
+    # pool_order 保留 Python dict 的插入顺序：JS 的 Object.keys 会把纯数字池名
+    # （如 "123"）按整数键规则提到最前，打破预期顺序，故显式下发有序数组。
+    return {"pools": pool.pools, "pool_order": list(pool.pools.keys())}
 
 
 @router.post("/pools")
@@ -350,7 +378,11 @@ async def create_pool(request: Request, _=Depends(verify_admin)):
         "strategy": body.get("strategy", "sequential"),
         "model_ids": body.get("model_ids", []),
         "auto_order": bool(body.get("auto_order", False)),
+        "load_balance": bool(body.get("load_balance", False)),
     }
+    # 互斥：auto_order 与 load_balance 不可同时开启
+    if pools[name]["load_balance"]:
+        pools[name]["auto_order"] = False
     if body.get("fallback_pool"):
         pools[name]["fallback_pool"] = body["fallback_pool"]
     save_config(config)
@@ -388,6 +420,16 @@ async def reorder_pools(request: Request, _=Depends(verify_admin)):
 
     config = load_config()
     pools = config.get("pools", {})
+
+    # 防御：pool_names 必须包含全部现有池（除 auto/兜底池），防止不完整列表误删池
+    existing_others = {n for n in pools if n not in ("auto", "兜底池")}
+    provided_others = {n for n in pool_names if n in pools and n not in ("auto", "兜底池")}
+    missing = existing_others - provided_others
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"pool_names 不完整，缺少 {len(missing)} 个池: {sorted(missing)}；拒绝重排以防误删",
+        )
 
     # auto must always be first; 兜底池 goes last
     ordered = ["auto"]
@@ -448,33 +490,6 @@ async def set_fallback_targets(request: Request, _=Depends(verify_admin)):
     return {"ok": True, "targets": sorted(valid)}
 
 
-@router.put("/models/reorder")
-async def reorder_models(request: Request, _=Depends(verify_admin)):
-    """Reorder models. Body: {model_ids: [...]} must contain exactly all existing model IDs."""
-    body = await request.json()
-    new_order = body.get("model_ids", [])
-    if not isinstance(new_order, list):
-        raise HTTPException(status_code=400, detail="model_ids must be a list")
-
-    config = load_config()
-    models = config.get("models", [])
-    existing_ids = {m["id"] for m in models}
-    if set(new_order) != existing_ids:
-        missing = existing_ids - set(new_order)
-        extra = set(new_order) - existing_ids
-        raise HTTPException(
-            status_code=400,
-            detail=f"model_ids must contain exactly all existing model IDs. Missing: {sorted(missing)}, Extra: {sorted(extra)}",
-        )
-
-    by_id = {m["id"]: m for m in models}
-    config["models"] = [by_id[mid] for mid in new_order]
-    save_config(config)
-    restart_scheduler()
-    _sync_pool()
-    return {"ok": True}
-
-
 @router.put("/pools/{pool_name}")
 async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin)):
     body = await request.json()
@@ -491,6 +506,13 @@ async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin))
         pools[pool_name]["strategy"] = body["strategy"]
     if "auto_order" in body:
         pools[pool_name]["auto_order"] = bool(body["auto_order"])
+    if "load_balance" in body:
+        pools[pool_name]["load_balance"] = bool(body["load_balance"])
+    # 互斥：auto_order 与 load_balance 不可同时开启（后开者优先生效，另一者自动关闭）
+    if pools[pool_name].get("load_balance"):
+        pools[pool_name]["auto_order"] = False
+    elif pools[pool_name].get("auto_order"):
+        pools[pool_name]["load_balance"] = False
     if "slow_latency_threshold" in body:
         try:
             pools[pool_name]["slow_latency_threshold"] = int(body["slow_latency_threshold"])

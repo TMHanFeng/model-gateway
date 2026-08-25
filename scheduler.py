@@ -1,5 +1,7 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from pathlib import Path
+from shutil import copyfile
 import database as db
 from pool import load_config
 
@@ -8,6 +10,20 @@ scheduler = AsyncIOScheduler()
 
 async def refresh_model(model_id: str):
     await db.reset_daily_usage(model_id)
+
+
+CONFIG_PATH = Path(__file__).parent / "config.json"
+BACKUP_PATH = Path(__file__).parent / "config.json.bak"
+
+
+def backup_config():
+    """每日备份 config.json -> config.json.bak（覆盖旧备份）。"""
+    try:
+        if CONFIG_PATH.exists():
+            copyfile(CONFIG_PATH, BACKUP_PATH)
+            print(f"[BACKUP] config.json 已备份至 config.json.bak ({__import__('time').strftime('%Y-%m-%d %H:%M:%S')})")
+    except Exception as e:
+        print(f"[BACKUP-FAIL] 备份失败: {e}")
 
 
 def _add_jobs():
@@ -28,6 +44,13 @@ def _add_jobs():
         )
         job_id = f"refresh_{model_id.replace('/', '_')}"
         scheduler.add_job(refresh_model, trigger, args=[model_id], id=job_id, replace_existing=True)
+
+    scheduler.add_job(
+        backup_config,
+        CronTrigger(hour=14, minute=0, timezone="Asia/Shanghai"),
+        id="daily_config_backup",
+        replace_existing=True,
+    )
 
 
 def start_scheduler():

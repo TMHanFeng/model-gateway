@@ -169,24 +169,43 @@ async def init_db():
 
 
 async def get_daily_usage(model_name: str) -> int:
+    """读取当日已用 token；跨天惰性重置（幂等）。
+    - last_reset_date == _bj_today(): 直接返回 used_tokens
+    - last_reset_date != _bj_today(): 自动 UPDATE used_tokens=0, last_reset_date=今天，返回 0
+    - 无记录: 返回 0
+    _lock 保证并发安全；多次调用跨天后只产生一次 UPDATE。"""
     async with _lock:
         db = await _get_conn()
         cursor = await db.execute(
-            "SELECT used_tokens FROM token_usage WHERE model_name = ?",
+            "SELECT used_tokens, last_reset_date FROM token_usage WHERE model_name = ?",
             (model_name,),
         )
         row = await cursor.fetchone()
-        return row[0] if row else 0
+        if not row:
+            return 0
+        today = _bj_today()
+        if row[1] != today:
+            # 跨天：惰性重置（幂等；并发由 _lock 串行化）
+            await db.execute(
+                "UPDATE token_usage SET used_tokens = 0, last_reset_date = ? WHERE model_name = ?",
+                (today, model_name),
+            )
+            await db.commit()
+            return 0
+        return row[0]
 
 
 async def add_daily_usage(model_name: str, tokens: int):
     async with _lock:
         db = await _get_conn()
+        today = _bj_today()
         await db.execute(
             """INSERT INTO token_usage (model_name, used_tokens, last_reset_date)
-               VALUES (?, ?, date('now'))
-               ON CONFLICT(model_name) DO UPDATE SET used_tokens = used_tokens + ?""",
-            (model_name, tokens, tokens),
+               VALUES (?, ?, ?)
+               ON CONFLICT(model_name) DO UPDATE SET
+                   used_tokens = CASE WHEN last_reset_date = ? THEN used_tokens + ? ELSE ? END,
+                   last_reset_date = ?""",
+            (model_name, tokens, today, today, tokens, tokens, today),
         )
         await db.commit()
 
@@ -194,9 +213,10 @@ async def add_daily_usage(model_name: str, tokens: int):
 async def reset_daily_usage(model_name: str):
     async with _lock:
         db = await _get_conn()
+        today = _bj_today()
         await db.execute(
-            "UPDATE token_usage SET used_tokens = 0, last_reset_date = date('now') WHERE model_name = ?",
-            (model_name,),
+            "UPDATE token_usage SET used_tokens = 0, last_reset_date = ? WHERE model_name = ?",
+            (today, model_name),
         )
         await db.commit()
 

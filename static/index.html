@@ -732,7 +732,7 @@ function modelRowHTML(m, i) {
       <div class="grid">
         <div>计费 <b>${m.billing_mode === 'request' ? '按请求次数' : '按 Token'}</b></div>
         <div>上下文窗口 <b>${m.context_window || '不限'}</b></div>
-        <div>每日上限 <b>${m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : '') : '不限'}</b></div>
+        <div>${m.token_type === 'rolling_5h' ? '5h 窗口限额' : '每日上限'} <b>${m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : ' Token') : '不限'}</b></div>
         <div>RPM <b>${m.rpm_limit || '不限'}</b></div>
         <div>TPM <b>${m.tpm_limit || '不限'}</b></div>
         <div>并发 <b>${m.max_concurrency ? m.max_concurrency : '不限'}</b></div>
@@ -765,10 +765,28 @@ async function loadPools() {
   if (provdata) provdata.providers.forEach(p => providerLookup[p.id] = p);
   poolLookup = pdata.pools;
 
-  const entries = Object.entries(pdata.pools).filter(([name, pool]) => {
-    const isDedicated = !!pool.owner_key_id;
-    return poolMode === 'user' ? isDedicated : !isDedicated;
-  });
+  // 按后端 pool_order 排序（JS 的 Object.keys 会把纯数字池名按整数键规则提到最前，
+  // 破坏预期顺序，故显式用有序数组渲染；兜底池未返回时兜底追加）
+  const _orderList = pdata.pool_order && pdata.pool_order.length
+    ? pdata.pool_order
+    : Object.keys(pdata.pools);
+  const entries = _orderList
+    .filter(name => name in pdata.pools)
+    .map(name => [name, pdata.pools[name]])
+    .filter(([name, pool]) => {
+      const isDedicated = !!pool.owner_key_id;
+      return poolMode === 'user' ? isDedicated : !isDedicated;
+    });
+  if (_orderList !== Object.keys(pdata.pools)) {
+    // 补充 pool_order 未覆盖的剩余池（如 old 缓存缺 pool_order）
+    const seen = new Set(entries.map(e => e[0]));
+    Object.entries(pdata.pools).forEach(([n, p]) => {
+      if (!seen.has(n)) {
+        const isDedicated = !!p.owner_key_id;
+        if (poolMode === 'user' ? isDedicated : !isDedicated) entries.push([n, p]);
+      }
+    });
+  }
 
 
 // 初始化所有 threshold 控件的 hint 文字与预设 active 状态
@@ -800,6 +818,11 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
             <input type="checkbox" ${pool.auto_order ? 'checked' : ''} onchange="toggleAutoOrder('${name}', this.checked)">
             <span class="track"></span>
             <span class="sw-label">自动择优</span>
+          </label>
+          <label class="switch" title="负载均衡：请求按池内顺序轮流分给每个模型/子池，避免集中在最快的模型上（与自动择优互斥）">
+            <input type="checkbox" ${pool.load_balance ? 'checked' : ''} onchange="toggleLoadBalance('${name}', this.checked)">
+            <span class="track"></span>
+            <span class="sw-label">负载均衡</span>
           </label>
           <div class="threshold-ctl" title="自动择优模式下，超过此延迟(ms)的模型排到末尾；0=不限">
             <span class="th-label">⏱ 阈值</span>
@@ -907,7 +930,7 @@ function infoTip(id) {
     ['计费模式', m.billing_mode === 'request' ? '按请求次数' : '按 Token'],
     ['模型模态', m.modality === 'vision' ? '多模态（支持图片）' : '纯文本'],
     ['令牌类型', m.token_type === 'one_time' ? '一次性' : m.token_type === 'rolling_5h' ? '5h 窗口（5h限额）' : '每日刷新'],
-    [(m.token_type === 'rolling_5h' ? '5h 窗口限额' : '每日上限'), m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : '') : '不限'],
+    [(m.token_type === 'rolling_5h' ? '5h 窗口限额' : '每日上限'), m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : ' Token') : '不限'],
     ['上下文窗口', m.context_window ? m.context_window.toLocaleString() : '不限'],
     ['RPM', m.rpm_limit || '不限'],
     ['TPM', m.tpm_limit || '不限'],
@@ -986,45 +1009,40 @@ function bindDrag() {
 let poolDragSrc = null;
 
 function bindPoolDrag() {
-  document.querySelectorAll('.card[data-pool-card][draggable]').forEach(el => {
-    el.addEventListener('dragstart', e => {
-      poolDragSrc = el;
-      el.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-    });
-    el.addEventListener('dragend', () => {
-      el.classList.remove('dragging');
-      poolDragSrc = null;
-      document.querySelectorAll('.card[data-pool-card]').forEach(x => x.classList.remove('drag-over'));
-    });
-    el.addEventListener('dragover', e => {
-      e.preventDefault();
-      if (!poolDragSrc || el === poolDragSrc) return;
-      const container = el.parentElement;
-      const siblings = [...container.querySelectorAll('.card[data-pool-card]:not(.dragging)')];
-      const next = siblings.find(child => {
-        const box = child.getBoundingClientRect();
-        return e.clientY < box.top + box.height / 2;
-      });
-      if (next) container.insertBefore(poolDragSrc, next);
-      else container.insertBefore(poolDragSrc, null); // append at end
-    });
-    el.addEventListener('drop', async e => {
-      e.preventDefault();
-      if (!poolDragSrc) return;
-      // auto always stays first; collect order of non-auto pools
-      const container = document.getElementById('pool-list');
-      const autoCard = container.querySelector('.card[data-pool-card="auto"]');
-      const fbCard = container.querySelector('.card[data-pool-card="兜底池"]');
-      const ordered = [...container.querySelectorAll('.card[data-pool-card]')]
-        .filter(c => c !== autoCard && c !== fbCard)
-        .map(c => c.dataset.poolCard);
-      const ok = await api('/admin/pools/reorder', {
-        method: 'PUT',
-        body: JSON.stringify({ pool_names: ordered })
-      });
-      if (ok) { api('/admin/reload', { method: 'POST' }); toast('池顺序已更新'); }
-    });
+  const list = document.getElementById('pool-list');
+  if (!list) return;
+  list.addEventListener('dragstart', e => {
+    const card = e.target.closest('[data-pool-card]');
+    if (!card || card.dataset.poolCard === 'auto') { e.preventDefault(); return; }
+    poolDragSrc = card;
+    card.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  list.addEventListener('dragend', async e => {
+    if (!poolDragSrc) return;
+    poolDragSrc.classList.remove('dragging');
+    poolDragSrc = null;
+    // 完整收集所有池：可见的按拖动新顺序在前，被模式隐藏的按原顺序补尾（防误删）
+    const domNames = [...list.querySelectorAll('[data-pool-card]')].map(el => el.dataset.poolCard);
+    const allOthers = Object.keys(poolLookup || {}).filter(n => n !== 'auto' && n !== '兜底池');
+    const names = domNames.concat(allOthers.filter(n => !domNames.includes(n)));
+    const ok = await api('/admin/pools/reorder', { method: 'PUT', body: JSON.stringify({ pool_names: names }) });
+    if (ok) { await api('/admin/reload', { method: 'POST' }); toast('池顺序已更新'); }
+    loadPools();
+  });
+  list.addEventListener('dragover', e => {
+    e.preventDefault();
+    const card = e.target.closest('[data-pool-card]');
+    if (!card || card === poolDragSrc) return;
+    const rect = card.getBoundingClientRect();
+    const before = e.clientY < rect.top + rect.height / 2;
+    // 只禁止『插到 auto 正前方』与『插到兜底池正后方』
+    if (before && card.dataset.poolCard === 'auto') return;
+    if (!before && card.dataset.poolCard === '兜底池') return;
+    list.insertBefore(poolDragSrc, before ? card : card.nextSibling);
+  });
+  list.addEventListener('drop', e => {
+    e.preventDefault();
   });
 }
 
@@ -1142,8 +1160,16 @@ async function toggleAutoOrder(name, enabled) {
   if (!data) return;
   const p = data.pools[name];
   if (!p) { toast('池 "' + name + '" 不存在，请刷新页面重试', true); return; }
-  const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: p.model_ids, auto_order: enabled }) });
+  const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: p.model_ids, auto_order: enabled, load_balance: enabled ? false : undefined }) });
   if (ok) { await api('/admin/reload', { method: 'POST' }); toast(enabled ? '池 ' + name + ' 已开启自动择优' : '池 ' + name + ' 已关闭自动择优'); loadPools(); }
+}
+async function toggleLoadBalance(name, enabled) {
+  const data = await api('/admin/pools');
+  if (!data) return;
+  const p = data.pools[name];
+  if (!p) { toast('池 "' + name + '" 不存在，请刷新页面重试', true); return; }
+  const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: p.model_ids, load_balance: enabled, auto_order: enabled ? false : undefined }) });
+  if (ok) { await api('/admin/reload', { method: 'POST' }); toast(enabled ? '池 ' + name + ' 已开启负载均衡' : '池 ' + name + ' 已关闭负载均衡'); loadPools(); }
 }
 async function setSlowThreshold(name, val) {
   const v = parseInt(val);
