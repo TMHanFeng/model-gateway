@@ -180,6 +180,11 @@ main { max-width: 1240px; margin: 0 auto; padding: 26px 24px 80px; }
 }
 .switch input:checked + .track { background: rgba(45, 212, 191, 0.5); }
 .switch input:checked + .track::after { transform: translateX(14px); background: var(--teal); box-shadow: 0 0 8px rgba(45, 212, 191, 0.7); }
+.auto-note { font-size: 11px; color: var(--teal); background: var(--teal-dim); border: 1px solid rgba(45,212,191,.25); padding: 5px 10px; border-radius: 5px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+.lb-note { font-size: 11px; color: #38bdf8; background: rgba(56,189,248,.1); border: 1px solid rgba(56,189,248,.3); padding: 5px 10px; border-radius: 5px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+.switch.lb-switch input:checked + .track { background: rgba(56,189,248,.18); border-color: #38bdf8; }
+.switch.lb-switch input:checked + .track::after { background: #38bdf8; box-shadow: 0 0 8px rgba(56,189,248,.6); }
+.switch.lb-switch input:checked ~ .sw-label { color: #38bdf8; }
 
 /* 模型行 */
 .model-row {
@@ -1231,7 +1236,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
             <input type="checkbox" ${pool.auto_order ? 'checked' : ''} onchange="toggleAutoOrder('${esc(name).replace(/'/g, "\\'")}', this.checked)">
             <span class="track"></span><span class="sw-label">自动择优</span>
           </label>
-          <label class="switch" title="负载均衡：请求按池内顺序轮流分给每个模型/子池，避免集中在最快的模型上（与自动择优互斥）">
+          <label class="switch lb-switch" title="负载均衡：请求按池内顺序轮流分给每个模型/子池，避免集中在最快的模型上（与自动择优互斥）">
             <input type="checkbox" ${pool.load_balance ? 'checked' : ''} onchange="toggleLoadBalance('${esc(name).replace(/'/g, "\\'")}', this.checked)">
             <span class="track"></span><span class="sw-label">负载均衡</span>
           </label>
@@ -1254,6 +1259,8 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
         🔒 当前锁定模型：<strong class="mono" id="single-label-${esc(name)}"></strong>
         <button class="btn btn-red btn-sm" style="margin-left:8px" onclick="clearSingleMode('${esc(name).replace(/'/g, "\\'")}')">🔓 解除锁定</button>
       </div>
+      ${pool.auto_order ? '<div class="auto-note">⚡ 自动择优已开启：先排除不可用接口（用量用尽 / RPM·TPM 触顶），再在可用接口中按调用延迟从低到高优先调用。下方显示顺序保持不变，关闭后按设定顺序调用。</div>' : ''}
+      ${pool.load_balance ? '<div class="lb-note">🔄 负载均衡已开启：每次请求按池内模型顺序轮流分配（第一个→第二个→…循环往复），请求均匀分摊到每个模型/子池，避免某一个模型负载过高。关闭后按设定顺序调用。</div>' : ''}
       <div class="pool-items" data-pool="${esc(name)}">
         ${ids.map((id, i) => poolItemHTML(name, id, i)).join('') || '<div class="hint">该池为空，从下方添加接口或子池。</div>'}
       </div>

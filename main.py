@@ -23,13 +23,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _now():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     start_scheduler()
     cfg = load_config().get("server", {})
     base = f"http://{cfg.get('host', '127.0.0.1')}:{cfg.get('port', 8650)}"
-    print(f"\n  后台管理地址:  {base}/admin/\n  API 服务地址:  {base}/v1\n")
+    print(f"\n  [{_now()}] 后台管理地址:  {base}/admin/\n  [{_now()}] API 服务地址:  {base}/v1\n")
     yield
     await pool.close_all()
     await close_db()

@@ -21,9 +21,9 @@ def backup_config():
     try:
         if CONFIG_PATH.exists():
             copyfile(CONFIG_PATH, BACKUP_PATH)
-            print(f"[BACKUP] config.json 已备份至 config.json.bak ({__import__('time').strftime('%Y-%m-%d %H:%M:%S')})")
+            print(f"[{__import__('time').strftime('%Y-%m-%d %H:%M:%S')}][BACKUP] config.json 已备份至 config.json.bak")
     except Exception as e:
-        print(f"[BACKUP-FAIL] 备份失败: {e}")
+        print(f"[{__import__('time').strftime('%Y-%m-%d %H:%M:%S')}][BACKUP-FAIL] 备份失败: {e}")
 
 
 def _add_jobs():
