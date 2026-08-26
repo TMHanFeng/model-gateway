@@ -1,6 +1,7 @@
 import time
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -9,6 +10,8 @@ import httpx
 from providers.openai_provider import OpenAIProvider, RateLimitError
 from providers.anthropic_provider import AnthropicProvider
 import database as db
+
+logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
@@ -33,6 +36,8 @@ class ModelEntry:
     billing_mode: str = "token"
     is_free: bool = True
     modality: str = "text"
+    json_output: bool = False  # 支持格式输出（json）——请求带 response_format json 时只选 true 的模型
+    extra_params: dict = field(default_factory=dict)  # 用户自定义参数（注入上游 payload，黑名单过滤）
     provider_id: str = ""
     proxy_url: str = ""
     expire_date: str = ""
@@ -120,6 +125,8 @@ class ModelPool:
                 billing_mode=m.get("billing_mode", "token"),
                 is_free=m.get("is_free", True),
                 modality=m.get("modality", "text"),
+                json_output=bool(m.get("json_output", False)),
+                extra_params=(m.get("extra_params") or {}),
                 provider_id=pid,
                 proxy_url=proxy_url,
                 expire_date=m.get("expire_date", ""),
@@ -259,8 +266,12 @@ class ModelPool:
                         return True
         return False
 
-    async def _check_available(self, entry: ModelEntry, estimated_tokens: int = 0, has_images: bool = False) -> tuple[bool, str, dict | None]:
-        """返回 (ok, reason, detail)。detail 用于调用记录展示具体数值（已用/上限、冷却剩余秒等）。"""
+    async def _check_available(self, entry: ModelEntry, estimated_tokens: int = 0, has_images: bool = False,
+                               required_modality: str | None = None, required_json_output: bool = False) -> tuple[bool, str, dict | None]:
+        """返回 (ok, reason, detail)。detail 用于调用记录展示具体数值（已用/上限、冷却剩余秒等）。
+        required_modality：要求特定模态（如 "embedding"）时，不匹配的模型一律排除；
+                        None 表示普通 chat/通用调用（此时 embedding 模型也应被排除）。
+        required_json_output：请求要求 json 输出时，仅 json_output=True 的模型可用。"""
         now = time.time()
         detail = None
 
@@ -328,6 +339,19 @@ class ModelPool:
 
         if has_images and entry.modality != "vision":
             return False, "no_vision", {"modality": entry.modality}
+
+        # 模态双向硬门槛：chat 调用（required_modality=None）排除 embedding 模型；
+        # embedding/专用调用要求特定模态时排除不匹配的。anthropic provider 无 embedding 端点也在此拦截。
+        if required_modality is not None:
+            if entry.modality != required_modality:
+                return False, "wrong_modality", {"required": required_modality, "got": entry.modality}
+        else:
+            if entry.modality == "embedding":
+                return False, "wrong_modality", {"required": "chat", "got": "embedding"}
+
+        # json 输出硬门槛：请求带 response_format json 时只允许 json_output=True 模型
+        if required_json_output and not entry.json_output:
+            return False, "no_json_output", {"modality": entry.modality, "json_output": entry.json_output}
 
         if entry.cooldown_until > now:
             remaining = int(entry.cooldown_until - now)
@@ -445,7 +469,9 @@ class ModelPool:
                 models.append(raw)
         return models
 
-    async def _select_from_pool(self, pool_name: str, estimated_tokens: int = 0, exclude: set | None = None, has_images: bool = False, visiting: set | None = None):
+    async def _select_from_pool(self, pool_name: str, estimated_tokens: int = 0, exclude: set | None = None,
+                                has_images: bool = False, visiting: set | None = None,
+                                required_modality: str | None = None, required_json_output: bool = False):
         exclude = exclude or set()
         visiting = visiting or set()
         if pool_name in visiting:
@@ -459,7 +485,10 @@ class ModelPool:
         if override_id and override_id not in exclude:
             entry = self.registry.get(override_id)
             if entry:
-                ok, reason, detail = await self._check_available(entry, estimated_tokens, has_images)
+                ok, reason, detail = await self._check_available(
+                    entry, estimated_tokens, has_images,
+                    required_modality=required_modality, required_json_output=required_json_output,
+                )
                 if ok:
                     steps = [{"model": override_id, "reason": "single_override_selected"}]
                     return entry, steps
@@ -493,7 +522,10 @@ class ModelPool:
                 if entry.id in exclude:
                     steps.append({"model": entry.id, "reason": "already_tried"})
                     continue
-                ok, reason, detail = await self._check_available(entry, estimated_tokens, has_images)
+                ok, reason, detail = await self._check_available(
+                    entry, estimated_tokens, has_images,
+                    required_modality=required_modality, required_json_output=required_json_output,
+                )
                 if ok:
                     steps.append({"model": entry.id, "reason": "selected"})
                     return entry, steps
@@ -502,16 +534,29 @@ class ModelPool:
                     step["detail"] = detail
                 steps.append(step)
             else:
-                sub_entry, sub_steps = await self._select_from_pool(val, estimated_tokens, exclude, has_images, visiting)
+                sub_entry, sub_steps = await self._select_from_pool(
+                    val, estimated_tokens, exclude, has_images, visiting,
+                    required_modality=required_modality, required_json_output=required_json_output,
+                )
                 steps.extend(sub_steps)
                 if sub_entry is not None:
                     return sub_entry, steps
                 steps.append({"model": f"pool:{val}", "reason": "pool_exhausted"})
         return None, steps
 
-    async def select_model(self, pool_name: str, requested_model: str | None = None, estimated_tokens: int = 0, exclude: set | None = None, has_images: bool = False):
+    async def select_model(self, pool_name: str, requested_model: str | None = None, estimated_tokens: int = 0,
+                           exclude: set | None = None, has_images: bool = False,
+                           required_modality: str | None = None, required_json_output: bool = False):
         exclude = exclude or set()
         steps = []
+
+        # json 硬门槛兼容降级：若当前池（含子池）没有任何 json_output=True 的模型，
+        # 则不强制 json 过滤——否则老配置下所有 json_* 请求都会 503，直接破坏现有使用。
+        if required_json_output:
+            cands = self._collect_pool_models(pool_name)
+            if not any(self.registry.get(n) and self.registry[n].json_output for n in cands):
+                logger.info(f"[json] 池 {pool_name} 无 json_output=True 模型，降级不强制过滤（保持 json 请求可用）")
+                required_json_output = False
 
         if requested_model:
             if requested_model in self.registry:
@@ -522,7 +567,10 @@ class ModelPool:
                 if entry.id in exclude:
                     steps.append({"model": entry.id, "reason": "already_tried"})
                     continue
-                ok, reason, detail = await self._check_available(entry, estimated_tokens, has_images)
+                ok, reason, detail = await self._check_available(
+                    entry, estimated_tokens, has_images,
+                    required_modality=required_modality, required_json_output=required_json_output,
+                )
                 if ok:
                     steps.append({"model": entry.id, "reason": "selected"})
                     return entry, steps
@@ -532,7 +580,10 @@ class ModelPool:
                 steps.append(step)
             return None, steps
 
-        return await self._select_from_pool(pool_name, estimated_tokens, exclude, has_images)
+        return await self._select_from_pool(
+            pool_name, estimated_tokens, exclude, has_images,
+            required_modality=required_modality, required_json_output=required_json_output,
+        )
 
     def _record_latency(self, entry: ModelEntry, ms: float):
         if entry.latency_ms is None:
@@ -616,6 +667,109 @@ class ModelPool:
                 elif entry.billing_mode == "token":
                     await db.add_daily_usage(entry.id, captured)
 
+
+    async def execute_embedding(self, entry: ModelEntry, req) -> tuple[dict, int]:
+        """执行 embedding 调用：走 provider.embeddings()，按 prompt_tokens 计费（复用现有 quota/token_type）。"""
+        provider = self._get_provider(entry)
+        t0 = time.perf_counter()
+        async with entry.semaphore:
+            try:
+                response = await provider.embeddings(req, entry.name, entry.extra_params or {})
+            except RateLimitError:
+                entry.cooldown_until = time.time() + 20
+                raise
+        self._record_latency(entry, (time.perf_counter() - t0) * 1000)
+
+        usage = response.get("usage") or {}
+        tokens_used = int(usage.get("prompt_tokens", 0) or usage.get("total_tokens", 0))
+        await db.log_request(entry.id, tokens_used)
+        await db.add_model_call(entry.id, tokens_used)
+
+        if entry.token_type == "one_time":
+            charge = 1 if entry.billing_mode == "request" else tokens_used
+            await db.add_one_time_usage(entry.id, charge)
+            state = await db.get_one_time_state(entry.id)
+            if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
+                await db.expire_one_time(entry.id)
+        elif entry.token_type == "rolling_5h":
+            charge = 1 if entry.billing_mode == "request" else tokens_used
+            await self._charge_rolling_5h(entry, charge)
+        else:
+            charge = 1 if entry.billing_mode == "request" else tokens_used
+            await db.add_daily_usage(entry.id, charge)
+
+        return response, tokens_used
+
+    async def execute_embedding_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = ""):
+        """embedding 专用：仅选 modality==embedding 的模型；禁用 fallback（chat 池不能兜底 embedding）。"""
+        tried: set[str] = set()
+        # EmbeddingRequest 无 messages 字段，需按 input 长度安全估算
+        est_base = 0
+        try:
+            for msg in getattr(req, "messages", []) or []:
+                c = msg.content
+                if isinstance(c, str):
+                    est_base += len(c) // 3 + 1
+        except Exception:
+            pass
+        _inp = getattr(req, "input", "") or ""
+        if isinstance(_inp, str):
+            est_base += max(1, len(_inp) // 3)
+        elif isinstance(_inp, list):
+            est_base += sum(max(1, (len(x) + 2) // 3) for x in _inp if isinstance(x, str))
+        estimated = est_base
+        max_attempts = len(self.registry) + 1
+        actual_calls: list[dict] = []
+        override_id = self.single_override.get(pool_name)
+
+        for _ in range(max_attempts):
+            entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried,
+                                                   required_modality="embedding")
+            if steps:
+                actual_calls.extend(st for st in steps if st["reason"] != "already_tried")
+            if entry is None:
+                break
+            tried.add(entry.id)
+            try:
+                response, tokens = await self.execute_embedding(entry, req)
+                last_reason = actual_calls[-1]["reason"] if actual_calls else ""
+                if last_reason in ("selected", "single_override_selected") and actual_calls[-1]["model"] == entry.id:
+                    pass
+                else:
+                    actual_calls.append({"model": entry.id, "reason": "selected"})
+                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
+                return response, tokens, actual_calls
+            except RateLimitError:
+                logger.warning(
+                    f"[上游429-embedding] pool={pool_name} model={entry.id} caller={caller!r} 冷却20s"
+                )
+                actual_calls.append({"model": entry.id, "reason": "switch_429", "detail": {"cooldown_sec": 20, "status": 429}})
+                continue
+            except Exception as e:
+                entry.cooldown_until = time.time() + 30
+                err_type = type(e).__name__
+                status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+                detail = {"cooldown_sec": 30, "error_type": err_type}
+                if status is not None:
+                    detail["status"] = status
+                if str(e) and len(str(e)) < 200:
+                    detail["error"] = str(e)
+                resp_body = getattr(getattr(e, "response", None), "text", "") or ""
+                entry_url = getattr(entry, "base_url", "") or ""
+                logger.error(
+                    f"[上游错误-embedding] pool={pool_name} model={entry.id} caller={caller!r} "
+                    f"status={status} type={err_type} cooldown=30s url={entry_url}"
+                )
+                if str(e):
+                    logger.error(f"[上游错误-embedding] 异常消息: {str(e)[:300]}")
+                if resp_body:
+                    logger.error(f"[上游错误-embedding] 上游响应体: {resp_body[:600]}")
+                actual_calls.append({"model": entry.id, "reason": "switch_error", "detail": detail})
+                continue
+
+        await db.log_decision(pool_name, requested_model, None, estimated, actual_calls, caller)
+        return None, 0, actual_calls
+
     def failure_detail(self, steps: list[dict], has_images: bool) -> str:
         attempted = any(s.get("reason") in ("selected", "single_override_selected", "switch_429", "switch_error") for s in steps)
         locked = any(str(s.get("reason", "")).startswith("single_override") for s in steps)
@@ -627,7 +781,8 @@ class ModelPool:
             return "池为空或无匹配模型"
         return "所有候选模型均不可用：用量用尽 / RPM·TPM 触顶 / 冷却 / 超上下文"
 
-    async def execute_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = ""):
+    async def execute_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = "",
+                                    required_json_output: bool = False):
         tried: set[str] = set()
         estimated = self._estimate_tokens(req)
         has_images = self._has_images(req)
@@ -642,9 +797,11 @@ class ModelPool:
             if use_fallback:
                 if not fb_name:
                     break
-                entry, steps = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images)
+                entry, steps = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images,
+                                                       required_json_output=required_json_output)
             else:
-                entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
+                entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images,
+                                                       required_json_output=required_json_output)
 
             if steps:
                 actual_calls.extend(s for s in steps if s["reason"] != "already_tried")
@@ -671,6 +828,10 @@ class ModelPool:
             except RateLimitError:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
                 detail = {"cooldown_sec": 20, "status": 429, "latency_ms": latency_ms}
+                logger.warning(
+                    f"[上游429] pool={pool_name} model={entry.id} req_model={requested_model or '-'} "
+                    f"caller={caller!r} latency={latency_ms}ms 冷却20s"
+                )
                 actual_calls.append({
                     "model": entry.id,
                     "reason": "fallback_switch_429" if use_fallback else "switch_429",
@@ -701,6 +862,18 @@ class ModelPool:
                 err_msg = str(e)
                 if err_msg and len(err_msg) < 200:
                     detail["error"] = err_msg
+                # 详细错误日志：含上游原始响应体（前 600 字符），用于定位 4xx/5xx 根因
+                resp_body = getattr(getattr(e, "response", None), "text", "") or ""
+                entry_url = getattr(entry, "base_url", "") or ""
+                logger.error(
+                    f"[上游错误] pool={pool_name} model={entry.id} req_model={requested_model or '-'} "
+                    f"caller={caller!r} status={status} type={error_type} "
+                    f"cooldown={cooldown_sec}s latency={latency_ms}ms url={entry_url}"
+                )
+                if err_msg:
+                    logger.error(f"[上游错误] 异常消息: {err_msg[:300]}")
+                if resp_body:
+                    logger.error(f"[上游错误] 上游响应体: {resp_body[:600]}")
                 actual_calls.append({
                     "model": entry.id,
                     "reason": "fallback_switch_error" if use_fallback else "switch_error",
@@ -713,7 +886,8 @@ class ModelPool:
         await db.log_decision(pool_name, requested_model, None, estimated, actual_calls, caller)
         return None, 0, actual_calls
 
-    async def execute_stream_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = ""):
+    async def execute_stream_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = "",
+                                           required_json_output: bool = False):
         tried: set[str] = set()
         estimated = self._estimate_tokens(req)
         has_images = self._has_images(req)
@@ -727,9 +901,11 @@ class ModelPool:
             if use_fallback:
                 if not fb_name:
                     break
-                entry, steps = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images)
+                entry, steps = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images,
+                                                       required_json_output=required_json_output)
             else:
-                entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images)
+                entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images,
+                                                       required_json_output=required_json_output)
 
             if steps:
                 actual_calls.extend(s for s in steps if s["reason"] != "already_tried")
@@ -775,6 +951,10 @@ class ModelPool:
                 await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
                 return _replay(), entry, actual_calls
             except RateLimitError:
+                logger.warning(
+                    f"[上游429-流式] pool={pool_name} model={entry.id} req_model={requested_model or '-'} "
+                    f"caller={caller!r} 冷却20s"
+                )
                 actual_calls.append({
                     "model": entry.id,
                     "reason": "fallback_switch_429" if use_fallback else "switch_429",
@@ -784,7 +964,7 @@ class ModelPool:
                     use_fallback = True
                 continue
             except Exception as e:
-                # 按异常类型分发冷却：5xx→15s，网络→10s，其他→30s（429 在 execute() 单独处理为 30s）
+                # 按异常类型分发冷却：5xx→15s，网络→10s，其他→30s
                 status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
                 if isinstance(e, httpx.HTTPStatusError) and status is not None and 500 <= status < 600:
                     cooldown_sec = 15
@@ -793,10 +973,28 @@ class ModelPool:
                 else:
                     cooldown_sec = 30
                 entry.cooldown_until = time.time() + cooldown_sec
+                detail = {"cooldown_sec": cooldown_sec, "error_type": type(e).__name__}
+                if status is not None:
+                    detail["status"] = status
+                err_msg = str(e)
+                if err_msg and len(err_msg) < 200:
+                    detail["error"] = err_msg
+                # 详细错误日志：含上游原始响应体（前 600 字符）
+                resp_body = getattr(getattr(e, "response", None), "text", "") or ""
+                entry_url = getattr(entry, "base_url", "") or ""
+                logger.error(
+                    f"[上游错误-流式] pool={pool_name} model={entry.id} req_model={requested_model or '-'} "
+                    f"caller={caller!r} status={status} type={type(e).__name__} "
+                    f"cooldown={cooldown_sec}s url={entry_url}"
+                )
+                if err_msg:
+                    logger.error(f"[上游错误-流式] 异常消息: {err_msg[:300]}")
+                if resp_body:
+                    logger.error(f"[上游错误-流式] 上游响应体: {resp_body[:600]}")
                 actual_calls.append({
                     "model": entry.id,
                     "reason": "fallback_switch_error" if use_fallback else "switch_error",
-                    "detail": {"cooldown_sec": cooldown_sec, "error_type": type(e).__name__},
+                    "detail": detail,
                 })
                 if override_id and not use_fallback:
                     use_fallback = True

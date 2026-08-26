@@ -126,6 +126,8 @@ async def add_model(request: Request, _=Depends(verify_admin)):
         "billing_mode": body.get("billing_mode", "token"),
         "is_free": bool(body.get("is_free", True)),
         "modality": body.get("modality", "text"),
+        "json_output": bool(body.get("json_output", False)),
+        "extra_params": body.get("extra_params") or {},
     }
     if pid:
         entry["provider_id"] = pid

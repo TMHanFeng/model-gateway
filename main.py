@@ -1,3 +1,4 @@
+import os
 import time
 import json
 from pathlib import Path
@@ -5,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse
 from pydantic import ValidationError
-from models import ChatCompletionRequest
+from models import ChatCompletionRequest, EmbeddingRequest
 from pool import ModelPool, load_config
 from database import init_db, close_db
 import database as db
@@ -20,20 +21,26 @@ from format_adapter import (
 )
 
 import logging
+from logging_config import setup_logging, LOG_FILE
 logger = logging.getLogger(__name__)
 
 
-def _now():
-    return time.strftime("%Y-%m-%d %H:%M:%S")
+def server_bind():
+    """返回 (host, port)：优先环境变量 MODEL_GATEWAY_HOST/PORT（或 --host/--port 命令行），否则读 config.json。"""
+    cfg = load_config().get("server", {})
+    host = os.environ.get("MODEL_GATEWAY_HOST") or cfg.get("host", "127.0.0.1")
+    port = int(os.environ.get("MODEL_GATEWAY_PORT") or cfg.get("port", 8650))
+    return host, port
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_logging()
     await init_db()
     start_scheduler()
-    cfg = load_config().get("server", {})
-    base = f"http://{cfg.get('host', '127.0.0.1')}:{cfg.get('port', 8650)}"
-    print(f"\n  [{_now()}] 后台管理地址:  {base}/admin/\n  [{_now()}] API 服务地址:  {base}/v1\n")
+    host, port = server_bind()
+    base = f"http://{host}:{port}"
+    logger.info(f"Model Gateway 启动 | 后台: {base}/admin/  {base}/hfadmin | API: {base}/v1 | 日志: {LOG_FILE}")
     yield
     await pool.close_all()
     await close_db()
@@ -157,11 +164,21 @@ async def _chat_handler(request: Request, auth: dict):
             raise HTTPException(status_code=429, detail=f"API Key 用量已达限额: {reason}")
 
     has_images = pool._has_images(req)
+    # json 输出硬门槛：请求带 response_format(type 以 json 开头) 时仅选 json_output=True 模型
+    try:
+        rf = req.response_format or {}
+        required_json_output = isinstance(rf, dict) and str(rf.get("type", "")).lower().startswith("json")
+    except Exception:
+        required_json_output = False
 
     if req.stream:
-        stream, entry, steps = await pool.execute_stream_with_fallback(pool_name, req, None, caller)
+        stream, entry, steps = await pool.execute_stream_with_fallback(
+            pool_name, req, None, caller, required_json_output=required_json_output)
         if stream is None:
-            raise HTTPException(status_code=503, detail=pool.failure_detail(steps, has_images))
+            _detail = pool.failure_detail(steps, has_images)
+            logger.error(f"[调用失败-流式] pool={pool_name} caller={caller!r} detail={_detail}")
+            logger.error(f"[调用失败-流式] 决策明细: {steps}")
+            raise HTTPException(status_code=503, detail=_detail)
         if is_user_key:
             stream = _wrap_key_stream(stream, key, key.get("billing_mode", "token"))
         if is_anthropic:
@@ -173,12 +190,16 @@ async def _chat_handler(request: Request, auth: dict):
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
-    response, tokens, steps = await pool.execute_with_fallback(pool_name, req, None, caller)
+    response, tokens, steps = await pool.execute_with_fallback(pool_name, req, None, caller,
+                                                               required_json_output=required_json_output)
     # === Issue 6 诊断日志（DEBUG 级别，默认不输出）===
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(f"[gateway return] {response.model_dump_json()[:500] if response else None}")
     if response is None:
-        raise HTTPException(status_code=503, detail=pool.failure_detail(steps, has_images))
+        _detail = pool.failure_detail(steps, has_images)
+        logger.error(f"[调用失败] pool={pool_name} caller={caller!r} detail={_detail}")
+        logger.error(f"[调用失败] 决策明细: {steps}")
+        raise HTTPException(status_code=503, detail=_detail)
     if is_user_key:
         amount = 1 if key.get("billing_mode") == "request" else response.usage.total_tokens
         if amount > 0:
@@ -213,6 +234,124 @@ async def list_models(auth: dict = Depends(verify_key)):
     return {"object": "list", "data": data}
 
 
+@app.post("/v1/embeddings")
+async def embeddings_handler(request: Request, auth: dict = Depends(verify_key)):
+    """OpenAI 兼容 embedding 端点：仅匹配 modality=embedding 的模型，响应完全透传上游。"""
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="请求体过大（上限 20MB）")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    try:
+        req = EmbeddingRequest(**body)
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail="请求格式错误: " + str(e.errors(include_input=False, include_url=False))[:500],
+        )
+
+    pool_name = _resolve(req.model or "auto")
+    if pool_name is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未知模型池 '{req.model or 'auto'}'：对外仅可调用模型池，不能直接指定单个模型",
+        )
+
+    key = auth.get("key")
+    is_user_key = auth["kind"] == "key_user"
+    caller = "管理员" if auth["kind"] == "server_admin" else (key.get("name", "") if key else "")
+    if is_user_key:
+        if not keyauth.is_pool_allowed(key, pool_name):
+            raise HTTPException(status_code=403, detail=f"该 API Key 无权访问模型池 '{pool_name}'")
+        ok, reason = await keyauth.key_usage_available(key)
+        if not ok:
+            raise HTTPException(status_code=429, detail=f"API Key 用量已达限额: {reason}")
+
+    response, tokens, steps = await pool.execute_embedding_with_fallback(pool_name, req, None, caller)
+    if response is None:
+        _detail = pool.failure_detail(steps, has_images=False)
+        logger.error(f"[调用失败-embedding] pool={pool_name} caller={caller!r} detail={_detail}")
+        logger.error(f"[调用失败-embedding] 决策明细: {steps}")
+        raise HTTPException(
+            status_code=503,
+            detail=_detail,
+        )
+    if is_user_key:
+        usage = response.get("usage") or {}
+        amount = 1 if key.get("billing_mode") == "request" else int(usage.get("total_tokens", 0) or tokens or 0)
+        if amount > 0:
+            await keyauth.charge_key_usage(key, amount)
+    return response
+
+
+# ================= 探测端点兼容（Ollama / Open WebUI） =================
+# 中转站 / 客户端在启动与轮询时会按 Ollama 或 Open WebUI 协议探测本网关
+# （/api/tags、/api/show、/props 等）。以下端点返回合理响应，避免 404 刷屏、
+# 并让客户端"连接检测"通过；真实对话仍走 OpenAI / Anthropic 协议，互不影响。
+
+@app.get("/api/tags")
+async def oapi_tags():
+    """Ollama 模型列表：列出所有池名，供客户端模型发现。"""
+    _t = int(time.time())
+    return {"models": [{"name": n, "model": n, "modified_at": None} for n in pool.pool_names()]}
+
+
+@app.post("/api/show")
+async def oapi_show(request: Request):
+    """Ollama 模型详情：池名存在则返回基础信息，否则 404。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    name = (body.get("name") or body.get("model") or "").strip()
+    if name not in pool.pool_names():
+        raise HTTPException(status_code=404, detail=f"model '{name}' not found")
+    return {
+        "modelfile": "",
+        "parameters": "",
+        "template": "",
+        "details": {
+            "parent_model": "",
+            "format": "gguf",
+            "family": "",
+            "families": None,
+            "parameter_size": "",
+            "quantization_level": "",
+        },
+        "model_info": {},
+    }
+
+
+@app.get("/api/v1/models")
+async def oapi_v1_models():
+    """部分 Ollama 兼容客户端会先探测 /api/v1/models 再回退 /v1/models。"""
+    return {"object": "list", "data": [{"id": n, "object": "model", "owned_by": "model-gateway"} for n in pool.pool_names()]}
+
+
+@app.get("/props")
+@app.get("/v1/props")
+async def webui_props():
+    """Open WebUI 前端初始化探测：返回版本与能力标记，使其信任连接可用。"""
+    return {
+        "author": False,
+        "database": True,
+        "version": "v0.3.0",
+        "auth": True,
+        "pipelines": False,
+    }
+
+
+@app.get("/v1/models/{model_name}")
+async def v1_model_detail(model_name: str):
+    """OpenAI 模型详情端点：客户端以池名查询是否存在（如 GET /v1/models/localglm）。"""
+    if model_name not in pool.pool_names():
+        raise HTTPException(status_code=404, detail=f"未知模型池 '{model_name}'")
+    return {"id": model_name, "object": "model", "created": int(time.time()), "owned_by": "model-gateway"}
+
+
 @app.get("/stats")
 async def stats(_=Depends(require_admin)):
     return {"models": await pool.get_stats()}
@@ -228,6 +367,12 @@ async def speedtest(request: Request, _=Depends(require_admin)):
     model_ids = body.get("model_ids", None)
     results = await pool.speedtest(model_ids)
     return {"results": results}
+
+
+@app.get("/")
+async def root_redirect():
+    """根路径友好跳转：浏览器直接打开端口时转到科技感管理面板，避免 404 造成"打不开"的错觉。"""
+    return RedirectResponse("/hfadmin")
 
 
 @app.get("/health")
@@ -249,12 +394,21 @@ async def hfadmin_page():
 
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
-    config = load_config()
-    server_cfg = config.get("server", {})
+    parser = argparse.ArgumentParser(description="Model Gateway 启动器")
+    parser.add_argument("--host", default=None, help="监听地址（覆盖 config.json 的 server.host）")
+    parser.add_argument("--port", type=int, default=None, help="监听端口（覆盖 config.json 的 server.port）")
+    args = parser.parse_args()
+    if args.host is not None:
+        os.environ["MODEL_GATEWAY_HOST"] = args.host
+    if args.port is not None:
+        os.environ["MODEL_GATEWAY_PORT"] = str(args.port)
+    host, port = server_bind()
     uvicorn.run(
         "main:app",
-        host=server_cfg.get("host", "127.0.0.1"),
-        port=server_cfg.get("port", 8650),
+        host=host,
+        port=port,
         reload=False,
+        log_config=None,  # 使用统一日志配置（时间戳 + 控制台 + 文件），不启用 uvicorn 默认配置
     )

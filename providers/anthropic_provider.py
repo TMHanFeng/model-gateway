@@ -188,6 +188,14 @@ class AnthropicProvider:
                 fn = tc.get("function", {}) or {}
                 if fn.get("name"):
                     payload["tool_choice"] = {"type": "tool", "name": fn["name"]}
+        # 用户自定义参数：黑名单后的键透传（防止覆盖核心字段）
+        extra = getattr(req, "extra_params", None) or {}
+        if extra:
+            _reserved = {"model", "messages", "system", "max_tokens", "stream", "input",
+                         "tools", "tool_choice", "temperature", "top_p", "stop_sequences"}
+            for k, v in extra.items():
+                if k not in _reserved:
+                    payload[k] = v
         return payload
 
     def _headers(self) -> dict:

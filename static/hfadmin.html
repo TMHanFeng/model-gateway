@@ -555,7 +555,7 @@ select { max-width: 100%; }
         <div class="fg"><label>收费标注</label><select name="is_free"><option value="true">免费模型（绿）</option><option value="false">付费模型（红）</option></select></div>
       </div>
       <div class="f3">
-        <div class="fg"><label>模型模态</label><select name="modality"><option value="text">纯文本</option><option value="vision">多模态</option></select></div>
+        <div class="fg"><label style="display:flex;align-items:center;justify-content:space-between;gap:6px">模型模态<label style="display:inline-flex;align-items:center;gap:3px;white-space:nowrap;cursor:pointer;font-weight:normal"><input type="checkbox" name="json_output" id="f-json-output" style="width:11px;height:11px;flex:none;margin:0"> 支持格式输出（json）</label></label><select name="modality"><option value="text">纯文本</option><option value="vision">多模态</option><option value="embedding">embedding（嵌入模型）</option></select></div>
         <div class="fg"><label id="limit-label">每日 Token 上限（0=不限）</label><input name="daily_token_limit" type="number" value="0"></div>
         <div class="fg"><label>上下文窗口（0=不校验）</label><input name="context_window" type="number" value="0"></div>
       </div>
@@ -571,6 +571,10 @@ select { max-width: 100%; }
           <div class="fg"><label>一次性·存活时长（秒）</label><input name="ttl_seconds" type="number" value="0"></div>
           <div class="fg"><label>一次性·过期日期（北京时间）</label><input name="expire_date" type="date"></div>
         </div>
+      </div>
+      <div class="f2">
+        <div class="fg"><label>自定义参数名（可选）</label><input name="extra_param_name" placeholder="如 reasoning_effort"></div>
+        <div class="fg"><label>自定义参数值（可选）</label><input name="extra_param_value" placeholder="如 high"></div>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="m-test-btn" onclick="testConnectivity()">🔌 测试连接</button>
@@ -1128,6 +1132,9 @@ async function editModel(id) {
   f.base_url.value = m.base_url || ''; f.api_key.value = m.api_key || ''; f.token_type.value = m.token_type;
   f.billing_mode.value = m.billing_mode || 'token'; f.is_free.value = m.is_free ? 'true' : 'false';
   f.modality.value = m.modality || 'text';
+  const _jc = document.getElementById('f-json-output'); if (_jc) _jc.checked = !!m.json_output;
+  const _ep = m.extra_params || {}; const _ek = Object.keys(_ep)[0];
+  if (f.extra_param_name) { f.extra_param_name.value = _ek || ''; f.extra_param_value.value = _ek ? String(_ep[_ek]) : ''; }
   f.daily_token_limit.value = m.daily_token_limit || 0; f.rpm_limit.value = m.rpm_limit || 0;
   f.tpm_limit.value = m.tpm_limit || 0; f.context_window.value = m.context_window || 0;
   f.max_concurrency.value = m.max_concurrency ?? 10; f.refresh_time.value = m.refresh_time || '';
@@ -1144,6 +1151,10 @@ async function submitModel(e) {
   const body = Object.fromEntries(new FormData(document.getElementById('mform')).entries());
   ['daily_token_limit','rpm_limit','tpm_limit','context_window','max_concurrency','max_tokens','ttl_seconds'].forEach(k => body[k] = parseInt(body[k]) || 0);
   body.is_free = body.is_free === 'true';
+  body.json_output = document.getElementById('f-json-output') ? document.getElementById('f-json-output').checked : false;
+  const _epn = (body.extra_param_name || '').trim(), _epv = (body.extra_param_value || '').trim();
+  delete body.extra_param_name; delete body.extra_param_value;
+  if (_epn) body.extra_params = { [_epn]: _epv };
   delete body.timezone;
   if (body.token_type !== 'one_time' && (body.max_tokens > 0 || body.ttl_seconds > 0 || body.expire_date)) body.token_type = 'one_time';
   let ok;

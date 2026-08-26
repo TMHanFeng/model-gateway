@@ -57,6 +57,14 @@ class OpenAIProvider:
         if stream:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
+        # 用户自定义参数：黑名单后的键透传（防止覆盖核心字段）
+        extra = getattr(req, "extra_params", None) or {}
+        if extra:
+            _reserved = {"model", "messages", "stream", "stream_options", "input",
+                         "tools", "tool_choice", "max_tokens", "system", "temperature"}
+            for k, v in extra.items():
+                if k not in _reserved:
+                    payload[k] = v
         return payload
 
     def _headers(self) -> dict:
@@ -64,6 +72,33 @@ class OpenAIProvider:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+    async def embeddings(self, req, model_name: str, extra_params: dict | None = None) -> dict:
+        """OpenAI 兼容 /embeddings：完全透传上游，仅替换 model。返回上游原始 dict。"""
+        payload = {
+            "model": model_name,
+            "input": req.input,
+        }
+        if req.encoding_format:
+            payload["encoding_format"] = req.encoding_format
+        if req.dimensions:
+            payload["dimensions"] = req.dimensions
+        if req.user:
+            payload["user"] = req.user
+        if extra_params:
+            _reserved = {"model", "input", "encoding_format", "dimensions", "user"}
+            for k, v in extra_params.items():
+                if k not in _reserved:
+                    payload[k] = v
+        resp = await self.client.post(
+            f"{self.base_url}/embeddings",
+            json=payload,
+            headers=self._headers(),
+        )
+        if resp.status_code == 429:
+            raise RateLimitError("upstream 429")
+        resp.raise_for_status()
+        return resp.json()
 
     async def chat(self, req: ChatCompletionRequest, model_name: str) -> ChatCompletionResponse:
         payload = self._build_payload(req, model_name)

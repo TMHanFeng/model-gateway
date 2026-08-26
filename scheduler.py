@@ -2,8 +2,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from pathlib import Path
 from shutil import copyfile
+import logging
 import database as db
 from pool import load_config
+
+logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
 
@@ -21,9 +24,9 @@ def backup_config():
     try:
         if CONFIG_PATH.exists():
             copyfile(CONFIG_PATH, BACKUP_PATH)
-            print(f"[{__import__('time').strftime('%Y-%m-%d %H:%M:%S')}][BACKUP] config.json 已备份至 config.json.bak")
+            logger.info(f"[BACKUP] config.json 已备份至 config.json.bak")
     except Exception as e:
-        print(f"[{__import__('time').strftime('%Y-%m-%d %H:%M:%S')}][BACKUP-FAIL] 备份失败: {e}")
+        logger.error(f"[BACKUP-FAIL] 备份失败: {e}")
 
 
 def _add_jobs():

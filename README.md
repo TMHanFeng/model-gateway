@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.3.8-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.7.0-orange)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 
 对外暴露 **OpenAI 兼容**与 **Anthropic Messages** 接口，
@@ -436,12 +436,17 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
-**`v2.3.8`** — 上游429冷却 30s → 20s；统一 `detail.cooldown_sec` 与实际值一致（含流式路径）
+**`v2.7.0`** — 新增 **embedding 模型支持**（`/v1/embeddings` + 模态双向硬门槛 + 自动切换）；**json 输出硬门槛**（`response_format` 只选 `json_output=True` 模型，含兼容降级）；**Ollama / Open WebUI 探测端点兼容**（消除 404 刷屏）；**日志体系升级**（控制台彩色分级 + 短时间戳、文件按天轮转、上游错误详情含响应体、`--port/--host` 参数）；前端双面板新增 json_output 复选框与自定义参数
 
 ### 历史（按时间倒序）
 
 | 版本 | 主要变更 |
 |:---|:---|
+| **v2.7.0** | embedding 支持 + json 输出门槛；Ollama/WebUI 探测端点兼容；日志体系升级 + --port 参数；前端 json_output/extra_params |
+| **v2.5.1** | 后端日志统一加时间戳；负载均衡提示框+滑块浅蓝色；hfadmin 补自动择优提示 |
+| **v2.5.0** | 每日额度跨天惰性重置 + 负载均衡（round-robin 互斥自动化择优）+ models reorder 路由 + 5h 展示与 Token 单位 |
+| **v2.4.1** | 代理连接测试 / 供应商排序 / 节点解析 / 缓存隔离等 5 项修复 |
+| **v2.4.0** | VPN/clash proxy 支持（每供应商独立代理，httpx.AsyncClient proxy 参数） |
 | **v2.3.8** | 429 冷却 30s → 20s；统一流式路径 detail |
 | **v2.3.7** | 移除延迟阈值预设按钮（保留输入框+单位+hint） |
 | **v2.3.6** | 美化延迟阈值输入框（玻璃拟态 + 内嵌单位 + 含义提示） |

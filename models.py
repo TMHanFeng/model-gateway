@@ -22,6 +22,17 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = None
     tools: Optional[list[dict]] = None
     tool_choice: Optional[Union[str, dict]] = None
+    response_format: Optional[dict] = None
+
+
+class EmbeddingRequest(BaseModel):
+    """OpenAI 兼容 /v1/embeddings 请求体（完全透传上游）。"""
+    model: str
+    input: Union[str, list[str]]
+    encoding_format: Optional[str] = None
+    dimensions: Optional[int] = None
+    user: Optional[str] = None
+    extra_params: Optional[dict[str, Any]] = None
 
 
 class UsageInfo(BaseModel):
