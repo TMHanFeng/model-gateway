@@ -4,6 +4,7 @@ gateway.db
 gateway.db-shm
 gateway.db-wal
 *.log
+logs/
 
 # Local user secrets & runtime configs (managed outside VCS)
 config.json
