@@ -550,14 +550,6 @@ class ModelPool:
         exclude = exclude or set()
         steps = []
 
-        # json 硬门槛兼容降级：若当前池（含子池）没有任何 json_output=True 的模型，
-        # 则不强制 json 过滤——否则老配置下所有 json_* 请求都会 503，直接破坏现有使用。
-        if required_json_output:
-            cands = self._collect_pool_models(pool_name)
-            if not any(self.registry.get(n) and self.registry[n].json_output for n in cands):
-                logger.info(f"[json] 池 {pool_name} 无 json_output=True 模型，降级不强制过滤（保持 json 请求可用）")
-                required_json_output = False
-
         if requested_model:
             if requested_model in self.registry:
                 entries = [self.registry[requested_model]]
@@ -754,7 +746,14 @@ class ModelPool:
                     detail["status"] = status
                 if str(e) and len(str(e)) < 200:
                     detail["error"] = str(e)
-                resp_body = getattr(getattr(e, "response", None), "text", "") or ""
+                resp_obj = getattr(e, "response", None)
+                resp_body = ""
+                if resp_obj is not None:
+                    try:
+                        await resp_obj.aread()
+                        resp_body = resp_obj.text or ""
+                    except Exception:
+                        resp_body = ""  # 流式响应未读 body 时降级为空，避免 ResponseNotRead 二次异常
                 entry_url = getattr(entry, "base_url", "") or ""
                 logger.error(
                     f"[上游错误-embedding] pool={pool_name} model={entry.id} caller={caller!r} "
@@ -779,6 +778,9 @@ class ModelPool:
             return "单模型锁定：锁定模型不可用或调用失败，且兜底池无可用模型"
         if not steps:
             return "池为空或无匹配模型"
+        # json 硬门槛：全部候选因 no_json_output 被拦 → 明确指引而非笼统的不可用提示
+        if any(s.get("reason") == "no_json_output" for s in steps) and not attempted:
+            return "请求要求 JSON 格式输出，但该池没有任何支持格式输出（json）的模型。请在模型管理勾选“支持格式输出（json）”（默认不支持）"
         return "所有候选模型均不可用：用量用尽 / RPM·TPM 触顶 / 冷却 / 超上下文"
 
     async def execute_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = "",
@@ -863,7 +865,14 @@ class ModelPool:
                 if err_msg and len(err_msg) < 200:
                     detail["error"] = err_msg
                 # 详细错误日志：含上游原始响应体（前 600 字符），用于定位 4xx/5xx 根因
-                resp_body = getattr(getattr(e, "response", None), "text", "") or ""
+                resp_obj = getattr(e, "response", None)
+                resp_body = ""
+                if resp_obj is not None:
+                    try:
+                        await resp_obj.aread()
+                        resp_body = resp_obj.text or ""
+                    except Exception:
+                        resp_body = ""  # 流式响应未读 body 时降级为空，避免 ResponseNotRead 二次异常
                 entry_url = getattr(entry, "base_url", "") or ""
                 logger.error(
                     f"[上游错误] pool={pool_name} model={entry.id} req_model={requested_model or '-'} "
@@ -980,7 +989,14 @@ class ModelPool:
                 if err_msg and len(err_msg) < 200:
                     detail["error"] = err_msg
                 # 详细错误日志：含上游原始响应体（前 600 字符）
-                resp_body = getattr(getattr(e, "response", None), "text", "") or ""
+                resp_obj = getattr(e, "response", None)
+                resp_body = ""
+                if resp_obj is not None:
+                    try:
+                        await resp_obj.aread()
+                        resp_body = resp_obj.text or ""
+                    except Exception:
+                        resp_body = ""  # 流式响应未读 body 时降级为空，避免 ResponseNotRead 二次异常
                 entry_url = getattr(entry, "base_url", "") or ""
                 logger.error(
                     f"[上游错误-流式] pool={pool_name} model={entry.id} req_model={requested_model or '-'} "
