@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse
 from pydantic import ValidationError
-from models import ChatCompletionRequest, EmbeddingRequest
+from models import ChatCompletionRequest, EmbeddingRequest, RerankRequest
 from pool import ModelPool, load_config
 from database import init_db, close_db
 import database as db
@@ -275,6 +275,59 @@ async def embeddings_handler(request: Request, auth: dict = Depends(verify_key))
         _detail = pool.failure_detail(steps, has_images=False)
         logger.error(f"[调用失败-embedding] pool={pool_name} caller={caller!r} detail={_detail}")
         logger.error(f"[调用失败-embedding] 决策明细: {steps}")
+        raise HTTPException(
+            status_code=503,
+            detail=_detail,
+        )
+    if is_user_key:
+        usage = response.get("usage") or {}
+        amount = 1 if key.get("billing_mode") == "request" else int(usage.get("total_tokens", 0) or tokens or 0)
+        if amount > 0:
+            await keyauth.charge_key_usage(key, amount)
+    return response
+
+
+@app.post("/v1/rerank")
+async def rerank_handler(request: Request, auth: dict = Depends(verify_key)):
+    """Jina/Cohere/SiliconFlow 兼容 rerank 端点：仅匹配 modality=rerank 的模型，响应完全透传上游。"""
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="请求体过大（上限 20MB）")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    try:
+        req = RerankRequest(**body)
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail="请求格式错误: " + str(e.errors(include_input=False, include_url=False))[:500],
+        )
+
+    pool_name = _resolve(req.model or "auto")
+    if pool_name is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未知模型池 '{req.model or 'auto'}'：对外仅可调用模型池，不能直接指定单个模型",
+        )
+
+    key = auth.get("key")
+    is_user_key = auth["kind"] == "key_user"
+    caller = "管理员" if auth["kind"] == "server_admin" else (key.get("name", "") if key else "")
+    if is_user_key:
+        if not keyauth.is_pool_allowed(key, pool_name):
+            raise HTTPException(status_code=403, detail=f"该 API Key 无权访问模型池 '{pool_name}'")
+        ok, reason = await keyauth.key_usage_available(key)
+        if not ok:
+            raise HTTPException(status_code=429, detail=f"API Key 用量已达限额: {reason}")
+
+    response, tokens, steps = await pool.execute_rerank_with_fallback(pool_name, req, None, caller)
+    if response is None:
+        _detail = pool.failure_detail(steps, has_images=False)
+        logger.error(f"[调用失败-rerank] pool={pool_name} caller={caller!r} detail={_detail}")
+        logger.error(f"[调用失败-rerank] 决策明细: {steps}")
         raise HTTPException(
             status_code=503,
             detail=_detail,

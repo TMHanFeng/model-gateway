@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.7.0-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.8.0-orange)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 
 对外暴露 **OpenAI 兼容**与 **Anthropic Messages** 接口，
@@ -281,7 +281,7 @@ Anthropic 适配器自动完成：
       "token_type": "daily",            // daily / rolling_5h / one_time
       "billing_mode": "token",          // token / request
       "is_free": true,                  // 默认免费（v2.3.3+）；付费模型显式设为 false
-      "modality": "vision",             // text（纯文本）/ vision（多模态）
+      "modality": "vision",             // text（纯文本）/ vision（多模态）/ embedding（嵌入）/ rerank（重排）
       "refresh_time": "00:00",          // 每日刷新时间（北京时间）
       "timezone": "Asia/Shanghai"
       // one_time 专属:
@@ -324,7 +324,7 @@ Anthropic 适配器自动完成：
 
 | 标签页 | 核心功能 |
 |:---|:---|
-| 📦 **模型管理** | 增删改模型接口；标注免费/付费、纯文本/多模态、计费模式；同名模型自动归入大池子；**模型条目可拖拽排序并持久化** |
+| 📦 **模型管理** | 增删改模型接口；标注免费/付费、纯文本/多模态/嵌入/重排、计费模式；同名模型自动归入大池子；**模型条目可拖拽排序并持久化** |
 | 🪆 **模型池** | 新增/删除池；拖拽 ⠿ 调整优先级与池内模型顺序；加入模型或子池；开关"自动择优"；**配置延迟阈值 ms（0=不限）**；⚡ 测速本池；**从兜底池卡片一键选择为哪些池兜底**；悬停 ⓘ 查看接口详情 |
 | 📊 **用量统计** | 卡片式可视化，横向进度条展示 已用/总量（青→琥珀→红分级），支持 **计费量 / 调用次数 / Token 用量** 三维度切换，每 5 秒自动刷新 |
 | ⚡ **接口测速** | 并发测试所有模型的延迟与吞吐 |
@@ -373,6 +373,8 @@ Anthropic 适配器自动完成：
 |:---|:---:|:---|
 | `/v1/chat/completions` | POST | 对话（支持 `stream`，OpenAI 与 Anthropic 格式均可） |
 | `/v1/messages` | POST | Anthropic Messages 格式对话（同 `/v1/chat/completions`） |
+| `/v1/embeddings` | POST | OpenAI 兼容 embedding（仅路由到模态=embedding 的模型，响应透传上游） |
+| `/v1/rerank` | POST | 重排（Jina/Cohere/SiliconFlow 兼容；仅路由到模态=rerank 的模型，响应透传上游） |
 | `/v1/models` | GET | 模型与池列表 |
 | `/health` | GET | 健康检查 |
 | `/version` | GET | 网关版本号（从 git tag 读取） |
@@ -410,6 +412,18 @@ curl -X POST http://127.0.0.1:8650/v1/chat/completions \
   -H "Authorization: Bearer your-key" \
   -H "Content-Type: application/json" \
   -d '{"model": "auto", "stream": true, "messages": [{"role":"user","content":"hi"}]}'
+
+# Embedding（池内需有模态=embedding 的模型）
+curl -X POST http://127.0.0.1:8650/v1/embeddings \
+  -H "Authorization: Bearer your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "auto", "input": "你好"}'
+
+# Rerank 重排（池内需有模态=rerank 的模型）
+curl -X POST http://127.0.0.1:8650/v1/rerank \
+  -H "Authorization: Bearer your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "auto", "query": "什么是重排", "documents": ["文档A", "文档B"], "top_n": 2}'
 ```
 
 ---
@@ -437,12 +451,14 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
-**`v2.7.0`** — 新增 **embedding 模型支持**（`/v1/embeddings` + 模态双向硬门槛 + 自动切换）；**json 输出硬门槛**（`response_format` 只选 `json_output=True` 模型，含兼容降级）；**Ollama / Open WebUI 探测端点兼容**（消除 404 刷屏）；**日志体系升级**（控制台彩色分级 + 短时间戳、文件按天轮转、上游错误详情含响应体、`--port/--host` 参数）；前端双面板新增 json_output 复选框与自定义参数
+**`v2.8.0`** — 新增 **rerank（重排）模型支持**：`/v1/rerank` 端点（Jina/Cohere/SiliconFlow 兼容格式，响应完全透传上游）；`rerank` 作为第三种专用模态进模型池（双向硬门槛路由 + 自动切换 + 计费复用，与 embedding 同构）；模型测试按模态分流（`/rerank` 连通性测试）；双管理面板新增 rerank 徽章与模态选项；池门槛同时拦截 anthropic 协议模型的 embedding/rerank 误配（此前会 500）
 
 ### 历史（按时间倒序）
 
 | 版本 | 主要变更 |
 |:---|:---|
+| **v2.7.2** | 池配置引用失效显式记录（ref_not_found）；test_model 按模态分流（embedding 直测）；双面板 embedding 徽章；load_balance 轮转语义确认 |
+| **v2.7.1** | json 严格路由：移除兼容降级，无 json 模型时 503 + 勾选指引 |
 | **v2.7.0** | embedding 支持 + json 输出门槛；Ollama/WebUI 探测端点兼容；日志体系升级 + --port 参数；前端 json_output/extra_params |
 | **v2.5.1** | 后端日志统一加时间戳；负载均衡提示框+滑块浅蓝色；hfadmin 补自动择优提示 |
 | **v2.5.0** | 每日额度跨天惰性重置 + 负载均衡（round-robin 互斥自动化择优）+ models reorder 路由 + 5h 展示与 Token 单位 |

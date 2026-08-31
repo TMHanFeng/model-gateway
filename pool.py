@@ -269,8 +269,8 @@ class ModelPool:
     async def _check_available(self, entry: ModelEntry, estimated_tokens: int = 0, has_images: bool = False,
                                required_modality: str | None = None, required_json_output: bool = False) -> tuple[bool, str, dict | None]:
         """返回 (ok, reason, detail)。detail 用于调用记录展示具体数值（已用/上限、冷却剩余秒等）。
-        required_modality：要求特定模态（如 "embedding"）时，不匹配的模型一律排除；
-                        None 表示普通 chat/通用调用（此时 embedding 模型也应被排除）。
+        required_modality：要求特定模态（如 "embedding"/"rerank"）时，不匹配的模型一律排除；
+                        None 表示普通 chat/通用调用（此时 embedding/rerank 模型也应被排除）。
         required_json_output：请求要求 json 输出时，仅 json_output=True 的模型可用。"""
         now = time.time()
         detail = None
@@ -340,14 +340,16 @@ class ModelPool:
         if has_images and entry.modality != "vision":
             return False, "no_vision", {"modality": entry.modality}
 
-        # 模态双向硬门槛：chat 调用（required_modality=None）排除 embedding 模型；
-        # embedding/专用调用要求特定模态时排除不匹配的。anthropic provider 无 embedding 端点也在此拦截。
+        # 模态双向硬门槛：chat 调用（required_modality=None）排除 embedding/rerank 模型；
+        # embedding/rerank/专用调用要求特定模态时排除不匹配的。anthropic provider 无 embedding/rerank 端点也在此拦截。
         if required_modality is not None:
             if entry.modality != required_modality:
                 return False, "wrong_modality", {"required": required_modality, "got": entry.modality}
+            if entry.provider == "anthropic":
+                return False, "wrong_modality", {"required": required_modality, "got": f"{entry.modality}（anthropic 协议无此端点）"}
         else:
-            if entry.modality == "embedding":
-                return False, "wrong_modality", {"required": "chat", "got": "embedding"}
+            if entry.modality in ("embedding", "rerank"):
+                return False, "wrong_modality", {"required": "chat", "got": entry.modality}
 
         # json 输出硬门槛：请求带 response_format json 时只允许 json_output=True 模型
         if required_json_output and not entry.json_output:
@@ -703,6 +705,38 @@ class ModelPool:
 
         return response, tokens_used
 
+    async def execute_rerank(self, entry: ModelEntry, req) -> tuple[dict, int]:
+        """执行 rerank 调用：走 provider.rerank()，按上游 usage 计费（复用现有 quota/token_type）。"""
+        provider = self._get_provider(entry)
+        t0 = time.perf_counter()
+        async with entry.semaphore:
+            try:
+                response = await provider.rerank(req, entry.name, entry.extra_params or {})
+            except RateLimitError:
+                entry.cooldown_until = time.time() + 20
+                raise
+        self._record_latency(entry, (time.perf_counter() - t0) * 1000)
+
+        usage = response.get("usage") or {}
+        tokens_used = int(usage.get("total_tokens", 0) or usage.get("prompt_tokens", 0))
+        await db.log_request(entry.id, tokens_used)
+        await db.add_model_call(entry.id, tokens_used)
+
+        if entry.token_type == "one_time":
+            charge = 1 if entry.billing_mode == "request" else tokens_used
+            await db.add_one_time_usage(entry.id, charge)
+            state = await db.get_one_time_state(entry.id)
+            if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
+                await db.expire_one_time(entry.id)
+        elif entry.token_type == "rolling_5h":
+            charge = 1 if entry.billing_mode == "request" else tokens_used
+            await self._charge_rolling_5h(entry, charge)
+        else:
+            charge = 1 if entry.billing_mode == "request" else tokens_used
+            await db.add_daily_usage(entry.id, charge)
+
+        return response, tokens_used
+
     async def execute_embedding_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = ""):
         """embedding 专用：仅选 modality==embedding 的模型；禁用 fallback（chat 池不能兜底 embedding）。"""
         tried: set[str] = set()
@@ -780,6 +814,73 @@ class ModelPool:
         await db.log_decision(pool_name, requested_model, None, estimated, actual_calls, caller)
         return None, 0, actual_calls
 
+    async def execute_rerank_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = ""):
+        """rerank 专用：仅选 modality==rerank 的模型；禁用 fallback（chat 池不能兜底 rerank）。"""
+        tried: set[str] = set()
+        # RerankRequest 无 messages 字段，按 query + documents 长度安全估算
+        _q = getattr(req, "query", "") or ""
+        estimated = max(1, len(_q) // 3)
+        for _d in getattr(req, "documents", []) or []:
+            _txt = _d if isinstance(_d, str) else (str(_d.get("text", "")) if isinstance(_d, dict) else str(_d))
+            estimated += max(1, len(_txt) // 3)
+        max_attempts = len(self.registry) + 1
+        actual_calls: list[dict] = []
+
+        for _ in range(max_attempts):
+            entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried,
+                                                   required_modality="rerank")
+            if steps:
+                actual_calls.extend(st for st in steps if st["reason"] != "already_tried")
+            if entry is None:
+                break
+            tried.add(entry.id)
+            try:
+                response, tokens = await self.execute_rerank(entry, req)
+                last_reason = actual_calls[-1]["reason"] if actual_calls else ""
+                if last_reason in ("selected", "single_override_selected") and actual_calls[-1]["model"] == entry.id:
+                    pass
+                else:
+                    actual_calls.append({"model": entry.id, "reason": "selected"})
+                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
+                return response, tokens, actual_calls
+            except RateLimitError:
+                logger.warning(
+                    f"[上游429-rerank] pool={pool_name} model={entry.id} caller={caller!r} 冷却20s"
+                )
+                actual_calls.append({"model": entry.id, "reason": "switch_429", "detail": {"cooldown_sec": 20, "status": 429}})
+                continue
+            except Exception as e:
+                entry.cooldown_until = time.time() + 30
+                err_type = type(e).__name__
+                status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+                detail = {"cooldown_sec": 30, "error_type": err_type}
+                if status is not None:
+                    detail["status"] = status
+                if str(e) and len(str(e)) < 200:
+                    detail["error"] = str(e)
+                resp_obj = getattr(e, "response", None)
+                resp_body = ""
+                if resp_obj is not None:
+                    try:
+                        await resp_obj.aread()
+                        resp_body = resp_obj.text or ""
+                    except Exception:
+                        resp_body = ""  # 流式响应未读 body 时降级为空，避免 ResponseNotRead 二次异常
+                entry_url = getattr(entry, "base_url", "") or ""
+                logger.error(
+                    f"[上游错误-rerank] pool={pool_name} model={entry.id} caller={caller!r} "
+                    f"status={status} type={err_type} cooldown=30s url={entry_url}"
+                )
+                if str(e):
+                    logger.error(f"[上游错误-rerank] 异常消息: {str(e)[:300]}")
+                if resp_body:
+                    logger.error(f"[上游错误-rerank] 上游响应体: {resp_body[:600]}")
+                actual_calls.append({"model": entry.id, "reason": "switch_error", "detail": detail})
+                continue
+
+        await db.log_decision(pool_name, requested_model, None, estimated, actual_calls, caller)
+        return None, 0, actual_calls
+
     def failure_detail(self, steps: list[dict], has_images: bool) -> str:
         attempted = any(s.get("reason") in ("selected", "single_override_selected", "switch_429", "switch_error") for s in steps)
         locked = any(str(s.get("reason", "")).startswith("single_override") for s in steps)
@@ -796,6 +897,13 @@ class ModelPool:
         # json 硬门槛：全部候选因 no_json_output 被拦 → 明确指引而非笼统的不可用提示
         if any(s.get("reason") == "no_json_output" for s in steps) and not attempted:
             return "请求要求 JSON 格式输出，但该池没有任何支持格式输出（json）的模型。请在模型管理勾选“支持格式输出（json）”（默认不支持）"
+        # 模态硬门槛：全部候选因模态不匹配被拦（rerank/embedding 请求打进无此类模型的池）→ 明确指引
+        if not attempted and steps and all(s.get("reason") == "wrong_modality" for s in steps):
+            _required = {str(s["detail"].get("required")) for s in steps if isinstance(s.get("detail"), dict)}
+            if "rerank" in _required:
+                return "请求要求 rerank（重排）模型，但该池没有任何 rerank 模型。请在模型管理将对应模型的模态设为 rerank"
+            if "embedding" in _required:
+                return "请求要求 embedding（嵌入）模型，但该池没有任何 embedding 模型。请在模型管理将对应模型的模态设为 embedding"
         return "所有候选模型均不可用：用量用尽 / RPM·TPM 触顶 / 冷却 / 超上下文"
 
     async def execute_with_fallback(self, pool_name: str, req, requested_model: str | None = None, caller: str = "",

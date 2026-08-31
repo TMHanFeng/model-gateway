@@ -35,6 +35,16 @@ class EmbeddingRequest(BaseModel):
     extra_params: Optional[dict[str, Any]] = None
 
 
+class RerankRequest(BaseModel):
+    """Jina/Cohere/SiliconFlow 兼容 /v1/rerank 请求体（完全透传上游）。"""
+    model: str
+    query: str
+    documents: list[Union[str, dict]]
+    top_n: Optional[int] = None
+    return_documents: Optional[bool] = None
+    extra_params: Optional[dict[str, Any]] = None
+
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0

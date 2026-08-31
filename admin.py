@@ -663,6 +663,23 @@ async def test_model(request: Request, _=Depends(verify_admin)):
                 elapsed = _time.perf_counter() - start
                 return {"ok": True, "result": {"status": "error", "error": str(e)[:300],
                                                "latency_ms": round(elapsed * 1000), "type": "embedding"}}
+        elif modality == "rerank":
+            # rerank 模型发 /rerank 短文本测试（chat/completions 对重排模型必然 400）
+            if protocol != "openai":
+                raise HTTPException(400, "rerank 测试仅支持 openai 兼容协议")
+            from models import RerankRequest
+            req = RerankRequest(model=model_name, query="connectivity test",
+                                documents=["hello world", "gateway rerank test"])
+            start = _time.perf_counter()
+            try:
+                await provider.rerank(req, model_name, {})
+                elapsed = _time.perf_counter() - start
+                return {"ok": True, "result": {"status": "ok", "latency_ms": round(elapsed * 1000),
+                                               "model_id": model_name, "type": "rerank"}}
+            except Exception as e:
+                elapsed = _time.perf_counter() - start
+                return {"ok": True, "result": {"status": "error", "error": str(e)[:300],
+                                               "latency_ms": round(elapsed * 1000), "type": "rerank"}}
         result = await provider.speedtest(model_name)
         # Record usage for stats even on test calls
         if result.get("status") == "ok" and result.get("tokens", 0) > 0:

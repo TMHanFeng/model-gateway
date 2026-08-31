@@ -100,6 +100,32 @@ class OpenAIProvider:
         resp.raise_for_status()
         return resp.json()
 
+    async def rerank(self, req, model_name: str, extra_params: dict | None = None) -> dict:
+        """Jina/Cohere/SiliconFlow 兼容 /rerank：完全透传上游，仅替换 model。返回上游原始 dict。"""
+        payload = {
+            "model": model_name,
+            "query": req.query,
+            "documents": req.documents,
+        }
+        if req.top_n is not None:
+            payload["top_n"] = req.top_n
+        if req.return_documents is not None:
+            payload["return_documents"] = req.return_documents
+        if extra_params:
+            _reserved = {"model", "query", "documents", "top_n", "return_documents"}
+            for k, v in extra_params.items():
+                if k not in _reserved:
+                    payload[k] = v
+        resp = await self.client.post(
+            f"{self.base_url}/rerank",
+            json=payload,
+            headers=self._headers(),
+        )
+        if resp.status_code == 429:
+            raise RateLimitError("upstream 429")
+        resp.raise_for_status()
+        return resp.json()
+
     async def chat(self, req: ChatCompletionRequest, model_name: str) -> ChatCompletionResponse:
         payload = self._build_payload(req, model_name)
         resp = await self.client.post(

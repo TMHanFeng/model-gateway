@@ -167,6 +167,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 26px 24px 80px; }
 .b-5h { background: rgba(251, 191, 36, 0.14); color: var(--amber); }
 .b-ghost { background: transparent; border: 1px solid var(--line-hi); color: var(--muted); }
 .b-embedding { background: rgba(167,139,250,.14); color: #a78bfa; }
+.b-rerank { background: rgba(244,114,182,.14); color: #f472b6; }
 
 /* 开关 */
 .switch { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; font-size: 12.5px; color: var(--muted); user-select: none; }
@@ -556,7 +557,7 @@ select { max-width: 100%; }
         <div class="fg"><label>收费标注</label><select name="is_free"><option value="true">免费模型（绿）</option><option value="false">付费模型（红）</option></select></div>
       </div>
       <div class="f3">
-        <div class="fg"><label style="display:flex;align-items:center;justify-content:space-between;gap:6px">模型模态<label style="display:inline-flex;align-items:center;gap:3px;white-space:nowrap;cursor:pointer;font-weight:normal"><input type="checkbox" name="json_output" id="f-json-output" style="width:11px;height:11px;flex:none;margin:0"> 支持格式输出（json）</label></label><select name="modality"><option value="text">纯文本</option><option value="vision">多模态</option><option value="embedding">embedding（嵌入模型）</option></select></div>
+        <div class="fg"><label style="display:flex;align-items:center;justify-content:space-between;gap:6px">模型模态<label style="display:inline-flex;align-items:center;gap:3px;white-space:nowrap;cursor:pointer;font-weight:normal"><input type="checkbox" name="json_output" id="f-json-output" style="width:11px;height:11px;flex:none;margin:0"> 支持格式输出（json）</label></label><select name="modality"><option value="text">纯文本</option><option value="vision">多模态</option><option value="embedding">embedding（嵌入模型）</option><option value="rerank">rerank（重排模型）</option></select></div>
         <div class="fg"><label id="limit-label">每日 Token 上限（0=不限）</label><input name="daily_token_limit" type="number" value="0"></div>
         <div class="fg"><label>上下文窗口（0=不校验）</label><input name="context_window" type="number" value="0"></div>
       </div>
@@ -822,7 +823,7 @@ function typeBadge(m) {
   return '<span class="badge b-ghost">每日</span>';
 }
 function freeBadge(m) { return m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>'; }
-function modBadge(m) { return m.modality === 'embedding' ? '<span class="badge b-embedding">embedding</span>' : m.modality === 'vision' ? '<span class="badge b-openai">多模态</span>' : '<span class="badge b-ghost">文本</span>'; }
+function modBadge(m) { return m.modality === 'embedding' ? '<span class="badge b-embedding">embedding</span>' : m.modality === 'rerank' ? '<span class="badge b-rerank">rerank</span>' : m.modality === 'vision' ? '<span class="badge b-openai">多模态</span>' : '<span class="badge b-ghost">文本</span>'; }
 function latTag(id) {
   const s = speedCache[id];
   if (!s) return '';
@@ -1323,7 +1324,7 @@ function infoTip(id) {
     ['Base URL', p ? p.base_url : (m.base_url || '')],
     ['所属供应商', p ? `${p.name}（${p.id}）` : '—（独立内联）'],
     ['收费标注', m.is_free ? '免费' : '付费'],
-    ['模态', m.modality === 'embedding' ? 'embedding（嵌入模型）' : m.modality === 'vision' ? '多模态' : '纯文本'],
+    ['模态', m.modality === 'embedding' ? 'embedding（嵌入模型）' : m.modality === 'rerank' ? 'rerank（重排模型）' : m.modality === 'vision' ? '多模态' : '纯文本'],
     ['令牌', m.token_type === 'one_time' ? '一次性' : (m.token_type === 'rolling_5h' ? '5h 限额' : '每日')],
     [(m.token_type === 'rolling_5h' ? '5h 窗口限额' : '每日上限'), m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : ' Token') : '不限'],
     ['RPM/TPM', `${m.rpm_limit || '∞'}/${m.tpm_limit || '∞'}`],
