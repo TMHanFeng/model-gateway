@@ -634,6 +634,7 @@ async def test_model(request: Request, _=Depends(verify_admin)):
     api_key = (body.get("api_key") or "").strip()
     protocol = body.get("protocol") or body.get("provider") or "openai"
     model_name = (body.get("model_name") or body.get("name") or "").strip()
+    modality = (body.get("modality") or "text").strip()
     if not base_url or not api_key or not model_name:
         raise HTTPException(400, "缺少 base_url / api_key / model_name")
     if protocol not in ("openai", "anthropic"):
@@ -644,7 +645,24 @@ async def test_model(request: Request, _=Depends(verify_admin)):
     else:
         provider = OpenAIProvider(base_url, api_key)
     import database as db
+    import time as _time
     try:
+        # embedding 模型发 /embeddings 短文本测试（chat/completions 对嵌入模型必然 400）
+        if modality == "embedding":
+            if protocol != "openai":
+                raise HTTPException(400, "embedding 测试仅支持 openai 兼容协议")
+            from models import EmbeddingRequest
+            req = EmbeddingRequest(model=model_name, input="connectivity test")
+            start = _time.perf_counter()
+            try:
+                await provider.embeddings(req, model_name, {})
+                elapsed = _time.perf_counter() - start
+                return {"ok": True, "result": {"status": "ok", "latency_ms": round(elapsed * 1000),
+                                               "model_id": model_name, "type": "embedding"}}
+            except Exception as e:
+                elapsed = _time.perf_counter() - start
+                return {"ok": True, "result": {"status": "error", "error": str(e)[:300],
+                                               "latency_ms": round(elapsed * 1000), "type": "embedding"}}
         result = await provider.speedtest(model_name)
         # Record usage for stats even on test calls
         if result.get("status") == "ok" and result.get("tokens", 0) > 0:

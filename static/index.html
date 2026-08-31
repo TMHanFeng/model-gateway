@@ -94,6 +94,7 @@ body {
 .b-paid { background: var(--red-dim); color: var(--red); border: 1px solid rgba(248,113,113,.3); }
 .b-vision { background: rgba(56,189,248,.12); color: #38bdf8; border: 1px solid rgba(56,189,248,.3); }
 .b-text { background: rgba(255,255,255,.05); color: var(--muted); border: 1px solid var(--line-hi); }
+.b-embedding { background: rgba(167,139,250,.12); color: #a78bfa; border: 1px solid rgba(167,139,250,.35); }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px 18px; font-size: 12.5px; color: var(--muted); }
 .grid b { color: var(--text); font-weight: 500; font-family: var(--mono); }
@@ -729,7 +730,7 @@ function modelRowHTML(m, i) {
         </div>
         <div class="btn-row">
           ${provBadge(proto)}
-          ${m.modality === 'vision' ? '<span class="badge b-vision">多模态</span>' : '<span class="badge b-text">纯文本</span>'}
+          ${m.modality === 'embedding' ? '<span class="badge b-embedding">embedding</span>' : m.modality === 'vision' ? '<span class="badge b-vision">多模态</span>' : '<span class="badge b-text">纯文本</span>'}
           ${m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>'}
           ${m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>' : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>' : ''}
           ${m.expire_date ? `<span class="badge b-once">到期 ${esc(m.expire_date)}</span>` : ''}
@@ -937,7 +938,7 @@ function infoTip(id) {
     ['所属供应商', p ? `${p.name}（${p.id}）` : '—（独立内联）'],
     ['收费标注', m.is_free ? '免费' : '付费'],
     ['计费模式', m.billing_mode === 'request' ? '按请求次数' : '按 Token'],
-    ['模型模态', m.modality === 'vision' ? '多模态（支持图片）' : '纯文本'],
+    ['模型模态', m.modality === 'embedding' ? 'embedding（嵌入模型）' : m.modality === 'vision' ? '多模态（支持图片）' : '纯文本'],
     ['令牌类型', m.token_type === 'one_time' ? '一次性' : m.token_type === 'rolling_5h' ? '5h 窗口（5h限额）' : '每日刷新'],
     [(m.token_type === 'rolling_5h' ? '5h 窗口限额' : '每日上限'), m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : ' Token') : '不限'],
     ['上下文窗口', m.context_window ? m.context_window.toLocaleString() : '不限'],
@@ -1731,7 +1732,7 @@ async function testConnectivity() {
   try {
     const result = await api('/admin/test_model', {
       method: 'POST',
-      body: JSON.stringify({ base_url, api_key, protocol, model_name })
+      body: JSON.stringify({ base_url, api_key, protocol, model_name, modality: f.elements.modality ? f.elements.modality.value : 'text' })
     });
     if (!result) return;
     const r = result.result;

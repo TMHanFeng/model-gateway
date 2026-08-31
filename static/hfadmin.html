@@ -166,6 +166,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 26px 24px 80px; }
 .b-once { background: rgba(167, 139, 250, 0.16); color: var(--purple); }
 .b-5h { background: rgba(251, 191, 36, 0.14); color: var(--amber); }
 .b-ghost { background: transparent; border: 1px solid var(--line-hi); color: var(--muted); }
+.b-embedding { background: rgba(167,139,250,.14); color: #a78bfa; }
 
 /* 开关 */
 .switch { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; font-size: 12.5px; color: var(--muted); user-select: none; }
@@ -821,7 +822,7 @@ function typeBadge(m) {
   return '<span class="badge b-ghost">每日</span>';
 }
 function freeBadge(m) { return m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>'; }
-function modBadge(m) { return m.modality === 'vision' ? '<span class="badge b-openai">多模态</span>' : '<span class="badge b-ghost">文本</span>'; }
+function modBadge(m) { return m.modality === 'embedding' ? '<span class="badge b-embedding">embedding</span>' : m.modality === 'vision' ? '<span class="badge b-openai">多模态</span>' : '<span class="badge b-ghost">文本</span>'; }
 function latTag(id) {
   const s = speedCache[id];
   if (!s) return '';
@@ -978,7 +979,7 @@ async function testConnectivity() {
   try {
     const result = await api('/admin/test_model', {
       method: 'POST',
-      body: JSON.stringify({ base_url, api_key, protocol, model_name })
+      body: JSON.stringify({ base_url, api_key, protocol, model_name, modality: f.elements.modality ? f.elements.modality.value : 'text' })
     });
     if (!result) return;
     const r = result.result;
@@ -1322,7 +1323,7 @@ function infoTip(id) {
     ['Base URL', p ? p.base_url : (m.base_url || '')],
     ['所属供应商', p ? `${p.name}（${p.id}）` : '—（独立内联）'],
     ['收费标注', m.is_free ? '免费' : '付费'],
-    ['模态', m.modality === 'vision' ? '多模态' : '纯文本'],
+    ['模态', m.modality === 'embedding' ? 'embedding（嵌入模型）' : m.modality === 'vision' ? '多模态' : '纯文本'],
     ['令牌', m.token_type === 'one_time' ? '一次性' : (m.token_type === 'rolling_5h' ? '5h 限额' : '每日')],
     [(m.token_type === 'rolling_5h' ? '5h 窗口限额' : '每日上限'), m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : ' Token') : '不限'],
     ['RPM/TPM', `${m.rpm_limit || '∞'}/${m.tpm_limit || '∞'}`],

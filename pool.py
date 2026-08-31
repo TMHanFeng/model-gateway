@@ -499,11 +499,17 @@ class ModelPool:
             return None, [{"model": override_id, "reason": "single_override_not_found"}]
 
         units = []
+        broken_refs = []
         for raw in meta.get("model_ids", []):
             if raw.startswith("pool:"):
-                units.append(("pool", raw[5:]))
+                if raw[5:] in self.pools:
+                    units.append(("pool", raw[5:]))
+                else:
+                    broken_refs.append(raw)
             elif raw in self.registry:
                 units.append(("model", self.registry[raw]))
+            else:
+                broken_refs.append(raw)
 
         if meta.get("auto_order"):
             threshold = int(meta.get("slow_latency_threshold", 3000))
@@ -516,6 +522,11 @@ class ModelPool:
                 self.round_robin[pool_name] = (idx + 1) % len(units)
 
         steps = []
+        # 引用失效显式记录：不再静默跳过（此前断裂引用会让 json 判定/选模无声失败）
+        for ref in broken_refs:
+            steps.append({"model": ref, "reason": "ref_not_found",
+                          "detail": {"hint": "引用的池或模型不存在，请检查池配置"}})
+            logger.warning(f"[引用失效] 池 '{pool_name}' 中的 '{ref}' 不存在，已跳过")
         for kind, val in units:
             if kind == "model":
                 entry = val
@@ -778,6 +789,10 @@ class ModelPool:
             return "单模型锁定：锁定模型不可用或调用失败，且兜底池无可用模型"
         if not steps:
             return "池为空或无匹配模型"
+        # 引用断裂：池配置里引用了不存在的池/模型（此前完全静默，只报笼统不可用）
+        broken = [str(s.get("model")) for s in steps if s.get("reason") == "ref_not_found"]
+        if broken:
+            return f"池配置存在失效引用: {'、'.join(broken[:5])}（引用的池或模型不存在）。请到模型池管理检查引用名称"
         # json 硬门槛：全部候选因 no_json_output 被拦 → 明确指引而非笼统的不可用提示
         if any(s.get("reason") == "no_json_output" for s in steps) and not attempted:
             return "请求要求 JSON 格式输出，但该池没有任何支持格式输出（json）的模型。请在模型管理勾选“支持格式输出（json）”（默认不支持）"
