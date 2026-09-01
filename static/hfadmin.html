@@ -352,8 +352,7 @@ select { max-width: 100%; }
 .seg button:hover { color: var(--text); }
 .seg button.active { background: #fff; color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1), 0 2px 8px rgba(0, 0, 0, 0.08); }
 
-/* 测速 */
-.speed-card .sp-big { font-family: var(--mono); font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+/* 测速延迟分级（模型卡 latTag 与池测速共用） */
 .sp-ok { color: #1b7a3d; }
 .sp-mid { color: #a04a00; }
 .sp-slow { color: #d70015; }
@@ -521,7 +520,6 @@ select { max-width: 100%; }
       <button class="tab active" data-tab="models">模型管理</button>
       <button class="tab" data-tab="pools">模型池</button>
       <button class="tab" data-tab="stats">用量统计</button>
-      <button class="tab" data-tab="speed">接口测速</button>
       <button class="tab" data-tab="logs">调用记录</button>
       <button class="tab" data-tab="keys">API 密钥</button>
     </nav>
@@ -583,18 +581,6 @@ select { max-width: 100%; }
       </div>
     </div>
     <div class="stat-grid" id="stats-grid"><div class="spinner"></div></div>
-  </section>
-
-  <!-- ════════ 接口测速 ════════ -->
-  <section class="tab-pane" id="pane-speed">
-    <div class="pane-head">
-      <div>
-        <div class="pane-title">接口测速</div>
-        <div class="pane-hint">向每个模型发送极短请求，测量首字延迟与吞吐；并发执行，不消耗配额。</div>
-      </div>
-      <div class="pane-actions"><button class="btn btn-amber" onclick="runSpeed()">⚡ 开始测速</button></div>
-    </div>
-    <div id="speed-results"><div class="hint">点击「开始测速」并发测试所有已注册模型。</div></div>
   </section>
 
   <!-- ════════ 调用记录 ════════ -->
@@ -882,7 +868,7 @@ function closeModal(id) { document.getElementById(id).classList.remove('show'); 
 function switchTab(name, el) {
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   el.classList.add('active');
-  const order = ['models', 'pools', 'stats', 'speed', 'logs', 'keys'];
+  const order = ['models', 'pools', 'stats', 'logs', 'keys'];
   order.forEach(t => {
     const pane = document.getElementById('pane-' + t);
     const isActive = t === name;
@@ -899,7 +885,6 @@ function switchTab(name, el) {
   if (name === 'models') loadModels();
   if (name === 'pools') loadPools();
   if (name === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 5000); }
-  if (name === 'speed') {}
   if (name === 'logs') { populateLogFilter(); loadDecisions(); }
   if (name === 'keys') loadKeys();
 }
@@ -1322,6 +1307,21 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
     const availPools = Object.keys(pdata.pools).filter(p => p !== name && p !== '兜底池' && !ids.includes('pool:' + p));
+    // 下拉按供应商顺序（reorder 持久化）分组排列，供应商内部保持列表原顺序；独立模型排最后
+    const provSeq = provdata ? provdata.providers : [];
+    const provIdx = new Map(provSeq.map((p, i) => [p.id, i]));
+    const sortedModels = availModels.slice().sort((a, b) =>
+      (a.provider_id && provIdx.has(a.provider_id) ? provIdx.get(a.provider_id) : 1e9) -
+      (b.provider_id && provIdx.has(b.provider_id) ? provIdx.get(b.provider_id) : 1e9));
+    const groupedModels = [];
+    sortedModels.forEach(m => {
+      const p = m.provider_id ? providerLookup[m.provider_id] : null;
+      const label = p ? `${p.name}（${p.id}）` : '独立模型（未挂供应商）';
+      if (!groupedModels.length || groupedModels[groupedModels.length - 1].label !== label) groupedModels.push({ label, items: [] });
+      groupedModels[groupedModels.length - 1].items.push(m);
+    });
+    const modelOpts = groupedModels.map(g => `<optgroup label="${esc(g.label)}">${g.items.map(m => `<option value="${esc(m.id)}">${esc(m.id)}（${esc(m.name || '')}）</option>`).join('')}</optgroup>`).join('');
+    const poolOpts = availPools.map(p => `<option value="pool:${esc(p)}">［池］${esc(p)}</option>`).join('');
     const isAuto = name === 'auto';
     const isFallback = name === '兜底池';
     const isDedicated = !!pool.owner_key_id;
@@ -1376,8 +1376,10 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
       <div class="add-model-row">
         <select id="addsel-${esc(name)}">
           <option value="">— 选择要加入的接口 / 子池 —</option>
-          <optgroup label="模型接口">${availModels.map(m => `<option value="${esc(m.id)}">${esc(m.id)}（${esc(m.name)}）</option>`).join('')}</optgroup>
-          <optgroup label="子模型池">${availPools.map(p => `<option value="pool:${esc(p)}">［池］${esc(p)}</option>`).join('')}</optgroup>
+          <option value="" disabled>====模型接口====</option>
+          ${modelOpts}
+          <option value="" disabled>====子池====</option>
+          ${poolOpts}
         </select>
         <button class="btn btn-ghost btn-sm" onclick="addToPool('${esc(name).replace(/'/g, "\\'")}')">＋ 加入</button>
       </div>
@@ -1776,34 +1778,6 @@ async function loadStats() {
   requestAnimationFrame(() => requestAnimationFrame(() => {
     grid.querySelectorAll('.stat-fill').forEach(f => { f.style.width = f.dataset.pct + '%'; });
   }));
-}
-
-/* ═══════════ 接口测速 ═══════════ */
-async function runSpeed() {
-  const el = document.getElementById('speed-results');
-  el.innerHTML = '<div class="hint"><span class="chip chip-wait">测速中…</span> 正在并发请求所有模型</div>';
-  const data = await api('/speedtest', { method: 'POST', body: '{}' });
-  if (!data) return;
-  el.innerHTML = data.results.map((r, i) => {
-    const latCls = r.status === 'ok' ? (r.latency_ms < 800 ? 'sp-ok' : r.latency_ms < 2500 ? 'sp-mid' : 'sp-slow') : 'sp-slow';
-    return `
-    <div class="card speed-card" style="animation-delay:${i * 50}ms">
-      <div class="card-head">
-        <div>
-          <div class="card-title mono">${esc(r.model_id)}</div>
-          <div class="card-sub">${esc(r.model_name || '')} · ${esc(r.provider || '')}</div>
-        </div>
-        <span class="chip ${r.status === 'ok' ? 'chip-ok' : r.status === 'rate_limited' ? 'chip-wait' : 'chip-err'}">${r.status === 'ok' ? '正常' : r.status === 'rate_limited' ? '限流' : '失败'}</span>
-      </div>
-      <div class="grid">
-        <div>延迟 <b class="sp-big ${latCls}">${r.latency_ms ?? '—'}</b> ms</div>
-        <div>吞吐 <b class="sp-big">${r.tps ?? '—'}</b> tok/s</div>
-        <div>消耗 <b>${r.tokens ?? '—'}</b> tokens</div>
-        ${r.error ? `<div>错误 <b style="color:var(--red)">${esc(r.error)}</b></div>` : ''}
-      </div>
-    </div>`;
-  }).join('');
-  toast('测速完成');
 }
 
 /* ═══════════ 调用记录 ═══════════ */

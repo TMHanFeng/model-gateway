@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.8.0-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.8.1-orange)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 
 对外暴露 **OpenAI 兼容**与 **Anthropic Messages** 接口，
@@ -327,7 +327,6 @@ Anthropic 适配器自动完成：
 | 📦 **模型管理** | 增删改模型接口；标注免费/付费、纯文本/多模态/嵌入/重排、计费模式；同名模型自动归入大池子；**模型条目可拖拽排序并持久化** |
 | 🪆 **模型池** | 新增/删除池；拖拽 ⠿ 调整优先级与池内模型顺序；加入模型或子池；开关"自动择优"；**配置延迟阈值 ms（0=不限）**；⚡ 测速本池；**从兜底池卡片一键选择为哪些池兜底**；悬停 ⓘ 查看接口详情 |
 | 📊 **用量统计** | 卡片式可视化，横向进度条展示 已用/总量（青→琥珀→红分级），支持 **计费量 / 调用次数 / Token 用量** 三维度切换，每 5 秒自动刷新 |
-| ⚡ **接口测速** | 并发测试所有模型的延迟与吞吐 |
 | 📜 **调用记录** | 每次调用的完整选模过程与切换依据（选中/排除原因），支持按池筛选 |
 
 ### 调用记录的原因标签（v2.3.4+）
@@ -451,12 +450,13 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
-**`v2.8.0`** — 新增 **rerank（重排）模型支持**：`/v1/rerank` 端点（Jina/Cohere/SiliconFlow 兼容格式，响应完全透传上游）；`rerank` 作为第三种专用模态进模型池（双向硬门槛路由 + 自动切换 + 计费复用，与 embedding 同构）；模型测试按模态分流（`/rerank` 连通性测试）；双管理面板新增 rerank 徽章与模态选项；池门槛同时拦截 anthropic 协议模型的 embedding/rerank 误配（此前会 500）
+**`v2.8.1`** — 池配置「加入模型」下拉**按供应商分组排序**（供应商顺序 = 供应商页 reorder 持久化顺序，组内保持模型列表原顺序，独立模型排最后），新增 `====模型接口====` / `====子池====` 分割标题；**移除「接口测速」标签页**（池卡片 ⚡ 测速本池已覆盖该功能，`/speedtest` 接口保留）
 
 ### 历史（按时间倒序）
 
 | 版本 | 主要变更 |
 |:---|:---|
+| **v2.8.0** | rerank（重排）模型支持：`/v1/rerank` 端点（Jina/Cohere/SiliconFlow 兼容）；第三种专用模态进模型池（双向硬门槛 + 自动切换 + 计费复用）；test_model 按模态分流；双面板 rerank 徽章；anthropic 协议 embedding/rerank 误配拦截 |
 | **v2.7.2** | 池配置引用失效显式记录（ref_not_found）；test_model 按模态分流（embedding 直测）；双面板 embedding 徽章；load_balance 轮转语义确认 |
 | **v2.7.1** | json 严格路由：移除兼容降级，无 json 模型时 503 + 勾选指引 |
 | **v2.7.0** | embedding 支持 + json 输出门槛；Ollama/WebUI 探测端点兼容；日志体系升级 + --port 参数；前端 json_output/extra_params |

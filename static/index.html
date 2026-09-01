@@ -257,11 +257,6 @@ body {
   .stats-grid { grid-template-columns: 1fr; }
 }
 .num-big { font-family: var(--mono); font-weight: 600; font-size: 14px; }
-
-/* ── 测速 ── */
-.speed-card .lat { font-family: var(--mono); font-size: 22px; font-weight: 700; }
-.speed-ok-c { color: var(--teal); }
-.speed-err-c { color: var(--red); }
 .chip { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-family: var(--mono); }
 .chip-ok { background: var(--teal-dim); color: var(--teal); }
 .chip-err { background: var(--red-dim); color: var(--red); }
@@ -349,7 +344,6 @@ body {
     <div class="tab active" data-tab="models">模型管理<span class="count" id="cnt-models"></span></div>
     <div class="tab" data-tab="pools">模型池</div>
     <div class="tab" data-tab="stats">用量统计</div>
-    <div class="tab" data-tab="speed">接口测速</div>
     <div class="tab" data-tab="logs">调用记录</div>
     <div class="tab" data-tab="keys">API 密钥</div>
   </div>
@@ -388,14 +382,6 @@ body {
       <button class="btn btn-ghost btn-sm" onclick="loadStats()">手动刷新</button>
     </div>
     <div id="stats-grid" class="stats-grid"></div>
-  </div>
-
-  <div id="tab-speed" class="hidden">
-    <div class="toolbar">
-      <div class="hint">向每个模型发送一条极短请求，测量首字延迟与吞吐。并发执行，不会明显消耗配额。</div>
-      <button class="btn btn-amber" onclick="runSpeed()">开始测速</button>
-    </div>
-    <div id="speed-results"></div>
   </div>
 
   <div id="tab-logs" class="hidden">
@@ -619,7 +605,7 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
 function switchTab(name, el) {
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   el.classList.add('active');
-  ['models','pools','stats','speed','logs','keys'].forEach(t => document.getElementById('tab-' + t).classList.toggle('hidden', t !== name));
+  ['models','pools','stats','logs','keys'].forEach(t => document.getElementById('tab-' + t).classList.toggle('hidden', t !== name));
   clearInterval(statsTimer);
   if (name === 'models') loadModels();
   if (name === 'pools') loadPools();
@@ -811,6 +797,21 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
     const availPools = Object.keys(pdata.pools).filter(p => p !== name && p !== '兜底池' && !ids.includes('pool:' + p));
+    // 下拉按供应商顺序（reorder 持久化）分组排列，供应商内部保持列表原顺序；独立模型排最后
+    const provSeq = provdata ? provdata.providers : [];
+    const provIdx = new Map(provSeq.map((p, i) => [p.id, i]));
+    const sortedModels = availModels.slice().sort((a, b) =>
+      (a.provider_id && provIdx.has(a.provider_id) ? provIdx.get(a.provider_id) : 1e9) -
+      (b.provider_id && provIdx.has(b.provider_id) ? provIdx.get(b.provider_id) : 1e9));
+    const groupedModels = [];
+    sortedModels.forEach(m => {
+      const p = m.provider_id ? providerLookup[m.provider_id] : null;
+      const label = p ? `${p.name}（${p.id}）` : '独立模型（未挂供应商）';
+      if (!groupedModels.length || groupedModels[groupedModels.length - 1].label !== label) groupedModels.push({ label, items: [] });
+      groupedModels[groupedModels.length - 1].items.push(m);
+    });
+    const modelOpts = groupedModels.map(g => `<optgroup label="${esc(g.label)}">${g.items.map(m => `<option value="${esc(m.id)}">${esc(m.id)}（${esc(m.name || '')}）</option>`).join('')}</optgroup>`).join('');
+    const poolOpts = availPools.map(p => `<option value="pool:${esc(p)}">［池］${esc(p)}</option>`).join('');
     const isAuto = name === 'auto';
     const isFallback = name === '兜底池';
     const isDedicated = !!pool.owner_key_id;
@@ -874,12 +875,10 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
       <div class="add-model-row">
         <select id="addsel-${name}">
           <option value="">— 选择要加入的接口 / 子池 —</option>
-          <optgroup label="模型接口">
-            ${availModels.map(m => `<option value="${m.id}">${m.id}（${m.name}）</option>`).join('')}
-          </optgroup>
-          <optgroup label="子模型池">
-            ${availPools.map(p => `<option value="pool:${p}">［池］${p}</option>`).join('')}
-          </optgroup>
+          <option value="" disabled>====模型接口====</option>
+          ${modelOpts}
+          <option value="" disabled>====子池====</option>
+          ${poolOpts}
         </select>
         <button class="btn btn-ghost btn-sm" onclick="addToPool('${name}')">＋ 加入</button>
       </div>
@@ -1359,27 +1358,6 @@ async function loadStats() {
   requestAnimationFrame(() => requestAnimationFrame(() => {
     grid.querySelectorAll('.stat-fill').forEach(f => { f.style.width = f.dataset.pct + '%'; });
   }));
-}
-
-async function runSpeed() {
-  const el = document.getElementById('speed-results');
-  el.innerHTML = '<div class="hint"><span class="chip chip-wait">测速中…</span> 正在并发请求所有模型</div>';
-  const data = await api('/speedtest', { method: 'POST', body: '{}' });
-  if (!data) return;
-  el.innerHTML = data.results.map((r, i) => `
-    <div class="card speed-card" style="animation-delay:${i * 50}ms">
-      <div class="card-head">
-        <div><div class="card-title">${esc(r.model_id)}</div><div class="card-sub">${esc(r.model_name || '')} · ${esc(r.provider || '')}</div></div>
-        <span class="chip ${r.status === 'ok' ? 'chip-ok' : 'chip-err'}">${r.status === 'ok' ? '正常' : r.status === 'rate_limited' ? '限流' : '失败'}</span>
-      </div>
-      <div class="grid">
-        <div>延迟 <b class="lat ${r.status === 'ok' ? 'speed-ok-c' : 'speed-err-c'}" style="font-size:16px">${r.latency_ms ?? '—'}</b> ms</div>
-        <div>吞吐 <b>${r.tps ?? '—'}</b> tok/s</div>
-        <div>消耗 <b>${r.tokens ?? '—'}</b> tokens</div>
-        ${r.error ? `<div>错误 <b style="color:var(--red)">${r.error}</b></div>` : ''}
-      </div>
-    </div>`).join('');
-  toast('测速完成');
 }
 
 const REASON_BASE = {
