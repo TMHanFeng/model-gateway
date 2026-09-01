@@ -648,12 +648,10 @@ select { max-width: 100%; }
         <div class="fg"><label>TPM 限制（0=不限）</label><input name="tpm_limit" type="number" value="0"></div>
         <div class="fg"><label>最大并发数（0=不限）</label><input name="max_concurrency" type="number" value="0"></div>
       </div>
-      <div class="f3">
+      <div class="f2">
         <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"></div>
-        <div class="fg"></div>
-        <div class="fg"></div>
+        <div class="fg"><label>每日刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
       </div>
-      <div class="fg"><label>每日刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
       <div id="once-fields" class="hidden">
         <div class="f3">
           <div class="fg"><label>一次性·最大 Token</label><input name="max_tokens" type="number" value="0"></div>
