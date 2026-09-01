@@ -32,6 +32,7 @@ from pathlib import Path
 # ── 配置 ──────────────────────────────────────────────────────────────
 SERVICE_NAME = "model-gateway.service"
 GATEWAY_PORT = 8650         # 网关端口（强制释放端口功能的目标）
+KILL_PORT_PASSWORD = "200202"  # 强制释放端口的操作密码（防误触，服务端校验）
 REPO_DIR = Path(__file__).parent
 CHECK_URL = "http://127.0.0.1:8650/health"
 CHECK_INTERVAL = 10          # 检测间隔（秒）
@@ -203,13 +204,6 @@ pre.journal{background:#1d1d1f;color:#f5f5f7;border-radius:10px;padding:12px 14p
     <div class="row"><span class="label">可用版本（更新/回滚）</span><select id="ver-select"><option value="">加载中…</option></select></div>
   </div>
 
-  <div class="card diag" id="diag-card">
-    <div class="card-title">诊断 <span class="dim" id="diag-hint">异常时显示具体报错</span></div>
-    <div class="diag-block" id="svc-detail-block" style="display:none"><div class="k">服务状态详情（systemctl）</div><pre class="journal" id="svc-detail"></pre></div>
-    <div class="diag-block" id="journal-block" style="display:none"><div class="k">网关日志尾部（journalctl）</div><pre class="journal" id="journal"></pre></div>
-    <div class="diag-block"><div class="k">异常时间线（最近 10 条）</div><div class="err-list" id="err-list"><div class="no-err">暂无异常记录</div></div></div>
-  </div>
-
   <div class="card">
     <div class="card-title">操作</div>
     <div class="actions" style="margin-top:0">
@@ -220,11 +214,18 @@ pre.journal{background:#1d1d1f;color:#f5f5f7;border-radius:10px;padding:12px 14p
       <button class="btn btn-red" onclick="doAction('stop')">⏹ 停止网关</button>
     </div>
     <div class="actions">
-      <button class="btn btn-red" onclick="killPort()" id="btn-killport" title="强杀占用 8650 端口的残留进程（异常退出后无法启动时用）">💀 强制释放端口</button>
+      <button class="btn btn-red" onclick="killPort()" id="btn-killport" title="强杀占用 8650 端口的残留进程（需输入操作密码）">💀 强制释放端口</button>
       <button class="btn btn-ghost" onclick="restartUpdater()" id="btn-restart-updater" title="重启 updater 自身（拉取最新 updater 后生效）；触发后面板自动探测恢复">♻️ 重启 updater</button>
       <button class="btn btn-ghost" onclick="restartTailscale()" id="btn-ts">📡 重启 Tailscale</button>
       <button class="btn btn-ghost" onclick="refreshVersions()" id="btn-refresh">🔄 刷新版本</button>
     </div>
+  </div>
+
+  <div class="card diag" id="diag-card">
+    <div class="card-title">诊断 <span class="dim" id="diag-hint">异常时显示具体报错</span></div>
+    <div class="diag-block" id="svc-detail-block" style="display:none"><div class="k">服务状态详情（systemctl）</div><pre class="journal" id="svc-detail"></pre></div>
+    <div class="diag-block" id="journal-block" style="display:none"><div class="k">网关日志尾部（journalctl）</div><pre class="journal" id="journal"></pre></div>
+    <div class="diag-block"><div class="k">异常时间线（最近 10 条）</div><div class="err-list" id="err-list"><div class="no-err">暂无异常记录</div></div></div>
   </div>
 
   <div class="progress" id="progress">__UP__</div>
@@ -288,8 +289,15 @@ async function loadVersions(){
   finally{var btn=document.getElementById('btn-refresh');if(btn){btn.textContent='🔄 刷新版本';btn.disabled=false}}
 }
 function refreshVersions(){loadVersions()}
+var CONFIRM_TIPS = {
+  update: '确定立即更新到最新版本吗？更新过程中网关会短暂中断。',
+  restart: '确定重启网关服务吗？重启期间所有调用会短暂中断。',
+  start: '确定启动网关服务吗？',
+  stop: '⚠️ 确定要停止网关服务吗？停止后所有调用将立即失败！'
+};
 async function doAction(action){
-  if(action==='stop'&&!confirm('确定要停止网关服务吗？'))return;
+  var tip = CONFIRM_TIPS[action];
+  if(tip && !confirm(tip))return;
   setBusy(true);showProgress('正在执行 '+action+' …');
   try{
     var r=await fetch('/action/'+action);var d=await r.json();
@@ -298,12 +306,15 @@ async function doAction(action){
   }catch(e){toast('❌ 请求失败: '+e,true);hideProgress();setBusy(false)}
 }
 async function killPort(){
-  if(!confirm('确定强制结束占用 8650 端口的进程吗？'))return;
+  var pwd=prompt('💀 强制释放端口将立即杀死占用 8650 端口的进程，可能导致服务中断！\n请输入操作密码以继续：');
+  if(pwd===null)return;
+  pwd=(pwd||'').trim();
+  if(!pwd){toast('❌ 未输入操作密码，已取消',true);return}
   setBusy(true);showProgress('正在强制释放端口 …');
   try{
-    var r=await fetch('/action/kill-port');var d=await r.json();
+    var r=await fetch('/action/kill-port',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});var d=await r.json();
     if(d.ok){toast('✅ '+(d.message||'端口已释放'));hideProgress();setBusy(false);setTimeout(fetchStatus,1500)}
-    else{toast('❌ '+(d.message||'释放失败'),true);hideProgress();setBusy(false)}
+    else{toast('❌ '+(d.error||d.message||'释放失败'),true);hideProgress();setBusy(false)}
   }catch(e){toast('❌ 请求失败: '+e,true);hideProgress();setBusy(false)}
 }
 async function restartUpdater(){
@@ -1616,8 +1627,19 @@ def handle_api_request(conn):
             response_body = json.dumps({"ok": ok, "action": "restart-tailscale"})
 
         elif path == "/action/kill-port":
-            ok, msg = kill_port_occupiers()
-            response_body = json.dumps({"ok": ok, "action": "kill-port", "message": msg}, ensure_ascii=False)
+            # 危险操作：必须 POST + 操作密码（服务端校验，防止误触/误调用）
+            pwd = ""
+            try:
+                payload = json.loads(body) if body else {}
+                pwd = str(payload.get("password") or "").strip()
+            except Exception:
+                pass
+            if pwd != KILL_PORT_PASSWORD:
+                record_error("端口清理", "强制释放端口被拒绝：操作密码错误")
+                response_body = json.dumps({"ok": False, "action": "kill-port", "error": "操作密码错误"}, ensure_ascii=False)
+            else:
+                ok, msg = kill_port_occupiers()
+                response_body = json.dumps({"ok": ok, "action": "kill-port", "message": msg}, ensure_ascii=False)
 
         elif path == "/action/restart-updater":
             if is_updating:

@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.9.0-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.9.1-orange)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 
 对外暴露 **OpenAI 兼容**与 **Anthropic Messages** 接口，
@@ -450,12 +450,13 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
-**`v2.9.0`** — **双管理面板手机适配**：hfadmin（≤760px）与 index（≤640px）完整响应式——顶栏两行排布（标签胶囊整行横向滚动）、面板头部/工具栏纵向堆叠、表单栅格单列、统计卡单列、按钮触控加高（≥38px）、弹窗满宽+按钮双列、加入模型行满宽堆叠、Toast 通栏；桌面端样式零改动
+**`v2.9.1`** — **守护面板交互安全加固**：诊断卡片移至操作卡片下方（状态 → 版本 → 操作 → 诊断）；所有操作按钮二次确认（立即更新/重启网关/启动网关/停止网关均有针对性确认文案，停止网关红色警告）；**强制释放端口需输入操作密码**（面板弹窗输入 + 服务端校验 `200202`，密码错误拒绝并记入异常时间线）
 
 ### 历史（按时间倒序）
 
 | 版本 | 主要变更 |
 |:---|:---|
+| **v2.9.0** | 双管理面板手机适配：hfadmin（≤760px）与 index（≤640px）完整响应式，桌面端零改动 |
 | **v2.8.5** | "重启 updater"交互闭环：按钮"重启中"态 + 已等待秒数倒计时 + 轮询 /health 自动探测恢复 + 45s 超时排查指引，修复静默失联 |
 | **v2.8.4** | 守护面板手机适配：≤560px 断点（状态卡 2×2、行上下堆叠、按钮双列满宽加高、Toast 通栏） |
 | **v2.8.3** | updater 守护服务加固：git 自愈（unmerged 温和恢复 + 硬重置云端兜底，杜绝死循环）；端口强杀（SIGKILL 升级 + 残留进程清理 + 面板按钮）；诊断增强（systemctl 状态行/journalctl 尾部/错误时间线上屏）；仪表盘重做（苹果浅色主题）；新增 /action/restart-updater |
