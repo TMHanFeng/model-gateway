@@ -221,7 +221,7 @@ pre.journal{background:#1d1d1f;color:#f5f5f7;border-radius:10px;padding:12px 14p
     </div>
     <div class="actions">
       <button class="btn btn-red" onclick="killPort()" id="btn-killport" title="强杀占用 8650 端口的残留进程（异常退出后无法启动时用）">💀 强制释放端口</button>
-      <button class="btn btn-ghost" onclick="restartUpdater()" id="btn-restart-updater" title="重启 updater 自身（拉取最新 updater 后生效）">♻️ 重启 updater</button>
+      <button class="btn btn-ghost" onclick="restartUpdater()" id="btn-restart-updater" title="重启 updater 自身（拉取最新 updater 后生效）；触发后面板自动探测恢复">♻️ 重启 updater</button>
       <button class="btn btn-ghost" onclick="restartTailscale()" id="btn-ts">📡 重启 Tailscale</button>
       <button class="btn btn-ghost" onclick="refreshVersions()" id="btn-refresh">🔄 刷新版本</button>
     </div>
@@ -307,12 +307,34 @@ async function killPort(){
   }catch(e){toast('❌ 请求失败: '+e,true);hideProgress();setBusy(false)}
 }
 async function restartUpdater(){
-  if(!confirm('确定重启 updater 吗？重启期间面板会短暂失联。'))return;
-  setBusy(true);showProgress('正在重启 updater …');
+  if(!confirm('确定重启 updater 吗？面板会失联数秒，恢复后会自动检测并就绪。'))return;
+  setBusy(true);
+  var btn=document.getElementById('btn-restart-updater');var oldTxt=btn.textContent;btn.textContent='⏳ 重启中…';
+  showProgress('♻️ 重启指令已发出，等待面板恢复…');
   try{
     var r=await fetch('/action/restart-updater');var d=await r.json();
-    if(d.ok){toast('♻️ '+(d.message||'已触发重启'))}else{toast('❌ '+(d.error||'重启失败'),true);hideProgress();setBusy(false)}
-  }catch(e){toast('❌ 请求失败: '+e,true)}
+    if(!d.ok){toast('❌ '+(d.error||'重启失败'),true);hideProgress();setBusy(false);btn.textContent=oldTxt;return}
+    toast('♻️ '+(d.message||'已触发重启'));
+  }catch(e){/* updater 可能在响应前就断开，继续走恢复探测 */}
+  var waited=0;
+  var t=setInterval(function(){
+    waited+=1.5;
+    showProgress('♻️ updater 重启中，已等待 '+Math.round(waited)+' 秒…');
+    fetch('/health',{cache:'no-store'}).then(function(r){return r.ok?r.json():null}).then(function(d){
+      if(d&&d.updater){
+        clearInterval(t);
+        toast('✅ updater 已恢复');
+        hideProgress();setBusy(false);btn.textContent=oldTxt;
+        fetchStatus();loadVersions();
+      }
+    }).catch(function(){});
+    if(waited>=45){
+      clearInterval(t);
+      showProgress('⚠️ 45 秒未恢复：请确认 updater 服务是否在运行（systemctl --user status model-gateway-updater），或查看服务器日志');
+      toast('⚠️ updater 长时间未恢复',true);
+      setBusy(false);btn.textContent=oldTxt;
+    }
+  },1500);
 }
 async function restartTailscale(){
   if(!confirm('确定要重启 Tailscale 吗？'))return;

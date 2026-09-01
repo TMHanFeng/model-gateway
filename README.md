@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.8.4-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.8.5-orange)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 
 对外暴露 **OpenAI 兼容**与 **Anthropic Messages** 接口，
@@ -450,12 +450,13 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
-**`v2.8.4`** — **守护面板手机适配**：新增 ≤560px 响应式断点——状态卡 2×2 网格、键值行改上下堆叠（长版本号/日期不再挤压）、按钮双列满宽并加高触控区（min-height 40px）、下拉满宽、导航与日志/时间线字号间距收紧、Toast 通栏显示
+**`v2.8.5`** — **"重启 updater"交互闭环**：修复点击后面板静默失联、按钮永久置灰像"没反应"的问题——触发后按钮显示"⏳ 重启中"、横幅每 1.5 秒显示已等待秒数，并轮询 `/health` 自动探测恢复（恢复即提示 ✅ 并自动刷新状态/版本，45 秒未恢复给出排查指引），updater 重启全程可感知
 
 ### 历史（按时间倒序）
 
 | 版本 | 主要变更 |
 |:---|:---|
+| **v2.8.4** | 守护面板手机适配：≤560px 断点（状态卡 2×2、行上下堆叠、按钮双列满宽加高、Toast 通栏） |
 | **v2.8.3** | updater 守护服务加固：git 自愈（unmerged 温和恢复 + 硬重置云端兜底，杜绝死循环）；端口强杀（SIGKILL 升级 + 残留进程清理 + 面板按钮）；诊断增强（systemctl 状态行/journalctl 尾部/错误时间线上屏）；仪表盘重做（苹果浅色主题）；新增 /action/restart-updater |
 | **v2.8.2** | 模型级超时时间设置（120=默认/0=无限等待/指定秒数，解决本地非流式模型被 120s 误判超时）；OpenAI/Anthropic 适配器按模型独立超时；双面板表单同步；旧配置完全兼容 |
 | **v2.8.1** | 池配置「加入模型」下拉按供应商分组排序（供应商持久化顺序 + 组内原顺序，独立模型排最后），新增 `====模型接口====` / `====子池====` 分割标题；移除「接口测速」标签页（⚡ 测速本池已覆盖，`/speedtest` 保留） |
