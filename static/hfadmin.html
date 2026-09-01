@@ -481,11 +481,38 @@ select { max-width: 100%; }
 @media (max-width: 760px) {
   .f2, .f3 { grid-template-columns: 1fr; }
   .usage-grid { grid-template-columns: repeat(6, 1fr); }
-  .nav-inner { padding: 0 14px; gap: 10px; }
+  /* 顶栏两行：品牌+密钥一行，标签胶囊整行横向滚动 */
+  .nav-inner { flex-wrap: wrap; height: auto; padding: 9px 12px; gap: 8px; }
+  .logo { font-size: 14px; gap: 7px; }
+  .logo-mark { width: 24px; height: 24px; font-size: 12px; }
+  .nav-right { margin-left: auto; gap: 6px; }
+  .key-pill { padding: 4px 10px; font-size: 11.5px; }
+  .tabs { order: 3; flex-basis: 100%; }
   /* 窄屏不隐藏版本号，仅压缩展示（版本信息始终可见） */
   .version { font-size: 10.5px; padding: 3px 8px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pane-title { font-size: 24px; }
-  main { padding: 26px 14px 70px; }
+  .pane-title { font-size: 22px; }
+  main { padding: 22px 12px 70px; }
+  /* 面板头部与操作区纵向堆叠 */
+  .pane-head { flex-direction: column; align-items: stretch; gap: 12px; margin-bottom: 18px; }
+  .pane-hint { font-size: 12.5px; }
+  .pane-actions { justify-content: flex-start; }
+  /* 触控尺寸：按钮加高易点 */
+  .btn { min-height: 38px; }
+  .btn-sm { min-height: 32px; }
+  .seg button { min-height: 34px; }
+  /* 卡片与列表 */
+  .card { padding: 15px; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .stat-grid { grid-template-columns: 1fr; }
+  .checkbox-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+  .pool-item { padding: 10px 12px; gap: 8px; }
+  .add-model-row select { flex: 1 1 100%; min-width: 0; }
+  .add-model-row .btn { flex: 1; min-height: 38px; }
+  /* 弹窗窄屏满宽 */
+  .overlay { padding: 10px 10px 0; }
+  .modal { max-height: 92vh; padding: 18px 15px; border-radius: 14px; }
+  .modal-actions { flex-wrap: wrap; }
+  .modal-actions .btn { flex: 1 1 calc(50% - 8px); min-height: 42px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
