@@ -31,6 +31,7 @@ from pathlib import Path
 
 # ── 配置 ──────────────────────────────────────────────────────────────
 SERVICE_NAME = "model-gateway.service"
+GATEWAY_PORT = 8650         # 网关端口（强制释放端口功能的目标）
 REPO_DIR = Path(__file__).parent
 CHECK_URL = "http://127.0.0.1:8650/health"
 CHECK_INTERVAL = 10          # 检测间隔（秒）
@@ -73,6 +74,7 @@ update_progress = ""
 selected_source = "auto"  # "auto" / "github" / "gitee" / "gitee_first"
 version_cache = {}
 VERSION_CACHE_TTL = 60
+error_timeline = []  # 最近异常事件（含启动/重启/异常退出的具体报错），仪表盘"诊断"卡片展示
 
 # ── 全局版本缓存（后台线程写，前端秒读） ──
 _global_version_cache = {
@@ -80,7 +82,7 @@ _global_version_cache = {
     "github": "—", "github_date": None,
 }
 
-# ── 网页仪表盘 HTML ──────────────────────────────────────────────────
+# ── 网页仪表盘 HTML（苹果风浅色主题，与 hfadmin 同风格）──────────────
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -89,112 +91,245 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>守护面板 · 模型网关</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:#0d1420;color:#e8edf5;min-height:100vh;display:flex;align-items:center;justify-content:center;background-image:radial-gradient(900px 500px at 8% -10%,rgba(45,212,191,.06),transparent 60%),radial-gradient(rgba(255,255,255,.028) 1px,transparent 1px);background-size:auto,26px 26px;background-attachment:fixed}
-.card{background:#161f2e;border:1px solid #243044;border-radius:12px;padding:32px;width:520px;max-width:calc(100vw - 32px);box-shadow:0 20px 60px rgba(0,0,0,.5);animation:rise .35s ease both}
-@keyframes rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
-.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid #243044}
-.header .mark{font-family:ui-monospace,"SF Mono",Consolas,monospace;font-weight:700;font-size:13px;color:#f5a524;border:1px solid rgba(245,165,36,.4);padding:3px 8px;border-radius:5px;background:rgba(245,165,36,.12);letter-spacing:1px}
-.header h1{font-size:18px;font-weight:700;letter-spacing:.5px}
-.header h1 small{font-size:12px;color:#8b98ac;font-weight:400;margin-left:6px}
-.clock{font-family:ui-monospace,"SF Mono",Consolas,monospace;font-size:12px;color:#8b98ac}
-.row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid rgba(36,48,68,.5)}
+body{font-family:"PingFang SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;background:#f5f5f7;color:#1d1d1f;min-height:100vh}
+main{max-width:760px;margin:0 auto;padding:28px 20px 70px}
+/* 顶部导航（小面积毛玻璃，卡片不用 backdrop-filter，规避合成器卡顿） */
+.nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.75);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px);border-bottom:1px solid rgba(0,0,0,.08)}
+.nav-inner{max-width:760px;margin:0 auto;padding:13px 20px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:9px;font-size:15.5px;font-weight:700;letter-spacing:.2px}
+.logo-mark{display:inline-flex;width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#0071e3,#42a5f5);color:#fff;align-items:center;justify-content:center;font-size:13px;font-weight:800;box-shadow:0 2px 8px rgba(0,113,227,.35)}
+.clock{font-family:ui-monospace,"SF Mono",Consolas,monospace;font-size:12px;color:#86868b}
+/* 卡片 */
+.card{background:#fff;border:1px solid rgba(0,0,0,.06);border-radius:16px;padding:20px 22px;margin-top:16px;box-shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.05);animation:cardIn .32s cubic-bezier(.22,1,.36,1) both}
+@keyframes cardIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.card-title{font-size:13px;font-weight:700;color:#86868b;letter-spacing:.3px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between}
+/* 状态胶囊 */
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:16px}
+.stat{background:#fff;border:1px solid rgba(0,0,0,.06);border-radius:14px;padding:15px 17px;box-shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.05);animation:cardIn .32s cubic-bezier(.22,1,.36,1) both}
+.stat .k{font-size:12px;color:#86868b;margin-bottom:7px}
+.stat .v{font-size:17px;font-weight:700;display:flex;align-items:center;gap:8px}
+.dot{width:9px;height:9px;border-radius:50%;flex:none}
+.dot.ok{background:#34c759;box-shadow:0 0 0 3px rgba(52,199,89,.18);animation:pulse 2.2s ease infinite}
+.dot.err{background:#ff3b30;box-shadow:0 0 0 3px rgba(255,59,48,.16)}
+.dot.dim{background:#c7c7cc}
+.dot.warn{background:#ff9f0a;box-shadow:0 0 0 3px rgba(255,159,10,.16)}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 3px rgba(52,199,89,.18)}50%{box-shadow:0 0 0 5px rgba(52,199,89,.08)}}
+/* 行 */
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid rgba(0,0,0,.05);font-size:13.5px}
 .row:last-child{border-bottom:none}
-.label{font-size:13px;color:#8b98ac}
-.value{font-family:ui-monospace,"SF Mono",Consolas,monospace;font-size:13px;font-weight:500}
-.ok{color:#2dd4bf}
-.err{color:#f87171}
-.neutral{color:#e8edf5}
-.upd{color:#f5a524}
-.actions{display:flex;gap:10px;margin-top:22px;flex-wrap:wrap}
-.btn{flex:1;padding:11px 0;border-radius:8px;border:1px solid transparent;cursor:pointer;font-size:14px;font-weight:600;font-family:inherit;transition:all .16s ease;text-align:center;min-width:100px}
+.label{color:#86868b;flex:none}
+.value{font-family:ui-monospace,"SF Mono",Consolas,monospace;font-size:12.5px;font-weight:500;text-align:right;word-break:break-all}
+.ok{color:#1b7a3d}.err{color:#d70015}.neutral{color:#1d1d1f}.upd{color:#b25000}
+.dim{color:#86868b;font-size:11px;font-weight:400}
+/* 表单 */
+select{padding:7px 10px;border-radius:8px;background:#f5f5f7;color:#1d1d1f;border:1px solid rgba(0,0,0,.1);font-size:12.5px;font-family:ui-monospace,"SF Mono",Consolas,monospace;outline:none;max-width:300px;transition:border-color .16s}
+select:focus{border-color:#0071e3}
+/* 按钮 */
+.actions{display:flex;gap:9px;margin-top:14px;flex-wrap:wrap}
+.btn{padding:9px 16px;border-radius:980px;border:1px solid transparent;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:transform .16s ease,box-shadow .2s ease,background .16s,color .16s;text-align:center}
+.btn:hover{transform:translateY(-1px)}
 .btn:active{transform:scale(.96)}
-.btn-amber{background:#f5a524;color:#1a1206}
-.btn-amber:hover{background:#ffb63d;box-shadow:0 0 0 3px rgba(245,165,36,.2)}
-.btn-green{background:#2dd4bf;color:#0d1420}
-.btn-green:hover{background:#5eead4;box-shadow:0 0 0 3px rgba(45,212,191,.2)}
-.btn-red{background:transparent;color:#f87171;border-color:rgba(248,113,113,.35)}
-.btn-red:hover{background:rgba(248,113,113,.12)}
-.btn-ghost{background:transparent;color:#8b98ac;border-color:#33445e}
-.btn-ghost:hover{color:#e8edf5;border-color:#8b98ac}
-.btn:disabled{opacity:.5;cursor:not-allowed;transform:none!important}
-.sel{flex:1;padding:9px 10px;border-radius:8px;background:#0d1420;color:#e8edf5;border:1px solid #33445e;font-size:13px;font-family:ui-monospace,"SF Mono",Consolas,monospace;outline:none;max-width:280px;min-width:0}
-.dim{color:#8b98ac;font-size:11px;font-weight:400}
-.progress{margin-top:14px;padding:10px 14px;background:rgba(245,165,36,.1);border:1px solid rgba(245,165,36,.3);border-radius:8px;font-size:13px;color:#f5a524;display:none;animation:rise .25s ease both}
+.btn-primary{background:#0071e3;color:#fff}
+.btn-primary:hover{background:#0077ed;box-shadow:0 6px 16px rgba(0,113,227,.3)}
+.btn-ghost{background:#f5f5f7;color:#1d1d1f;border-color:rgba(0,0,0,.06)}
+.btn-ghost:hover{background:#ebebed;box-shadow:0 4px 12px rgba(0,0,0,.08)}
+.btn-red{background:transparent;color:#d70015;border-color:rgba(255,59,48,.35)}
+.btn-red:hover{background:rgba(255,59,48,.08)}
+.btn:disabled{opacity:.45;cursor:not-allowed;transform:none!important;box-shadow:none!important}
+/* 诊断 */
+.diag{border-left:3px solid #ff3b30}
+.diag.all-ok{border-left-color:#34c759}
+.diag-block{margin-top:10px}
+.diag-block .k{font-size:12px;color:#86868b;margin-bottom:5px;font-weight:600}
+pre.journal{background:#1d1d1f;color:#f5f5f7;border-radius:10px;padding:12px 14px;font-family:ui-monospace,"SF Mono",Consolas,monospace;font-size:11.5px;line-height:1.55;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+.err-list{display:flex;flex-direction:column;gap:6px}
+.err-item{background:rgba(255,59,48,.06);border:1px solid rgba(255,59,48,.14);border-radius:9px;padding:8px 12px;font-size:12.5px}
+.err-item .t{font-family:ui-monospace,"SF Mono",Consolas,monospace;color:#d70015;font-weight:600;margin-right:8px;font-size:11.5px}
+.err-item .s{color:#86868b;margin-right:8px;font-size:11.5px}
+.no-err{color:#1b7a3d;font-size:13px}
+/* 进度与提示 */
+.progress{margin-top:14px;padding:11px 16px;background:rgba(0,113,227,.08);border:1px solid rgba(0,113,227,.22);border-radius:11px;font-size:13px;color:#0071e3;display:none;animation:cardIn .25s ease both}
 .progress.show{display:block}
-.toast{position:fixed;right:20px;top:20px;z-index:100;display:flex;flex-direction:column;gap:8px}
-.toast-item{background:#1b2637;border:1px solid #33445e;border-left:3px solid #2dd4bf;color:#e8edf5;padding:10px 16px;border-radius:7px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.4);animation:slidein .25s cubic-bezier(.22,1,.36,1)}
-.toast-item.err{border-left-color:#f87171}
+.toast{position:fixed;right:18px;top:18px;z-index:100;display:flex;flex-direction:column;gap:8px}
+.toast-item{background:#fff;border:1px solid rgba(0,0,0,.08);border-left:3px solid #34c759;color:#1d1d1f;padding:10px 16px;border-radius:11px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.14);animation:slidein .25s cubic-bezier(.22,1,.36,1)}
+.toast-item.err{border-left-color:#ff3b30}
 @keyframes slidein{from{opacity:0;transform:translateX(30px)}}
 </style>
 </head>
 <body>
-<div class="card">
-  <div class="header">
-    <div><span class="mark">GW</span><h1>守护面板<small>updater &middot; 8651</small></h1></div>
-    <span class="clock" id="clock">__TS__</span>
+<div class="nav"><div class="nav-inner">
+  <div class="logo"><span class="logo-mark">◈</span>守护面板 <span class="dim" style="font-weight:400">updater · 8651</span></div>
+  <span class="clock" id="clock">__TS__</span>
+</div></div>
+<main>
+  <div class="stat-grid">
+    <div class="stat"><div class="k">服务状态</div><div class="v"><span class="dot __SC__" id="svc-dot"></span><span id="svc-status">__SV__</span></div></div>
+    <div class="stat"><div class="k">API 健康</div><div class="v"><span class="dot __AC__" id="api-dot"></span><span id="api-status">__AV__</span></div></div>
+    <div class="stat"><div class="k">Tailscale</div><div class="v"><span class="dot dim" id="ts-dot"></span><span id="ts-ip">__TI__</span></div></div>
+    <div class="stat"><div class="k">更新状态</div><div class="v"><span class="dot dim" id="upd-dot"></span><span id="upd-text" style="font-size:14px">加载中…</span></div></div>
   </div>
-  <div>
-    <div class="row"><span class="label">服务状态</span><span class="value __SC__" id="svc-status">__SV__</span></div>
-    <div class="row"><span class="label">API 健康</span><span class="value __AC__" id="api-status">__AV__</span></div>
-    <div class="row"><span class="label">网关版本</span><span class="value neutral" id="cur-ver">__CU__</span></div>
-    <div class="row"><span class="label">Gitee 版本</span><span class="value neutral" id="gitee-ver">加载中...</span></div>
-    <div class="row"><span class="label">GitHub 版本</span><span class="value neutral" id="github-ver">加载中...</span></div>
-    <div class="row"><span class="label">最新版本</span><span class="value upd" id="lat-ver">加载中...</span></div>
-    <div class="row"><span class="label">更新源</span><select class="sel" id="src-select" onchange="selectSource()"><option value="auto">自动（GitHub 优先）</option><option value="github">GitHub</option><option value="gitee">Gitee</option><option value="gitee_first">Gitee 优先</option></select></div>
-    <div class="row"><span class="label">可用版本</span><select class="sel" id="ver-select"><option value="">加载中...</option></select></div>
-    <div class="row"><span class="label">更新状态</span><span class="value neutral" id="upd-text">加载中...</span></div>
-    <div class="row"><span class="label">Tailscale</span><span class="value neutral" id="ts-ip">__TI__</span></div>
+
+  <div class="card">
+    <div class="card-title">版本 <span class="dim" id="cur-commit"></span></div>
+    <div class="row"><span class="label">网关运行版本</span><span class="value neutral" id="cur-ver">__CU__</span></div>
+    <div class="row"><span class="label">Gitee 最新</span><span class="value neutral" id="gitee-ver">加载中…</span></div>
+    <div class="row"><span class="label">GitHub 最新</span><span class="value neutral" id="github-ver">加载中…</span></div>
+    <div class="row"><span class="label">目标版本</span><span class="value upd" id="lat-ver">—</span></div>
+    <div class="row"><span class="label">更新源</span><select id="src-select" onchange="selectSource()"><option value="auto">自动（GitHub 优先）</option><option value="github">GitHub</option><option value="gitee">Gitee</option><option value="gitee_first">Gitee 优先</option></select></div>
+    <div class="row"><span class="label">可用版本（更新/回滚）</span><select id="ver-select"><option value="">加载中…</option></select></div>
   </div>
+
+  <div class="card diag" id="diag-card">
+    <div class="card-title">诊断 <span class="dim" id="diag-hint">异常时显示具体报错</span></div>
+    <div class="diag-block" id="svc-detail-block" style="display:none"><div class="k">服务状态详情（systemctl）</div><pre class="journal" id="svc-detail"></pre></div>
+    <div class="diag-block" id="journal-block" style="display:none"><div class="k">网关日志尾部（journalctl）</div><pre class="journal" id="journal"></pre></div>
+    <div class="diag-block"><div class="k">异常时间线（最近 10 条）</div><div class="err-list" id="err-list"><div class="no-err">暂无异常记录</div></div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">操作</div>
+    <div class="actions" style="margin-top:0">
+      <button class="btn btn-primary" onclick="doAction('update')" id="btn-update">🔄 立即更新</button>
+      <button class="btn btn-ghost" onclick="doRollback()" id="btn-rollback">⬇ 更新/回滚到所选版本</button>
+      <button class="btn btn-ghost" onclick="doAction('restart')">🔁 重启网关</button>
+      <button class="btn btn-ghost" onclick="doAction('start')">▶ 启动网关</button>
+      <button class="btn btn-red" onclick="doAction('stop')">⏹ 停止网关</button>
+    </div>
+    <div class="actions">
+      <button class="btn btn-red" onclick="killPort()" id="btn-killport" title="强杀占用 8650 端口的残留进程（异常退出后无法启动时用）">💀 强制释放端口</button>
+      <button class="btn btn-ghost" onclick="restartUpdater()" id="btn-restart-updater" title="重启 updater 自身（拉取最新 updater 后生效）">♻️ 重启 updater</button>
+      <button class="btn btn-ghost" onclick="restartTailscale()" id="btn-ts">📡 重启 Tailscale</button>
+      <button class="btn btn-ghost" onclick="refreshVersions()" id="btn-refresh">🔄 刷新版本</button>
+    </div>
+  </div>
+
   <div class="progress" id="progress">__UP__</div>
-  <div class="actions">
-    <button class="btn btn-amber" onclick="doAction('update')" id="btn-update">&#x1f504; 立即更新</button>
-    <button class="btn btn-amber" onclick="doRollback()" id="btn-rollback">&#x2b07; 更新/回滚到所选版本</button>
-    <button class="btn btn-green" onclick="doAction('restart')" id="btn-restart">&#x1f501; 重启网关</button>
-    <button class="btn btn-red" onclick="doAction('stop')" id="btn-stop">&#x23f9; 停止网关</button>
-    <button class="btn btn-ghost" onclick="doAction('start')" id="btn-start">&#x25b6; 启动网关</button>
-    <button class="btn btn-ghost" onclick="restartTailscale()" id="btn-ts" title="Tailscale 离线时手动恢复">&#x1f4e1; 重启 Tailscale</button>
-    <button class="btn btn-ghost" onclick="refreshVersions()" id="btn-refresh" title="重新查询远程版本">&#x1f504; 刷新版本</button>
-  </div>
-</div>
+</main>
 <div class="toast" id="toast"></div>
 <script>
 var pollTimer = null;
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function toast(msg,isErr){var d=document.createElement('div');d.className='toast-item'+(isErr?' err':'');d.textContent=msg;document.getElementById('toast').appendChild(d);setTimeout(function(){d.style.opacity='0';d.style.transition='opacity .3s';setTimeout(function(){d.remove()},300)},2600)}
 function showProgress(t){var p=document.getElementById('progress');p.textContent=t;p.classList.add('show')}
 function hideProgress(){document.getElementById('progress').classList.remove('show')}
-function setBusy(b){document.querySelectorAll('.actions .btn').forEach(function(x){x.disabled=b});if(b)startPoll();else stopPoll()}
+function setBusy(b){document.querySelectorAll('.btn').forEach(function(x){x.disabled=b});if(b)startPoll();else stopPoll()}
 function startPoll(){if(pollTimer)return;pollTimer=setInterval(fetchStatus,2000)}
 function stopPoll(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
-async function fetchStatus(){try{var r=await fetch('/status');if(!r.ok)return;var d=await r.json();document.getElementById('svc-status').textContent=d.service_active?'运行中':'已停止';document.getElementById('svc-status').className='value '+(d.service_active?'ok':'err');document.getElementById('api-status').textContent=d.api_healthy?'正常':'异常';document.getElementById('api-status').className='value '+(d.api_healthy?'ok':'err');document.getElementById('cur-ver').textContent=d.git.current+(d.git.commit?' · '+d.git.commit:'');document.getElementById('clock').textContent=d.timestamp.slice(0,19).replace('T',' ');var tsEl=document.getElementById('ts-ip');if(tsEl){var tsOn=!!d.tailscale_online;var tsIp=d.inner_address&&d.inner_address.ip?d.inner_address.ip:'';tsEl.textContent=tsOn?(tsIp||'在线'):'离线';tsEl.className='value '+(tsOn?'ok':'err')}var srcEl=document.getElementById('src-select');if(d.git.source&&srcEl.value!==d.git.source)srcEl.value=d.git.source;if(d.is_updating){showProgress(d.update_progress||'更新中...');setBusy(true)}else{hideProgress();setBusy(false)}}catch(e){}}
-async function loadVersions(){try{var btn=document.getElementById('btn-refresh');btn.textContent='⏳ 查询中...';btn.disabled=true;var r=await fetch('/remote-versions');var d=await r.json();var giteeV=(d.gitee&&d.gitee!=='unknown'?d.gitee:'—');var giteeD=d.gitee_date?String(d.gitee_date).slice(0,16):'';document.getElementById('gitee-ver').textContent=giteeV+(giteeD?' · '+giteeD:'');var ghV=(d.github&&d.github!=='unknown'?d.github:'—');var ghD=d.github_date?String(d.github_date).slice(0,16):'';document.getElementById('github-ver').textContent=ghV+(ghD?' · '+ghD:'');document.getElementById('lat-ver').textContent=d.latest||'—';document.getElementById('upd-text').textContent=d.has_update?'🔄 有可用更新':'✅ 已是最新';var sel=document.getElementById('ver-select');if(d.tags&&d.tags.length>0){sel.innerHTML='';d.tags.forEach(function(v){var o=document.createElement('option');o.value=v.tag;o.textContent=v.tag+' ['+v.src+']'+(v.date?' · '+String(v.date).slice(0,16):'');sel.appendChild(o)})}else{sel.innerHTML='<option value="">暂无</option>'}var srcEl=document.getElementById('src-select');if(d.source&&srcEl.value!==d.source)srcEl.value=d.source}catch(e){document.getElementById('upd-text').textContent='⚠ 查询失败，可点击刷新重试'}finally{var btn=document.getElementById('btn-refresh');if(btn){btn.textContent='🔄 刷新版本';btn.disabled=false}}}
+function setDot(id,cls){var e=document.getElementById(id);e.className='dot '+cls}
+async function fetchStatus(){
+  try{
+    var r=await fetch('/status');if(!r.ok)return;var d=await r.json();
+    var svcOk=!!d.service_active,apiOk=!!d.api_healthy;
+    document.getElementById('svc-status').textContent=svcOk?'运行中':'已停止';
+    setDot('svc-dot',svcOk?'ok':'err');
+    document.getElementById('api-status').textContent=apiOk?'正常':(svcOk?'异常':'未运行');
+    setDot('api-dot',apiOk?'ok':'err');
+    document.getElementById('cur-ver').textContent=d.git.current||'—';
+    document.getElementById('cur-commit').textContent=d.git.commit?('commit '+d.git.commit):'';
+    document.getElementById('clock').textContent=(d.timestamp||'').slice(0,19).replace('T',' ');
+    var tsOn=!!d.tailscale_online,tsIp=d.inner_address&&d.inner_address.ip?d.inner_address.ip:'';
+    document.getElementById('ts-ip').textContent=tsOn?(tsIp||'在线'):'离线';setDot('ts-dot',tsOn?'ok':'err');
+    var srcEl=document.getElementById('src-select');if(d.git.source&&srcEl.value!==d.git.source)srcEl.value=d.git.source;
+    if(d.is_updating){showProgress(d.update_progress||'更新中…');setBusy(true)}else{hideProgress();setBusy(false)}
+    /* 诊断区 */
+    var diag=document.getElementById('diag-card');
+    var bad=!svcOk||!apiOk;
+    diag.className='card diag'+(bad?'':' all-ok');
+    document.getElementById('diag-hint').textContent=bad?'检测到异常，具体原因如下':'服务正常';
+    var sd=d.service_detail||'';var sdBlk=document.getElementById('svc-detail-block');
+    if(sd){sdBlk.style.display='block';document.getElementById('svc-detail').textContent=sd}else{sdBlk.style.display='none'}
+    var jt=d.journal_tail||[];var jBlk=document.getElementById('journal-block');
+    if(jt.length){jBlk.style.display='block';document.getElementById('journal').textContent=jt.join('\n')}else{jBlk.style.display='none'}
+    var errs=d.recent_errors||[];var list=document.getElementById('err-list');
+    if(errs.length){list.innerHTML=errs.slice().reverse().map(function(e){return '<div class="err-item"><span class="t">'+esc(e.time)+'</span><span class="s">['+esc(e.source)+']</span>'+esc(e.message)+'</div>'}).join('')}
+    else{list.innerHTML='<div class="no-err">暂无异常记录</div>'}
+  }catch(e){}
+}
+async function loadVersions(){
+  try{
+    var btn=document.getElementById('btn-refresh');btn.textContent='⏳ 查询中…';btn.disabled=true;
+    var r=await fetch('/remote-versions');var d=await r.json();
+    var giteeV=(d.gitee&&d.gitee!=='—'&&d.gitee!=='unknown')?d.gitee:'—';var giteeD=d.gitee_date?String(d.gitee_date).slice(0,16):'';
+    document.getElementById('gitee-ver').textContent=giteeV+(giteeD?' · '+giteeD:'');
+    var ghV=(d.github&&d.github!=='—'&&d.github!=='unknown')?d.github:'—';var ghD=d.github_date?String(d.github_date).slice(0,16):'';
+    document.getElementById('github-ver').textContent=ghV+(ghD?' · '+ghD:'');
+    document.getElementById('lat-ver').textContent=d.latest||'—';
+    document.getElementById('upd-text').textContent=d.has_update?'有可用更新':'已是最新';
+    setDot('upd-dot',d.has_update?'warn':'ok');
+    var sel=document.getElementById('ver-select');
+    if(d.tags&&d.tags.length>0){sel.innerHTML='';d.tags.forEach(function(v){var o=document.createElement('option');o.value=v.tag;o.textContent=v.tag+' ['+v.src+']'+(v.date?' · '+String(v.date).slice(0,16):'');sel.appendChild(o)})}
+    else{sel.innerHTML='<option value="">暂无</option>'}
+    var srcEl=document.getElementById('src-select');if(d.source&&srcEl.value!==d.source)srcEl.value=d.source;
+  }catch(e){document.getElementById('upd-text').textContent='查询失败，可点刷新重试';setDot('upd-dot','err')}
+  finally{var btn=document.getElementById('btn-refresh');if(btn){btn.textContent='🔄 刷新版本';btn.disabled=false}}
+}
 function refreshVersions(){loadVersions()}
-async function doAction(action){if(action==='stop'&&!confirm('确定要停止网关服务吗？'))return;setBusy(true);showProgress('正在执行 '+action+' ...');try{var r=await fetch('/action/'+action);var d=await r.json();if(d.ok){toast('&#x2705; '+action+' 成功');showProgress(action+' 执行成功，正在等待服务就绪...');setTimeout(fetchStatus,1500)}else{toast('&#x274c; '+action+' 失败',true);hideProgress();setBusy(false)}}catch(e){toast('&#x274c; 请求失败: '+e,true);hideProgress();setBusy(false)}}
-async function restartTailscale(){if(!confirm('确定要重启 Tailscale 吗？'))return;setBusy(true);showProgress('正在恢复 Tailscale ...');try{var r=await fetch('/action/restart-tailscale');var d=await r.json();if(d.ok){toast('&#x2705; Tailscale 保活成功');hideProgress();setBusy(false);setTimeout(fetchStatus,3000)}else{toast('&#x274c; Tailscale 恢复失败',true);hideProgress();setBusy(false)}}catch(e){toast('&#x274c; 请求失败: '+e,true);hideProgress();setBusy(false)}}
+async function doAction(action){
+  if(action==='stop'&&!confirm('确定要停止网关服务吗？'))return;
+  setBusy(true);showProgress('正在执行 '+action+' …');
+  try{
+    var r=await fetch('/action/'+action);var d=await r.json();
+    if(d.ok){toast('✅ '+action+' 成功');showProgress(action+' 执行成功，等待服务就绪…');setTimeout(fetchStatus,1500)}
+    else{toast('❌ '+action+' 失败'+(d.message?'：'+d.message:''),true);hideProgress();setBusy(false);fetchStatus()}
+  }catch(e){toast('❌ 请求失败: '+e,true);hideProgress();setBusy(false)}
+}
+async function killPort(){
+  if(!confirm('确定强制结束占用 8650 端口的进程吗？'))return;
+  setBusy(true);showProgress('正在强制释放端口 …');
+  try{
+    var r=await fetch('/action/kill-port');var d=await r.json();
+    if(d.ok){toast('✅ '+(d.message||'端口已释放'));hideProgress();setBusy(false);setTimeout(fetchStatus,1500)}
+    else{toast('❌ '+(d.message||'释放失败'),true);hideProgress();setBusy(false)}
+  }catch(e){toast('❌ 请求失败: '+e,true);hideProgress();setBusy(false)}
+}
+async function restartUpdater(){
+  if(!confirm('确定重启 updater 吗？重启期间面板会短暂失联。'))return;
+  setBusy(true);showProgress('正在重启 updater …');
+  try{
+    var r=await fetch('/action/restart-updater');var d=await r.json();
+    if(d.ok){toast('♻️ '+(d.message||'已触发重启'))}else{toast('❌ '+(d.error||'重启失败'),true);hideProgress();setBusy(false)}
+  }catch(e){toast('❌ 请求失败: '+e,true)}
+}
+async function restartTailscale(){
+  if(!confirm('确定要重启 Tailscale 吗？'))return;
+  setBusy(true);showProgress('正在恢复 Tailscale …');
+  try{
+    var r=await fetch('/action/restart-tailscale');var d=await r.json();
+    if(d.ok){toast('✅ Tailscale 保活成功');hideProgress();setBusy(false);setTimeout(fetchStatus,3000)}
+    else{toast('❌ Tailscale 恢复失败',true);hideProgress();setBusy(false)}
+  }catch(e){toast('❌ 请求失败: '+e,true);hideProgress();setBusy(false)}
+}
 function verKey(t){var m=String(t).match(/[vV]?([0-9]+(?:[.][0-9]+)*)/);if(!m)return 0;var a=m[1].split('.').map(function(n){return parseInt(n,10)||0});for(var i=0;i<3;i++){if(!a[i])a[i]=0}return a[0]*10000+a[1]*100+a[2]}
-function mergeVersions(d){var map={};(d.gitee||[]).forEach(function(v){map[v.tag]=v});(d.github||[]).forEach(function(v){if(map[v.tag]){map[v.tag].src='github/gitee'}else{map[v.tag]={tag:v.tag,date:v.date,src:'github'}}});return Object.keys(map).map(function(k){return map[k]}).sort(function(a,b){return verKey(b.tag)-verKey(a.tag)})}
- async function selectSource(){var s=document.getElementById('src-select').value;try{var r=await fetch('/select-source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:s})});var d=await r.json();toast(d.ok?'&#x2705; 已切换更新源: '+s:'&#x274c; 切换更新源失败',!d.ok)}catch(e){toast('&#x274c; 请求失败: '+e,true)}}
-async function doRollback(){var sel=document.getElementById('ver-select');var tag=sel.value;if(!tag){toast('&#x274c; 请先选择版本',true);return}if(!confirm('确定要更新/回滚到版本 '+tag+' 吗？'))return;setBusy(true);showProgress('正在切换 '+tag+' ...');try{var r=await fetch('/rollback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:tag})});var d=await r.json();if(d.ok){toast('&#x2705; 已开始切换 '+tag);showProgress('切换任务已提交，等待服务就绪...');setTimeout(fetchStatus,1500)}else{toast('&#x274c; '+(d.error||'切换失败'),true);hideProgress();setBusy(false)}}catch(e){toast('&#x274c; 请求失败: '+e,true);hideProgress();setBusy(false)}}
-// 页面加载后：立即查询远程版本（异步，不阻塞）
+ async function selectSource(){
+  var s=document.getElementById('src-select').value;
+  try{var r=await fetch('/select-source',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:s})});var d=await r.json();toast(d.ok?'✅ 已切换更新源: '+s:'❌ 切换更新源失败',!d.ok)}catch(e){toast('❌ 请求失败: '+e,true)}
+}
+async function doRollback(){
+  var sel=document.getElementById('ver-select');var tag=sel.value;
+  if(!tag){toast('❌ 请先选择版本',true);return}
+  if(!confirm('确定要更新/回滚到版本 '+tag+' 吗？'))return;
+  setBusy(true);showProgress('正在切换 '+tag+' …');
+  try{
+    var r=await fetch('/rollback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:tag})});var d=await r.json();
+    if(d.ok){toast('✅ 已开始切换 '+tag);showProgress('切换任务已提交，等待服务就绪…');setTimeout(fetchStatus,1500)}
+    else{toast('❌ '+(d.error||'切换失败'),true);hideProgress();setBusy(false)}
+  }catch(e){toast('❌ 请求失败: '+e,true);hideProgress();setBusy(false)}
+}
+fetchStatus();
 loadVersions();
+startPoll();
 </script>
 </body>
 </html>"""
 
+
 def render_dashboard(svc_class, svc_text, api_class, api_text, current, latest="加载中", update_text="加载中", tailscale_ip="—", update_progress="", timestamp="", gitee="—", github="—", gitee_date=None, github_date=None, source="auto"):
     h = DASHBOARD_HTML
-    gitee_text = gitee if gitee and gitee != "—" else "—"
-    if gitee_date:
-        gitee_text = f'{gitee_text}<small class="dim"> · {gitee_date}</small>'
-    github_text = github if github and github != "—" else "—"
-    if github_date:
-        github_text = f'{github_text}<small class="dim"> · {github_date}</small>'
     for old, new in [
-        ("__SC__", svc_class), ("__SV__", svc_text),
-        ("__AC__", api_class), ("__AV__", api_text),
-        ("__CU__", current), ("__GVR__", gitee_text), ("__HVR__", github_text), ("__LA__", latest),
-        ("__UT__", update_text), ("__TI__", tailscale_ip),
+        ("__SC__", "ok" if svc_class == "ok" else "err"), ("__SV__", svc_text),
+        ("__AC__", "ok" if api_class == "ok" else "err"), ("__AV__", api_text),
+        ("__CU__", current), ("__TI__", tailscale_ip),
         ("__UP__", update_progress or ""), ("__TS__", timestamp),
-        ("__SRC__", source),
     ]:
         h = h.replace(old, new)
     return h
@@ -534,9 +669,12 @@ def get_default_branch(remote: str = "origin") -> str:
 
 
 def git_pull(remote: str = "origin", branch: str = "") -> tuple[bool, str, str]:
-    """执行 git pull，返回 (成功, 输出信息, 实际使用的分支)"""
+    """执行 git pull，返回 (成功, 输出信息, 实际使用的分支)。
+    pull 失败（本地历史分叉/冲突残留）时，按授权策略硬重置到云端分支最新。"""
     if not branch:
         branch = get_default_branch(remote)
+    if not ensure_git_ready():
+        return False, "git index 处于冲突状态且自动恢复失败", branch
     try:
         # fetch
         result = subprocess.run(
@@ -564,8 +702,14 @@ def git_pull(remote: str = "origin", branch: str = "") -> tuple[bool, str, str]:
         )
         if result.returncode == 0:
             return True, result.stdout.strip(), branch
-        else:
-            return False, result.stderr.strip(), branch
+
+        # pull 失败：本地历史分叉（如远端 force push）/本地提交冲突 → 硬重置云端（已授权放弃本地提交）
+        log.warning(f"⚠️ git pull 失败（{(result.stderr or '').strip()[:160]}），尝试硬重置到云端...")
+        ok, msg = git_force_sync_to_remote(remote, branch)
+        if ok:
+            return True, msg, branch
+        record_error("git-pull", f"pull 与硬重置均失败: {(result.stderr or '').strip()[:200]}")
+        return False, f"pull failed: {(result.stderr or '').strip()}; 硬重置: {msg}", branch
     except Exception as e:
         return False, str(e), branch
 
@@ -799,27 +943,233 @@ def resolve_update_source(source: str | None = None) -> tuple[str, str]:
     return pick_latest_remote()
 
 
+# ── 诊断与自愈（v2.8.3，针对 2026-09-01 unmerged 死循环事故）──────────
+def record_error(source: str, message: str):
+    """记录异常事件到内存时间线（仪表盘"诊断"卡片展示），同时写日志。"""
+    entry = {"time": datetime.now().strftime("%m-%d %H:%M:%S"), "source": source,
+             "message": (message or "").strip()[:500]}
+    error_timeline.append(entry)
+    if len(error_timeline) > 30:
+        error_timeline.pop(0)
+    log.error(f"[{source}] {entry['message']}")
+
+
+def get_recent_errors(n: int = 10) -> list:
+    return list(error_timeline[-n:])
+
+
+def git_index_unmerged() -> bool:
+    """git index 是否处于 unmerged/冲突状态（事故根因：一旦 unmerged，pull/checkout/reset 全部被堵死）"""
+    try:
+        r = subprocess.run(["git", "ls-files", "-u"], capture_output=True, text=True, timeout=10, cwd=str(REPO_DIR))
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+    except Exception:
+        pass
+    return (REPO_DIR / ".git" / "MERGE_HEAD").exists()
+
+
+def git_force_sync_to_remote(remote: str = "origin", branch: str = "") -> tuple[bool, str]:
+    """放弃本地提交/修改，硬重置到云端分支最新（已授权策略）。
+    只动被 git 跟踪的文件；config.json / gateway.db / logs 等未跟踪运行时文件不受影响。"""
+    global update_progress
+    if not branch:
+        branch = get_default_branch(remote)
+    update_progress = f"硬重置到 {remote}/{branch}（放弃本地改动）..."
+    try:
+        fr = subprocess.run(["git", "fetch", remote, branch], capture_output=True, text=True, timeout=60, cwd=str(REPO_DIR))
+        if fr.returncode != 0:
+            return False, f"fetch 失败: {(fr.stderr or '').strip()[:200]}"
+        # reset --hard 清除 unmerged index 与本地修改；checkout -B 把分支指针挪到云端 FETCH_HEAD
+        subprocess.run(["git", "reset", "--hard"], capture_output=True, text=True, timeout=30, cwd=str(REPO_DIR))
+        co = subprocess.run(["git", "checkout", "-B", branch, "FETCH_HEAD"], capture_output=True, text=True, timeout=30, cwd=str(REPO_DIR))
+        if co.returncode != 0:
+            return False, f"checkout 失败: {(co.stderr or '').strip()[:200]}"
+        record_error("git-自愈", f"已放弃本地提交，硬重置到 {remote}/{branch}")
+        log.warning(f"⚠️ 已硬重置到 {remote}/{branch}（本地提交/修改被放弃，运行时文件未受影响）")
+        return True, f"已硬重置到 {remote}/{branch}"
+    except Exception as e:
+        return False, str(e)
+
+
+def ensure_git_ready() -> bool:
+    """git 操作前置保护：index 处于 unmerged/merge 态时自动恢复（先温和恢复，失败再硬重置），避免重蹈死循环覆辙。"""
+    global update_progress
+    if not git_index_unmerged():
+        return True
+    update_progress = "检测到 git 冲突残留，自动恢复..."
+    log.warning("⚠️ git index 处于 unmerged/merge 状态，自动恢复...")
+    subprocess.run(["git", "merge", "--abort"], capture_output=True, text=True, timeout=30, cwd=str(REPO_DIR))
+    subprocess.run(["git", "reset", "--merge"], capture_output=True, text=True, timeout=30, cwd=str(REPO_DIR))
+    if not git_index_unmerged():
+        log.info("✅ git index 已恢复（merge --abort + reset --merge）")
+        return True
+    ok, msg = git_force_sync_to_remote()
+    if ok:
+        return True
+    record_error("git-自愈", f"unmerged 状态无法恢复: {msg}")
+    return False
+
+
+# ── 端口占用清理（异常退出后端口残留导致无法启动的兜底）──────────────
+def find_port_pids(port: int = GATEWAY_PORT) -> list:
+    """找出监听指定端口的进程 PID（ss / fuser / lsof 依次尝试）"""
+    pids = []
+    try:
+        r = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            import re as _re
+            for line in r.stdout.splitlines():
+                if f":{port} " in line:
+                    for m in _re.findall(r"pid=(\d+)", line):
+                        if m not in pids:
+                            pids.append(m)
+    except Exception:
+        pass
+    if not pids:
+        try:
+            r = subprocess.run(["fuser", f"{port}/tcp"], capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                for tok in r.stdout.split():
+                    if tok.isdigit() and tok not in pids:
+                        pids.append(tok)
+        except Exception:
+            pass
+    if not pids:
+        try:
+            r = subprocess.run(["lsof", "-t", "-i", f":{port}", "-s", "TCP:LISTEN"],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                for tok in r.stdout.split():
+                    tok = tok.strip()
+                    if tok.isdigit() and tok not in pids:
+                        pids.append(tok)
+        except Exception:
+            pass
+    return pids
+
+
+def kill_port_occupiers(port: int = GATEWAY_PORT) -> tuple[bool, str]:
+    """强制杀死占用端口的残留进程"""
+    pids = find_port_pids(port)
+    if not pids:
+        return True, f"端口 {port} 无占用进程"
+    log.warning(f"⚠️ 端口 {port} 被进程占用: {','.join(pids)}，强制结束...")
+    for pid in pids:
+        subprocess.run(["kill", "-9", pid], capture_output=True, text=True, timeout=10)
+    time.sleep(1)
+    rest = find_port_pids(port)
+    if rest:
+        record_error("端口清理", f"SIGKILL 后端口仍被占用: {','.join(rest)}")
+        return False, f"端口仍被占用: {','.join(rest)}"
+    record_error("端口清理", f"已强制结束占用端口的残留进程: {','.join(pids)}")
+    return True, f"已强制结束: {','.join(pids)}"
+
+
+def free_port_if_stale():
+    """服务未激活但端口被占 → 残留进程，强制清理（否则 start 后仍无法监听）"""
+    if is_port_open() and not is_service_active():
+        kill_port_occupiers()
+
+
+# ── 服务异常诊断（启动失败/异常退出的具体报错）───────────────────────
+def get_service_detail() -> str:
+    """systemctl status 关键行（Active/退出码/信号等），服务异常时展示具体原因"""
+    try:
+        r = subprocess.run(["systemctl", "--user", "status", SERVICE_NAME, "--no-pager", "-n", "5"],
+                           capture_output=True, text=True, timeout=10)
+        out = (r.stdout or r.stderr or "").strip()
+        keep = [ln.strip() for ln in out.splitlines()
+                if any(k in ln for k in ("Active:", "Main PID:", "Status:", "Process:", "code=", "signal="))]
+        return "\n".join(keep)[:800] or out[:400]
+    except Exception as e:
+        return f"获取服务状态失败: {e}"
+
+
+def get_journal_tail(lines: int = 15) -> list:
+    """网关服务最近的 journal 日志行（启动失败/异常退出的具体报错）"""
+    for base in (["journalctl", "--user", "-u", SERVICE_NAME, "-n", str(lines), "--no-pager", "-q"],
+                 ["journalctl", "-u", SERVICE_NAME, "-n", str(lines), "--no-pager", "-q"]):
+        try:
+            r = subprocess.run(base, capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return [ln[:200] for ln in r.stdout.strip().splitlines()[-lines:]]
+        except Exception:
+            continue
+    return []
+
+
+UPDATER_SERVICE_CANDIDATES = ("model-gateway-updater.service", "gateway-updater.service", "updater.service")
+
+
+def detect_updater_service() -> str:
+    """探测 updater 自身的 systemd 单元名（供"重启 updater"按钮）"""
+    for unit in UPDATER_SERVICE_CANDIDATES:
+        try:
+            r = subprocess.run(["systemctl", "--user", "cat", unit], capture_output=True, text=True, timeout=8)
+            if r.returncode == 0:
+                return unit
+        except Exception:
+            continue
+    return ""
+
+
+def restart_updater() -> tuple[bool, str]:
+    """重启 updater 自身。有 systemd 单元走 systemctl（延迟触发让 HTTP 响应先返回）；否则 exec 自身。"""
+    unit = detect_updater_service()
+    import threading
+
+    def _delayed():
+        time.sleep(0.8)
+        try:
+            if unit:
+                subprocess.run(["systemctl", "--user", "restart", unit], capture_output=True, text=True, timeout=20)
+                log.info(f"✅ 已重启 {unit}")
+            else:
+                log.warning("未找到 updater 的 systemd 单元，以 exec 方式重启自身")
+                os.execl(sys.executable, sys.executable, str(Path(__file__).resolve()))
+        except Exception as e:
+            log.error(f"重启 updater 失败: {e}")
+
+    threading.Thread(target=_delayed, daemon=True).start()
+    if unit:
+        return True, f"已触发重启 {unit}"
+    return True, "未找到 systemd 单元，将以脚本方式重启自身"
+
+
 # ── 服务管理 ──────────────────────────────────────────────────────────
 def stop_service() -> bool:
-    """停止 model-gateway 服务"""
+    """停止 model-gateway 服务。stop 卡住/端口未释放时升级 SIGKILL，并清理残留端口占用。"""
     try:
         result = subprocess.run(
             ["systemctl", "--user", "stop", SERVICE_NAME],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=30,
         )
-        if result.returncode == 0:
-            log.info("✅ 服务已停止")
-            return True
-        else:
-            log.error(f"❌ 停止服务失败: {result.stderr}")
-            return False
+        if result.returncode != 0:
+            record_error("停止服务", f"systemctl stop 失败: {(result.stderr or '').strip()[:200]}")
+    except subprocess.TimeoutExpired:
+        record_error("停止服务", "systemctl stop 超时(30s)")
     except Exception as e:
-        log.error(f"❌ 停止服务异常: {e}")
-        return False
+        record_error("停止服务", f"systemctl stop 异常: {e}")
+    # 仍未停干净 → SIGKILL 服务进程 + 重新 stop 清理单元状态
+    if is_port_open() and is_service_active():
+        log.warning("⚠️ stop 未完全生效，升级 SIGKILL...")
+        subprocess.run(["systemctl", "--user", "kill", "--signal=SIGKILL", SERVICE_NAME],
+                       capture_output=True, text=True, timeout=15)
+        subprocess.run(["systemctl", "--user", "stop", SERVICE_NAME], capture_output=True, text=True, timeout=15)
+    # 服务已停但端口仍被占（残留进程）→ 强制清理端口
+    free_port_if_stale()
+    if not is_port_open():
+        log.info("✅ 服务已停止")
+        return True
+    record_error("停止服务", "停止后端口仍被占用")
+    log.error("❌ 服务停止后端口仍被占用")
+    return False
 
 
 def start_service() -> bool:
-    """启动 model-gateway 服务"""
+    """启动 model-gateway 服务。启动前清理残留端口占用（异常退出后端口未释放的兜底）。"""
+    free_port_if_stale()
     try:
         result = subprocess.run(
             ["systemctl", "--user", "start", SERVICE_NAME],
@@ -827,18 +1177,22 @@ def start_service() -> bool:
         )
         if result.returncode == 0:
             log.info("✅ 服务启动命令已发出")
-            # 等待启动
-            time.sleep(5)
-            if is_service_active() and check_api_healthy():
-                log.info("✅ 服务启动成功")
-                return True
-            else:
-                log.error("❌ 服务启动后未就绪")
-                return False
-        else:
-            log.error(f"❌ 启动服务失败: {result.stderr}")
+            # 等待启动（最多 30s，逐步探测）
+            for _ in range(6):
+                time.sleep(5)
+                if is_service_active() and check_api_healthy():
+                    log.info("✅ 服务启动成功")
+                    return True
+            detail = get_service_detail()
+            tail = get_journal_tail(6)
+            record_error("启动服务", f"启动后未就绪。{detail}" + (" ｜ " + " / ".join(tail[-3:]) if tail else ""))
+            log.error(f"❌ 服务启动后未就绪: {detail}")
             return False
+        record_error("启动服务", f"systemctl start 失败: {(result.stderr or '').strip()[:200]}")
+        log.error(f"❌ 启动服务失败: {result.stderr}")
+        return False
     except Exception as e:
+        record_error("启动服务", f"异常: {e}")
         log.error(f"❌ 启动服务异常: {e}")
         return False
 
@@ -858,14 +1212,20 @@ def restart_service() -> bool:
             capture_output=True, text=True, timeout=30,
         )
         last_restart_time = time.time()
-        time.sleep(5)
-        if is_service_active() and check_api_healthy():
-            log.info("✅ 服务重启成功")
-            return True
-        else:
-            log.error("❌ 服务重启后仍未就绪")
-            return False
+        for _ in range(6):
+            time.sleep(5)
+            if is_service_active() and check_api_healthy():
+                log.info("✅ 服务重启成功")
+                return True
+        detail = get_service_detail()
+        tail = get_journal_tail(6)
+        record_error("重启服务", f"重启后未就绪。{detail}" + (" ｜ " + " / ".join(tail[-3:]) if tail else ""))
+        # 常见残留问题：旧进程占着端口导致新进程起不来 → 清端口后兜底再启动一次
+        free_port_if_stale()
+        log.error(f"❌ 服务重启后仍未就绪: {detail}，清端口后尝试重新启动...")
+        return start_service()
     except Exception as e:
+        record_error("重启服务", f"异常: {e}")
         log.error(f"❌ 重启命令执行失败: {e}")
         return False
 
@@ -915,6 +1275,7 @@ def perform_update(force: bool = False) -> bool:
         # 4. 停止服务
         update_progress = "停止旧服务..."
         if not stop_service():
+            record_error("更新", "无法停止服务，中止更新")
             log.error("❌ 无法停止服务，中止更新")
             return False
 
@@ -963,6 +1324,7 @@ def perform_update(force: bool = False) -> bool:
                 return True  # 仍然算成功，服务可能还在初始化
         else:
             log.error("❌ 新服务启动失败")
+            record_error("更新", "新服务启动失败（详见诊断信息）")
             return False
 
     finally:
@@ -1000,13 +1362,26 @@ def perform_rollback(tag: str) -> tuple[bool, str]:
 
         branch = get_default_branch(remote)
         update_progress = f"检出 {tag} 代码..."
+        if not ensure_git_ready():
+            start_service()
+            return False, "git index 处于冲突状态且自动恢复失败"
         checkout = subprocess.run(
             ["git", "checkout", "-B", branch, tag],
             capture_output=True, text=True, timeout=30,
             cwd=str(REPO_DIR),
         )
         if checkout.returncode != 0:
+            # 常见于本地有未提交修改或 index 残留：放弃本地改动后重试（已授权策略）
+            log.warning(f"⚠️ 检出失败（{(checkout.stderr or '').strip()[:160]}），硬重置后重试...")
+            subprocess.run(["git", "reset", "--hard"], capture_output=True, text=True, timeout=30, cwd=str(REPO_DIR))
+            checkout = subprocess.run(
+                ["git", "checkout", "-B", branch, tag],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(REPO_DIR),
+            )
+        if checkout.returncode != 0:
             update_progress = "检出失败，恢复最新代码..."
+            record_error("版本切换", f"检出 {tag} 失败: {(checkout.stderr or '').strip()[:200]}")
             git_pull(remote, branch)
             start_service()
             log.error(f"❌ 检出 {tag} 失败: {checkout.stderr}")
@@ -1118,6 +1493,10 @@ def handle_api_request(conn):
                 "is_updating": is_updating,
                 "update_progress": update_progress,
                 "git": git_status,
+                # 异常时附带具体报错（systemctl 状态行 + journal 尾部 + 内存错误时间线）
+                "service_detail": ("" if (svc_active and api_healthy) else get_service_detail()),
+                "journal_tail": ([] if (svc_active and api_healthy) else get_journal_tail(12)),
+                "recent_errors": get_recent_errors(10),
                 "timestamp": datetime.now().isoformat(),
             }, ensure_ascii=False, indent=2)
 
@@ -1189,6 +1568,18 @@ def handle_api_request(conn):
         elif path == "/action/restart-tailscale":
             ok = restart_tailscale()
             response_body = json.dumps({"ok": ok, "action": "restart-tailscale"})
+
+        elif path == "/action/kill-port":
+            ok, msg = kill_port_occupiers()
+            response_body = json.dumps({"ok": ok, "action": "kill-port", "message": msg}, ensure_ascii=False)
+
+        elif path == "/action/restart-updater":
+            if is_updating:
+                response_body = json.dumps({"ok": False, "action": "restart-updater",
+                                            "error": "更新进行中，请等待更新完成后再重启 updater"})
+            else:
+                ok, msg = restart_updater()
+                response_body = json.dumps({"ok": ok, "action": "restart-updater", "message": msg}, ensure_ascii=False)
 
         elif method == "POST" and path == "/select-source":
             src = "auto"
@@ -1469,6 +1860,7 @@ def main():
             log.warning(f"检测失败 ({consecutive_fails}/{FAIL_THRESHOLD}): {', '.join(details)}")
 
             if consecutive_fails >= FAIL_THRESHOLD:
+                record_error("监控", f"连续失败 {FAIL_THRESHOLD} 次（{', '.join(details)}），触发重启")
                 log.error(f"连续失败 {FAIL_THRESHOLD} 次，触发重启")
                 if restart_service():
                     consecutive_fails = 0
