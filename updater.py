@@ -154,6 +154,30 @@ pre.journal{background:#1d1d1f;color:#f5f5f7;border-radius:10px;padding:12px 14p
 .toast-item{background:#fff;border:1px solid rgba(0,0,0,.08);border-left:3px solid #34c759;color:#1d1d1f;padding:10px 16px;border-radius:11px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.14);animation:slidein .25s cubic-bezier(.22,1,.36,1)}
 .toast-item.err{border-left-color:#ff3b30}
 @keyframes slidein{from{opacity:0;transform:translateX(30px)}}
+/* ── 手机适配（≤560px）：状态 2×2、行改上下堆叠、按钮双列满宽、触控加高 ── */
+@media (max-width:560px){
+  .nav-inner{padding:11px 14px}
+  .logo{font-size:14px;gap:7px}
+  .logo-mark{width:23px;height:23px;font-size:12px}
+  .clock{font-size:10.5px}
+  main{padding:14px 12px 60px}
+  .stat-grid{grid-template-columns:repeat(2,1fr);gap:9px;margin-top:12px}
+  .stat{padding:12px 13px;border-radius:12px}
+  .stat .k{font-size:11px;margin-bottom:5px}
+  .stat .v{font-size:15px}
+  .card{padding:15px 14px;border-radius:14px;margin-top:12px}
+  .card-title{margin-bottom:10px;font-size:12.5px}
+  .row{flex-direction:column;align-items:flex-start;gap:3px;padding:8px 0}
+  .value{text-align:left;width:100%}
+  .row select{width:100%;max-width:none}
+  .actions{gap:8px}
+  .actions .btn{flex:1 1 calc(50% - 8px);min-height:40px;font-size:13px;padding:9px 10px}
+  pre.journal{font-size:10.5px;max-height:180px;padding:10px 12px}
+  .err-item{font-size:12px;padding:7px 10px}
+  .progress{font-size:12.5px;padding:10px 13px}
+  .toast{left:12px;right:12px;top:12px}
+  .toast-item{font-size:12.5px}
+}
 </style>
 </head>
 <body>

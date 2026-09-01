@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.8.3-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.8.4-orange)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 
 对外暴露 **OpenAI 兼容**与 **Anthropic Messages** 接口，
@@ -450,12 +450,13 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
-**`v2.8.3`** — **updater 守护服务加固**：① git 自愈——git 操作前置检测 unmerged/冲突态（`merge --abort` + `reset --merge` 温和恢复，失败自动硬重置到云端分支），pull 失败（历史分叉/冲突）同样兜底硬重置，杜绝"停止→失败→重启→失败"死循环；config.json / gateway.db / logs 等未跟踪运行时文件不受影响 ② 端口强杀——stop 超时升级 SIGKILL、启动/重启前自动检测并清理占用 8650 的残留进程，面板新增"强制释放端口"按钮 ③ 诊断增强——启动/重启/异常退出时记录 systemctl 状态行 + journalctl 日志尾部 + 错误时间线（内存保留最近 30 条），仪表盘"诊断"卡片展示 ④ 仪表盘重做——与 hfadmin 同风格的苹果浅色主题（毛玻璃导航/状态胶囊/悬停上浮，无大面积 backdrop-filter 不卡顿）⑤ 新增 `/action/restart-updater` 端点与面板按钮（自动探测 updater 的 systemd 单元，找不到则 exec 重启自身）
+**`v2.8.4`** — **守护面板手机适配**：新增 ≤560px 响应式断点——状态卡 2×2 网格、键值行改上下堆叠（长版本号/日期不再挤压）、按钮双列满宽并加高触控区（min-height 40px）、下拉满宽、导航与日志/时间线字号间距收紧、Toast 通栏显示
 
 ### 历史（按时间倒序）
 
 | 版本 | 主要变更 |
 |:---|:---|
+| **v2.8.3** | updater 守护服务加固：git 自愈（unmerged 温和恢复 + 硬重置云端兜底，杜绝死循环）；端口强杀（SIGKILL 升级 + 残留进程清理 + 面板按钮）；诊断增强（systemctl 状态行/journalctl 尾部/错误时间线上屏）；仪表盘重做（苹果浅色主题）；新增 /action/restart-updater |
 | **v2.8.2** | 模型级超时时间设置（120=默认/0=无限等待/指定秒数，解决本地非流式模型被 120s 误判超时）；OpenAI/Anthropic 适配器按模型独立超时；双面板表单同步；旧配置完全兼容 |
 | **v2.8.1** | 池配置「加入模型」下拉按供应商分组排序（供应商持久化顺序 + 组内原顺序，独立模型排最后），新增 `====模型接口====` / `====子池====` 分割标题；移除「接口测速」标签页（⚡ 测速本池已覆盖，`/speedtest` 保留） |
 | **v2.8.0** | rerank（重排）模型支持：`/v1/rerank` 端点（Jina/Cohere/SiliconFlow 兼容）；第三种专用模态进模型池（双向硬门槛 + 自动切换 + 计费复用）；test_model 按模态分流；双面板 rerank 徽章；anthropic 协议 embedding/rerank 误配拦截 |
