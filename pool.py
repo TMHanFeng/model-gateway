@@ -616,7 +616,7 @@ class ModelPool:
             try:
                 response = await provider.chat(req, entry.name)
             except RateLimitError:
-                entry.cooldown_until = time.time() + 20
+                entry.cooldown_until = time.time() + 10
                 raise
         self._record_latency(entry, (time.perf_counter() - t0) * 1000)
 
@@ -685,7 +685,7 @@ class ModelPool:
             try:
                 response = await provider.embeddings(req, entry.name, entry.extra_params or {})
             except RateLimitError:
-                entry.cooldown_until = time.time() + 20
+                entry.cooldown_until = time.time() + 10
                 raise
         self._record_latency(entry, (time.perf_counter() - t0) * 1000)
 
@@ -717,7 +717,7 @@ class ModelPool:
             try:
                 response = await provider.rerank(req, entry.name, entry.extra_params or {})
             except RateLimitError:
-                entry.cooldown_until = time.time() + 20
+                entry.cooldown_until = time.time() + 10
                 raise
         self._record_latency(entry, (time.perf_counter() - t0) * 1000)
 
@@ -782,15 +782,15 @@ class ModelPool:
                 return response, tokens, actual_calls
             except RateLimitError:
                 logger.warning(
-                    f"[上游429-embedding] pool={pool_name} model={entry.id} caller={caller!r} 冷却20s"
+                    f"[上游429-embedding] pool={pool_name} model={entry.id} caller={caller!r} 冷却10s"
                 )
-                actual_calls.append({"model": entry.id, "reason": "switch_429", "detail": {"cooldown_sec": 20, "status": 429}})
+                actual_calls.append({"model": entry.id, "reason": "switch_429", "detail": {"cooldown_sec": 10, "status": 429}})
                 continue
             except Exception as e:
-                entry.cooldown_until = time.time() + 30
+                entry.cooldown_until = time.time() + 15
                 err_type = type(e).__name__
                 status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
-                detail = {"cooldown_sec": 30, "error_type": err_type}
+                detail = {"cooldown_sec": 15, "error_type": err_type}
                 if status is not None:
                     detail["status"] = status
                 if str(e) and len(str(e)) < 200:
@@ -806,7 +806,7 @@ class ModelPool:
                 entry_url = getattr(entry, "base_url", "") or ""
                 logger.error(
                     f"[上游错误-embedding] pool={pool_name} model={entry.id} caller={caller!r} "
-                    f"status={status} type={err_type} cooldown=30s url={entry_url}"
+                    f"status={status} type={err_type} cooldown=15s url={entry_url}"
                 )
                 if str(e):
                     logger.error(f"[上游错误-embedding] 异常消息: {str(e)[:300]}")
@@ -849,15 +849,15 @@ class ModelPool:
                 return response, tokens, actual_calls
             except RateLimitError:
                 logger.warning(
-                    f"[上游429-rerank] pool={pool_name} model={entry.id} caller={caller!r} 冷却20s"
+                    f"[上游429-rerank] pool={pool_name} model={entry.id} caller={caller!r} 冷却10s"
                 )
-                actual_calls.append({"model": entry.id, "reason": "switch_429", "detail": {"cooldown_sec": 20, "status": 429}})
+                actual_calls.append({"model": entry.id, "reason": "switch_429", "detail": {"cooldown_sec": 10, "status": 429}})
                 continue
             except Exception as e:
-                entry.cooldown_until = time.time() + 30
+                entry.cooldown_until = time.time() + 15
                 err_type = type(e).__name__
                 status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
-                detail = {"cooldown_sec": 30, "error_type": err_type}
+                detail = {"cooldown_sec": 15, "error_type": err_type}
                 if status is not None:
                     detail["status"] = status
                 if str(e) and len(str(e)) < 200:
@@ -873,7 +873,7 @@ class ModelPool:
                 entry_url = getattr(entry, "base_url", "") or ""
                 logger.error(
                     f"[上游错误-rerank] pool={pool_name} model={entry.id} caller={caller!r} "
-                    f"status={status} type={err_type} cooldown=30s url={entry_url}"
+                    f"status={status} type={err_type} cooldown=15s url={entry_url}"
                 )
                 if str(e):
                     logger.error(f"[上游错误-rerank] 异常消息: {str(e)[:300]}")
@@ -956,10 +956,10 @@ class ModelPool:
                 return response, tokens, actual_calls
             except RateLimitError:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-                detail = {"cooldown_sec": 20, "status": 429, "latency_ms": latency_ms}
+                detail = {"cooldown_sec": 10, "status": 429, "latency_ms": latency_ms}
                 logger.warning(
                     f"[上游429] pool={pool_name} model={entry.id} req_model={requested_model or '-'} "
-                    f"caller={caller!r} latency={latency_ms}ms 冷却20s"
+                    f"caller={caller!r} latency={latency_ms}ms 冷却10s"
                 )
                 actual_calls.append({
                     "model": entry.id,
@@ -972,14 +972,14 @@ class ModelPool:
             except Exception as e:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
                 error_type = type(e).__name__
-                # 按异常类型决定冷却时长：429→30s（响应 Retry-After 时另议），5xx→15s，网络抖动→10s，其他→30s
+                # 按异常类型决定冷却时长：429→10s，5xx→5s，网络抖动→5s，其他→15s
                 status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
                 if isinstance(e, httpx.HTTPStatusError) and status is not None and 500 <= status < 600:
-                    cooldown_sec = 15
+                    cooldown_sec = 5
                 elif isinstance(e, (httpx.TimeoutException, httpx.ConnectError)):
-                    cooldown_sec = 10
+                    cooldown_sec = 5
                 else:
-                    cooldown_sec = 30
+                    cooldown_sec = 15
                 entry.cooldown_until = time.time() + cooldown_sec
                 detail = {
                     "cooldown_sec": cooldown_sec,
@@ -1087,27 +1087,28 @@ class ModelPool:
                 await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
                 return _replay(), entry, actual_calls
             except RateLimitError:
+                entry.cooldown_until = time.time() + 10
                 logger.warning(
                     f"[上游429-流式] pool={pool_name} model={entry.id} req_model={requested_model or '-'} "
-                    f"caller={caller!r} 冷却20s"
+                    f"caller={caller!r} 冷却10s"
                 )
                 actual_calls.append({
                     "model": entry.id,
                     "reason": "fallback_switch_429" if use_fallback else "switch_429",
-                    "detail": {"cooldown_sec": 20, "status": 429},
+                    "detail": {"cooldown_sec": 10, "status": 429},
                 })
                 if override_id and not use_fallback:
                     use_fallback = True
                 continue
             except Exception as e:
-                # 按异常类型分发冷却：5xx→15s，网络→10s，其他→30s
+                # 按异常类型分发冷却：5xx→5s，网络→5s，其他→15s
                 status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
                 if isinstance(e, httpx.HTTPStatusError) and status is not None and 500 <= status < 600:
-                    cooldown_sec = 15
+                    cooldown_sec = 5
                 elif isinstance(e, (httpx.TimeoutException, httpx.ConnectError)):
-                    cooldown_sec = 10
+                    cooldown_sec = 5
                 else:
-                    cooldown_sec = 30
+                    cooldown_sec = 15
                 entry.cooldown_until = time.time() + cooldown_sec
                 detail = {"cooldown_sec": cooldown_sec, "error_type": type(e).__name__}
                 if status is not None:
