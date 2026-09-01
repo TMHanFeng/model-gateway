@@ -516,6 +516,10 @@ body {
         <div class="fg"><label>最大并发数（0=不限）</label><input name="max_concurrency" type="number" value="0"></div>
         <div class="fg"><label>刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
       </div>
+      <div class="f2">
+        <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"></div>
+        <div class="fg"></div>
+      </div>
       <div id="once-fields">
         <div class="f2">
           <div class="fg"><label>时区</label><input value="Asia/Shanghai（北京时间，固定）" disabled></div>
@@ -728,6 +732,7 @@ function modelRowHTML(m, i) {
       <div class="grid">
         <div>计费 <b>${m.billing_mode === 'request' ? '按请求次数' : '按 Token'}</b></div>
         <div>上下文窗口 <b>${m.context_window || '不限'}</b></div>
+        <div>超时 <b>${m.timeout_seconds == null ? '默认120s' : (m.timeout_seconds === 0 ? '无限' : m.timeout_seconds + 's')}</b></div>
         <div>${m.token_type === 'rolling_5h' ? '5h 窗口限额' : '每日上限'} <b>${m.daily_token_limit ? m.daily_token_limit.toLocaleString() + (m.billing_mode === 'request' ? ' 次' : ' Token') : '不限'}</b></div>
         <div>RPM <b>${m.rpm_limit || '不限'}</b></div>
         <div>TPM <b>${m.tpm_limit || '不限'}</b></div>
@@ -945,6 +950,7 @@ function infoTip(id) {
     ['RPM', m.rpm_limit || '不限'],
     ['TPM', m.tpm_limit || '不限'],
     ['最大并发', m.max_concurrency || 10],
+    ['超时', m.timeout_seconds == null ? '默认（120s）' : (m.timeout_seconds === 0 ? '无限等待' : m.timeout_seconds + 's')],
     ['刷新时间', m.refresh_time ? `${m.refresh_time}（北京时间）` : '—'],
   ];
   if (m.token_type === 'one_time') {
@@ -1639,6 +1645,7 @@ async function editModel(id) {
   if (f.extra_param_name) { f.extra_param_name.value = _ek || ''; f.extra_param_value.value = _ek ? String(_ep[_ek]) : ''; }
   f.daily_token_limit.value = m.daily_token_limit || 0; f.rpm_limit.value = m.rpm_limit || 0;
   f.tpm_limit.value = m.tpm_limit || 0; f.context_window.value = m.context_window || 0;
+  f.timeout_seconds.value = (m.timeout_seconds == null ? 120 : m.timeout_seconds);
   f.max_concurrency.value = m.max_concurrency ?? 10; f.refresh_time.value = m.refresh_time || '';
   f.max_tokens.value = m.max_tokens || 0; f.ttl_seconds.value = m.ttl_seconds || 0;
   f.expire_date.value = m.expire_date || '';
@@ -1657,6 +1664,8 @@ async function submitModel(e) {
   e.preventDefault();
   const body = Object.fromEntries(new FormData(document.getElementById('mform')).entries());
   ['daily_token_limit','rpm_limit','tpm_limit','context_window','max_concurrency','max_tokens','ttl_seconds'].forEach(k => body[k] = parseInt(body[k]) || 0);
+  // 超时时间：120=系统默认；0=无限等待；其余为秒数（旧配置 null 编辑保存后落为显式 120，行为不变）
+  body.timeout_seconds = parseInt(body.timeout_seconds) || 0;
   body.is_free = body.is_free === 'true';
   body.json_output = document.getElementById('f-json-output') ? document.getElementById('f-json-output').checked : false;
   const _epn = (body.extra_param_name || '').trim(), _epv = (body.extra_param_value || '').trim();

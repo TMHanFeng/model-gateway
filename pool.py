@@ -33,6 +33,7 @@ class ModelEntry:
     timezone: str = "Asia/Shanghai"
     context_window: int = 0
     max_concurrency: int = 0  # 0 = unlimited (no semaphore gating)
+    timeout_seconds: int | None = None  # None=系统默认120s；0=无限等待（本地非流式慢模型）；>0=指定秒数
     billing_mode: str = "token"
     is_free: bool = True
     modality: str = "text"
@@ -122,6 +123,7 @@ class ModelPool:
                 timezone="Asia/Shanghai",
                 context_window=m.get("context_window", 0),
                 max_concurrency=m.get("max_concurrency", 0),
+                timeout_seconds=(None if m.get("timeout_seconds") in (None, "") else int(m["timeout_seconds"])),
                 billing_mode=m.get("billing_mode", "token"),
                 is_free=m.get("is_free", True),
                 modality=m.get("modality", "text"),
@@ -231,9 +233,11 @@ class ModelPool:
     def _get_provider(self, entry: ModelEntry):
         if entry.id not in self.providers_cache:
             if entry.provider == "anthropic":
-                self.providers_cache[entry.id] = AnthropicProvider(entry.base_url, entry.api_key, entry.proxy_url)
+                self.providers_cache[entry.id] = AnthropicProvider(entry.base_url, entry.api_key, entry.proxy_url,
+                                                                   timeout_seconds=entry.timeout_seconds)
             else:
-                self.providers_cache[entry.id] = OpenAIProvider(entry.base_url, entry.api_key, entry.proxy_url)
+                self.providers_cache[entry.id] = OpenAIProvider(entry.base_url, entry.api_key, entry.proxy_url,
+                                                                timeout_seconds=entry.timeout_seconds)
         return self.providers_cache[entry.id]
 
     async def close_all(self):

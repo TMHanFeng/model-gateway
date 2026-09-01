@@ -123,6 +123,7 @@ async def add_model(request: Request, _=Depends(verify_admin)):
         "timezone": "Asia/Shanghai",
         "context_window": body.get("context_window", 0),
         "max_concurrency": body.get("max_concurrency", 0),
+        "timeout_seconds": (None if body.get("timeout_seconds") in (None, "") else int(body["timeout_seconds"])),
         "billing_mode": body.get("billing_mode", "token"),
         "is_free": bool(body.get("is_free", True)),
         "modality": body.get("modality", "text"),
@@ -209,6 +210,8 @@ async def update_model(model_id: str, request: Request, _=Depends(verify_admin))
             continue
         if key == "is_free":
             value = bool(value)
+        if key == "timeout_seconds":
+            value = None if value in (None, "") else int(value)
         models[idx][key] = value
     models[idx]["timezone"] = "Asia/Shanghai"
 

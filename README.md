@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.8.1-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.8.2-orange)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 
 对外暴露 **OpenAI 兼容**与 **Anthropic Messages** 接口，
@@ -450,12 +450,13 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
-**`v2.8.1`** — 池配置「加入模型」下拉**按供应商分组排序**（供应商顺序 = 供应商页 reorder 持久化顺序，组内保持模型列表原顺序，独立模型排最后），新增 `====模型接口====` / `====子池====` 分割标题；**移除「接口测速」标签页**（池卡片 ⚡ 测速本池已覆盖该功能，`/speedtest` 接口保留）
+**`v2.8.2`** — 新增**模型级超时时间设置**：模型表单新增"超时时间（秒）"，120=系统默认（表单默认显示 120），0=无限等待（解决部分本地模型不支持流式输出被 120s 误判超时的问题），其余为指定秒数（connect 固定 10s）；OpenAI/Anthropic 适配器按模型独立超时建连；双管理面板表单/回填/详情提示同步；旧配置（无此字段）自动走系统默认，完全兼容
 
 ### 历史（按时间倒序）
 
 | 版本 | 主要变更 |
 |:---|:---|
+| **v2.8.1** | 池配置「加入模型」下拉按供应商分组排序（供应商持久化顺序 + 组内原顺序，独立模型排最后），新增 `====模型接口====` / `====子池====` 分割标题；移除「接口测速」标签页（⚡ 测速本池已覆盖，`/speedtest` 保留） |
 | **v2.8.0** | rerank（重排）模型支持：`/v1/rerank` 端点（Jina/Cohere/SiliconFlow 兼容）；第三种专用模态进模型池（双向硬门槛 + 自动切换 + 计费复用）；test_model 按模态分流；双面板 rerank 徽章；anthropic 协议 embedding/rerank 误配拦截 |
 | **v2.7.2** | 池配置引用失效显式记录（ref_not_found）；test_model 按模态分流（embedding 直测）；双面板 embedding 徽章；load_balance 轮转语义确认 |
 | **v2.7.1** | json 严格路由：移除兼容降级，无 json 模型时 503 + 勾选指引 |
