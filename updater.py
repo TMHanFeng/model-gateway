@@ -664,13 +664,23 @@ def get_remote_latest_tag(remote: str, timeout: int = 30) -> str | None:
         return None
 
 
-def get_remote_versions(github_timeout: int = 120, gitee_timeout: int = 30) -> dict:
+def get_remote_versions(github_timeout: int = 20, gitee_timeout: int = 15) -> dict:
     """获取 gitee(origin) / github 两个远程的最新版本 tag。
-    GitHub 默认120秒超时，Gitee默认30秒"""
-    return {
-        "gitee": get_remote_latest_tag("origin", timeout=gitee_timeout),
-        "github": get_remote_latest_tag("github", timeout=github_timeout),
-    }
+    并行查询（总耗时≈最慢一路而非串行累加），超时收紧（GitHub 120→20s，Gitee 30→15s）"""
+    import threading
+    result = {"gitee": None, "github": None}
+
+    def _g():
+        result["gitee"] = get_remote_latest_tag("origin", timeout=gitee_timeout)
+
+    def _h():
+        result["github"] = get_remote_latest_tag("github", timeout=github_timeout)
+
+    t1 = threading.Thread(target=_g, daemon=True); t1.start()
+    t2 = threading.Thread(target=_h, daemon=True); t2.start()
+    t1.join(gitee_timeout + 2)
+    t2.join(github_timeout + 2)
+    return result
 
 
 def pick_latest_version(versions: dict) -> tuple[str, str]:
@@ -751,14 +761,14 @@ def git_pull(remote: str = "origin", branch: str = "") -> tuple[bool, str, str]:
                 return False, f"fetch failed: {result.stderr}", branch
             branch = alt_branch
 
-        # pull
+        # fetch 已完成，直接快进合并 FETCH_HEAD（省去 pull 的第二次网络往返）
         result = subprocess.run(
-            ["git", "pull", remote, branch],
-            capture_output=True, text=True, timeout=60,
+            ["git", "merge", "--ff-only", "FETCH_HEAD"],
+            capture_output=True, text=True, timeout=30,
             cwd=str(REPO_DIR),
         )
         if result.returncode == 0:
-            return True, result.stdout.strip(), branch
+            return True, result.stdout.strip() or "fast-forward", branch
 
         # pull 失败：本地历史分叉（如远端 force push）/本地提交冲突 → 硬重置云端（已授权放弃本地提交）
         log.warning(f"⚠️ git pull 失败（{(result.stderr or '').strip()[:160]}），尝试硬重置到云端...")
@@ -808,9 +818,12 @@ def has_updates_available(versions: dict | None = None, gw: dict | None = None) 
 
 
 def pick_latest_remote() -> tuple[str, str]:
-    """选择更新源远程（版本号优先 github），返回 (远程名, commit hash)"""
-    # 先 fetch 两个远程（含 tags），确保本地有最新 refs
-    for r in ["github", "origin"]:
+    """选择更新源远程（版本号优先 github），返回 (远程名, commit hash)。
+    两个远程的 fetch 与 tag 查询并行执行，总耗时≈最慢一路而非串行累加"""
+    # 并行 fetch 两个远程（含 tags），与 ls-remote 版本查询同时进行
+    import threading
+
+    def _fetch(r):
         try:
             subprocess.run(
                 ["git", "fetch", r, "--quiet", "--tags"],
@@ -820,7 +833,13 @@ def pick_latest_remote() -> tuple[str, str]:
         except Exception:
             pass
 
-    source, _version = pick_latest_version(get_remote_versions())
+    fetch_threads = [threading.Thread(target=_fetch, args=(r,), daemon=True) for r in ("github", "origin")]
+    for t in fetch_threads:
+        t.start()
+    versions = get_remote_versions()
+    for t in fetch_threads:
+        t.join(32)
+    source, _version = pick_latest_version(versions)
     if source:
         return source, get_remote_branch_commit(source) or ""
 
@@ -1234,12 +1253,12 @@ def start_service() -> bool:
         )
         if result.returncode == 0:
             log.info("✅ 服务启动命令已发出")
-            # 等待启动（最多 30s，逐步探测）
-            for _ in range(6):
-                time.sleep(5)
+            # 等待就绪：先探测后等待、1 秒粒度（服务通常 1-3 秒就绪，最多等 30 秒）
+            for _ in range(30):
                 if is_service_active() and check_api_healthy():
                     log.info("✅ 服务启动成功")
                     return True
+                time.sleep(1)
             detail = get_service_detail()
             tail = get_journal_tail(6)
             record_error("启动服务", f"启动后未就绪。{detail}" + (" ｜ " + " / ".join(tail[-3:]) if tail else ""))
@@ -1269,11 +1288,12 @@ def restart_service() -> bool:
             capture_output=True, text=True, timeout=30,
         )
         last_restart_time = time.time()
-        for _ in range(6):
-            time.sleep(5)
+        # 先探测后等待、1 秒粒度（最多等 30 秒）
+        for _ in range(30):
             if is_service_active() and check_api_healthy():
                 log.info("✅ 服务重启成功")
                 return True
+            time.sleep(1)
         detail = get_service_detail()
         tail = get_journal_tail(6)
         record_error("重启服务", f"重启后未就绪。{detail}" + (" ｜ " + " / ".join(tail[-3:]) if tail else ""))
@@ -1337,9 +1357,11 @@ def perform_update(force: bool = False) -> bool:
             return False
 
         # 等待端口释放
-        time.sleep(2)
+        time.sleep(1)
 
-        # 5. 拉取代码
+        # 5. 拉取代码（记录依赖清单指纹，用于判断是否需要 pip install）
+        req_file = REPO_DIR / "requirements.txt"
+        req_before = req_file.read_bytes() if req_file.exists() else b""
         update_progress = "拉取最新代码..."
         success, output, branch = git_pull(remote)
         if not success:
@@ -1356,29 +1378,28 @@ def perform_update(force: bool = False) -> bool:
 
         log.info(f"✅ 代码更新成功 [{remote}/{branch}]: {output}")
 
-        # 6. 更新依赖
-        update_progress = "更新 Python 依赖..."
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "-q"],
-                capture_output=True, text=True, timeout=120,
-                cwd=str(REPO_DIR),
-            )
-        except Exception as e:
-            log.warning(f"依赖更新警告: {e}")
+        # 6. 更新依赖（requirements.txt 未变化时跳过，通常可省 10-40 秒）
+        req_after = req_file.read_bytes() if req_file.exists() else b""
+        if req_before and req_before == req_after:
+            update_progress = "依赖未变化，跳过 pip install..."
+            log.info("✅ requirements.txt 未变化，跳过依赖安装")
+        else:
+            update_progress = "更新 Python 依赖..."
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "-q",
+                     "--disable-pip-version-check"],
+                    capture_output=True, text=True, timeout=120,
+                    cwd=str(REPO_DIR),
+                )
+            except Exception as e:
+                log.warning(f"依赖更新警告: {e}")
 
-        # 7. 启动新服务
+        # 7. 启动新服务（start_service 内部已等待 API 健康后才返回成功）
         update_progress = "启动新服务..."
         if start_service():
             log.info("✅ 更新完成！新服务已启动")
-            # 验证 API
-            time.sleep(2)
-            if check_api_healthy():
-                log.info("✅ API 验证通过")
-                return True
-            else:
-                log.error("⚠️ API 验证失败，但服务正在运行")
-                return True  # 仍然算成功，服务可能还在初始化
+            return True
         else:
             log.error("❌ 新服务启动失败")
             record_error("更新", "新服务启动失败（详见诊断信息）")
