@@ -20,3 +20,5 @@ config.yaml
 
 # Playwright MCP debugging artifacts
 .playwright-mcp/
+*.bak_*
+*.bak
