@@ -203,6 +203,13 @@ async def update_model(model_id: str, request: Request, _=Depends(verify_admin))
     if pid and not any(p["id"] == pid for p in config.get("providers", [])):
         raise HTTPException(status_code=400, detail=f"Provider '{pid}' not found")
 
+    # 先校验后改：避免校验失败时被拒绝的字段残留在共享配置缓存中
+    if "timeout_seconds" in body and body["timeout_seconds"] not in (None, ""):
+        try:
+            int(body["timeout_seconds"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="timeout_seconds 必须为数字")
+
     for key, value in body.items():
         if key == "id":
             continue
@@ -501,6 +508,13 @@ async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin))
     model_ids = body.get("model_ids")
     if model_ids is None:
         raise HTTPException(status_code=400, detail="Missing model_ids")
+    # 先做全部校验再改配置：load_config 返回共享缓存，先改后校验会让被拒绝的改动残留在缓存中
+    slow_threshold = None
+    if "slow_latency_threshold" in body:
+        try:
+            slow_threshold = int(body["slow_latency_threshold"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="slow_latency_threshold 必须为数字（0=不限）")
 
     config = load_config()
     pools = config.setdefault("pools", {})
@@ -526,11 +540,8 @@ async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin))
             pools[pool_name]["auto_order"] = False
         elif pools[pool_name].get("auto_order"):
             pools[pool_name]["load_balance"] = False
-    if "slow_latency_threshold" in body:
-        try:
-            pools[pool_name]["slow_latency_threshold"] = int(body["slow_latency_threshold"])
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="slow_latency_threshold 必须为数字（0=不限）")
+    if slow_threshold is not None:
+        pools[pool_name]["slow_latency_threshold"] = slow_threshold
 
     save_config(config)
     restart_scheduler()
@@ -1058,14 +1069,14 @@ async def create_key_pool(key_id: int, request: Request, _=Depends(verify_admin)
         "auto_order": False,
         "owner_key_id": str(key_id),
     }
-    # 自动加入该密钥的授权池，使其可被调用
+    save_config(config)
+    restart_scheduler()
+    _sync_pool()
+    # 自动加入该密钥的授权池，使其可被调用（放在 save_config 之后：配置先落盘，避免异常时缓存与磁盘不一致）
     allowed = list(rec["allowed_pools"])
     if name not in allowed:
         allowed.append(name)
         await db.update_api_key(key_id, {"allowed_pools": allowed})
-    save_config(config)
-    restart_scheduler()
-    _sync_pool()
     return {"ok": True, "pool": pools[name]}
 
 

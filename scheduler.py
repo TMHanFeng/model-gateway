@@ -13,6 +13,12 @@ scheduler = AsyncIOScheduler()
 
 async def refresh_model(model_id: str):
     await db.reset_daily_usage(model_id)
+    # 配额预检有 5s TTL 缓存：刷新后立即失效，避免刚重置的模型在缓存窗口内仍被判"用量已尽"
+    try:
+        from main import pool
+        pool._invalidate_quota_cache(model_id)
+    except Exception:
+        pass
 
 
 CONFIG_PATH = Path(__file__).parent / "config.json"

@@ -1056,8 +1056,8 @@ class ModelPool:
                 if status is not None:
                     detail["status"] = status
                 err_msg = str(e)
-                if err_msg and len(err_msg) < 500:
-                    detail["error"] = err_msg
+                if err_msg:
+                    detail["error"] = err_msg[:500]
                 # 详细错误日志：含上游原始响应体（前 600 字符），用于定位 4xx/5xx 根因
                 resp_obj = getattr(e, "response", None)
                 resp_body = ""
@@ -1182,8 +1182,8 @@ class ModelPool:
                 if status is not None:
                     detail["status"] = status
                 err_msg = str(e)
-                if err_msg and len(err_msg) < 500:
-                    detail["error"] = err_msg
+                if err_msg:
+                    detail["error"] = err_msg[:500]
                 # 详细错误日志：含上游原始响应体（前 600 字符）
                 resp_obj = getattr(e, "response", None)
                 resp_body = ""

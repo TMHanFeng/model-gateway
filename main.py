@@ -204,7 +204,7 @@ async def _chat_handler(request: Request, auth: dict):
                 logger.debug(
                     f"[gateway return] model={response.model} usage={response.usage.total_tokens}tok "
                     f"finish={_c0.finish_reason if _c0 else '-'} "
-                    f"content={( _c0.message.content or '')[:200]!r} "
+                    f"content={((_c0.message.content or '') if _c0 else '')[:200]!r} "
                     f"tool_calls={bool(_c0.message.tool_calls) if _c0 else False}"
                 )
             except Exception:

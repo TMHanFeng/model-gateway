@@ -684,6 +684,8 @@ async function loadModels() {
 function bindModelDrag() {
   const list = document.getElementById('model-list');
   if (!list) return;
+  if (list.dataset.dragBoundModel) return;  // 持久容器只绑一次（防监听器累积）
+  list.dataset.dragBoundModel = '1';
   let dragged = null;
   list.addEventListener('dragstart', e => {
     const row = e.target.closest('.model-row[draggable]');
@@ -1075,6 +1077,7 @@ function bindDrag() {
     // 手机/触屏不支持 HTML5 拖拽：点一下条目即上移一格
     if (isTouchDevice) {
       el.addEventListener('click', async e => {
+        e.stopPropagation();  // 防止冒泡到池卡片层：否则条目与池卡片会同时被上移（双重保存）
         if (e.target.closest('button, .info-wrap')) return;
         const prev = el.previousElementSibling;
         if (!prev || !prev.matches('.pool-item')) return;
@@ -1100,6 +1103,8 @@ async function savePoolCardOrder(list) {
 function bindPoolDrag() {
   const list = document.getElementById('pool-list');
   if (!list) return;
+  if (list.dataset.dragBoundPool) return;  // 持久容器只绑一次：重复绑定会导致一次操作触发 N 次保存
+  list.dataset.dragBoundPool = '1';
   list.addEventListener('dragstart', e => {
     const card = e.target.closest('[data-pool-card]');
     if (!card || card.dataset.poolCard === 'auto') { e.preventDefault(); return; }
@@ -1115,6 +1120,7 @@ function bindPoolDrag() {
   });
   list.addEventListener('dragover', e => {
     e.preventDefault();
+    if (!poolDragSrc) return;  // 池条目拖拽时不上卡片层（防 insertBefore(null) 报错）
     const card = e.target.closest('[data-pool-card]');
     if (!card || card === poolDragSrc) return;
     const rect = card.getBoundingClientRect();
@@ -1149,6 +1155,8 @@ let provDragSrc = null;
 
 function bindProviderDrag() {
   document.querySelectorAll('.provider-card[draggable]').forEach(el => {
+    if (el.dataset.dragBoundProv) return;  // 防监听器累积
+    el.dataset.dragBoundProv = '1';
     el.addEventListener('dragstart', e => {
       if (e.target.closest('.model-row')) return;  // 从模型行发起的拖拽，不启动卡片拖拽
       provDragSrc = el;

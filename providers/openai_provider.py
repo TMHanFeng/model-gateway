@@ -146,12 +146,15 @@ class OpenAIProvider:
         import logging
         logger = logging.getLogger(__name__)
         if logger.isEnabledFor(logging.DEBUG):
-            _m = (data.get("choices") or [{}])[0].get("message") or {}
-            logger.debug(
-                f"[openai upstream raw] model={model_name} status={resp.status_code} "
-                f"usage={data.get('usage')} "
-                f"content={str(_m.get('content'))[:200]!r} reasoning={str(_m.get('reasoning_content'))[:120]!r}"
-            )
+            try:
+                _m = ((data.get("choices") or [{}])[0].get("message") or {}) if isinstance(data, dict) else {}
+                logger.debug(
+                    f"[openai upstream raw] model={model_name} status={resp.status_code} "
+                    f"usage={data.get('usage') if isinstance(data, dict) else None} "
+                    f"content={str(_m.get('content'))[:200]!r} reasoning={str(_m.get('reasoning_content'))[:120]!r}"
+                )
+            except Exception:
+                logger.debug(f"[openai upstream raw] model={model_name} status={resp.status_code} body=<序列化失败>")
         # Issue 6: 上游有 completion_tokens 但 content 为空 — 始终打 WARNING 便于排查
         try:
             _first = (data.get("choices") or [{}])[0]

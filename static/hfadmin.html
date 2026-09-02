@@ -994,6 +994,8 @@ async function loadModels() {
 function bindModelDrag() {
   const list = document.getElementById('models-list');
   if (!list) return;
+  if (list.dataset.dragBoundModel) return;  // 持久容器只绑一次（防监听器累积）
+  list.dataset.dragBoundModel = '1';
   let dragged = null;
   list.addEventListener('dragstart', e => {
     const row = e.target.closest('.model-row[draggable]');
@@ -1537,20 +1539,27 @@ async function refreshSingleModeUI() {
 }
 
 async function toggleAutoOrder(name, enabled) {
-  const ok = await api('/admin/pools/' + pathEnc(name), { method: 'PUT', body: JSON.stringify({ auto_order: enabled, load_balance: enabled ? false : undefined }) });
+  const pdata = await api('/admin/pools');
+  if (!pdata || !pdata.pools[name]) return;
+  const hadLb = !!pdata.pools[name].load_balance;
+  // update_pool 必填 model_ids：缺省会 400（此前 hfadmin 开关因此从未生效过）
+  const ok = await api('/admin/pools/' + pathEnc(name), { method: 'PUT', body: JSON.stringify({ model_ids: pdata.pools[name].model_ids || [], auto_order: enabled, load_balance: enabled ? false : undefined }) });
   if (ok) {
     await api('/admin/reload', { method: 'POST' });
     toast(enabled ? '已开启自动择优：' + name : '已关闭自动择优：' + name);
-    if (enabled && poolLookup[name] && poolLookup[name].load_balance) toast('负载均衡已自动关闭（与自动择优互斥）');
+    if (enabled && hadLb) toast('负载均衡已自动关闭（与自动择优互斥）');
     loadPools();
   }
 }
 async function toggleLoadBalance(name, enabled) {
-  const ok = await api('/admin/pools/' + pathEnc(name), { method: 'PUT', body: JSON.stringify({ load_balance: enabled, auto_order: enabled ? false : undefined }) });
+  const pdata = await api('/admin/pools');
+  if (!pdata || !pdata.pools[name]) return;
+  const hadAo = !!pdata.pools[name].auto_order;
+  const ok = await api('/admin/pools/' + pathEnc(name), { method: 'PUT', body: JSON.stringify({ model_ids: pdata.pools[name].model_ids || [], load_balance: enabled, auto_order: enabled ? false : undefined }) });
   if (ok) {
     await api('/admin/reload', { method: 'POST' });
     toast(enabled ? '已开启负载均衡：' + name : '已关闭负载均衡：' + name);
-    if (enabled && poolLookup[name] && poolLookup[name].auto_order) toast('自动择优已自动关闭（与负载均衡互斥）');
+    if (enabled && hadAo) toast('自动择优已自动关闭（与负载均衡互斥）');
     loadPools();
   }
 }
@@ -1715,6 +1724,7 @@ function bindDrag() {
     // 手机/触屏不支持 HTML5 拖拽：点一下条目即上移一格
     if (isTouchDevice) {
       items.addEventListener('click', async e => {
+        e.stopPropagation();  // 防止冒泡到池卡片层：否则条目与池卡片会同时被上移（双重保存）
         if (e.target.closest('button, .info-wrap')) return;
         const item = e.target.closest('.pool-item');
         if (!item) return;
@@ -1738,6 +1748,8 @@ async function savePoolCardOrder(list) {
 function bindPoolDrag() {
   const list = document.getElementById('pool-list');
   if (!list) return;
+  if (list.dataset.dragBoundPool) return;  // 持久容器只绑一次：重复绑定会导致一次操作触发 N 次保存
+  list.dataset.dragBoundPool = '1';
   let dragged = null;
   list.addEventListener('dragstart', e => {
     const card = e.target.closest('[data-pool-card]');
@@ -1748,6 +1760,7 @@ function bindPoolDrag() {
   });
   list.addEventListener('dragover', e => {
     e.preventDefault();
+    if (!dragged) return;  // 池条目拖拽时不上卡片层（防 insertBefore(null) 报错）
     const card = e.target.closest('[data-pool-card]');
     if (!card || card === dragged) return;
     const rect = card.getBoundingClientRect();
@@ -1783,6 +1796,8 @@ function bindPoolDrag() {
 function bindProviderDrag() {
   const list = document.getElementById('models-list');
   if (!list) return;
+  if (list.dataset.dragBoundProv) return;  // 持久容器只绑一次（防监听器累积）
+  list.dataset.dragBoundProv = '1';
   let dragged = null;
   list.addEventListener('dragstart', e => {
     const el = e.target.closest('.provider-card[draggable]');
