@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse, JSONResponse
 from pydantic import ValidationError
 from models import ChatCompletionRequest, EmbeddingRequest, RerankRequest
-from pool import ModelPool, load_config
+from pool import ModelPool, load_config, ContextOverflowPassThrough
 from database import init_db, close_db
 import database as db
 import keyauth
@@ -115,6 +115,19 @@ def _wrap_key_stream(stream, key: dict, billing_mode: str):
     return gen()
 
 
+def _overflow_passthrough_response(e: ContextOverflowPassThrough):
+    """上下文超限整池透传：原样返回上游 400 错误体（与直连行为一致，客户端可据此自愈）"""
+    try:
+        body_obj = json.loads(e.body) if e.body else None
+    except Exception:
+        body_obj = None
+    if not isinstance(body_obj, dict):
+        body_obj = {"error": {"message": e.body or "context length exceeded",
+                              "type": "BadRequestError", "param": None, "code": e.status_code}}
+    logger.warning(f"[上下文超限透传] status={e.status_code} body={str(e.body)[:220]}")
+    return JSONResponse(status_code=e.status_code, content=body_obj)
+
+
 async def _chat_handler(request: Request, auth: dict):
     # 请求体大小预检：Content-Length 超 20MB 直接拒绝（在解析 JSON 之前）
     cl = request.headers.get("content-length")
@@ -172,8 +185,11 @@ async def _chat_handler(request: Request, auth: dict):
         required_json_output = False
 
     if req.stream:
-        stream, entry, steps = await pool.execute_stream_with_fallback(
-            pool_name, req, None, caller, required_json_output=required_json_output)
+        try:
+            stream, entry, steps = await pool.execute_stream_with_fallback(
+                pool_name, req, None, caller, required_json_output=required_json_output)
+        except ContextOverflowPassThrough as e:
+            return _overflow_passthrough_response(e)
         if stream is None:
             _detail = pool.failure_detail(steps, has_images)
             logger.error(f"[调用失败-流式] pool={pool_name} caller={caller!r} detail={_detail}")
@@ -190,8 +206,11 @@ async def _chat_handler(request: Request, auth: dict):
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
-    response, tokens, steps = await pool.execute_with_fallback(pool_name, req, None, caller,
-                                                               required_json_output=required_json_output)
+    try:
+        response, tokens, steps = await pool.execute_with_fallback(pool_name, req, None, caller,
+                                                                   required_json_output=required_json_output)
+    except ContextOverflowPassThrough as e:
+        return _overflow_passthrough_response(e)
     # === Issue 6 诊断日志（DEBUG 级别）===
     # 截断 content 再记日志：根 logger 为 DEBUG 时此分支恒真，整包 model_dump_json
     # 会序列化全部 choices 全文（推理模型可达数百 KB），拖慢每个非流式请求

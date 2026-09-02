@@ -62,6 +62,45 @@ ROLLING_5H_SECONDS = 5 * 3600
 QUOTA_CACHE_TTL = 5.0
 
 
+class ContextOverflowPassThrough(Exception):
+    """上游 400 上下文超限：请求过大、与模型健康无关——不冷却；
+    整池无候选可容纳时携带上游 400 原文抛出，由 main.py 原样透传给客户端（与直连行为一致）。"""
+    def __init__(self, status_code: int, body: str):
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"upstream 400 context overflow: {body[:200]}")
+
+
+def _is_context_overflow_error(e: Exception) -> bool:
+    """判定上游错误是否为上下文超限类 400（sglang/vllm/openai 等常见报错文案）"""
+    status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+    if status != 400:
+        return False
+    text = str(e)
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        try:
+            text += " " + (resp.text or "")
+        except Exception:
+            pass
+    low = text.lower()
+    return ("context length" in low or "maximum context" in low
+            or "token count exceeds" in low or "longer than the model" in low)
+
+
+def _upstream_error_body(e: Exception) -> str:
+    """取上游错误响应体原文；取不到时退化为异常消息"""
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        try:
+            t = resp.text or ""
+            if t:
+                return t
+        except Exception:
+            pass
+    return str(e)
+
+
 _config_cache: dict | None = None
 _config_mtime: float | None = None
 
@@ -988,6 +1027,8 @@ class ModelPool:
         fb_name = self.pools.get(pool_name, {}).get("fallback_pool")
         # When the locked single model fails (or the main pool is exhausted), escalate to the fallback pool.
         use_fallback = False
+        last_overflow = None            # 最近一次"上下文超限 400"（用于整池失败时透传原文）
+        last_failure_overflow = False   # 最后一次上游失败是否为上下文超限
 
         for _ in range(max_attempts):
             if use_fallback:
@@ -1039,8 +1080,26 @@ class ModelPool:
             except Exception as e:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
                 error_type = type(e).__name__
-                # 按异常类型决定冷却时长：429→10s，5xx→5s，网络抖动→5s，其他→15s
                 status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+                # 上下文超限（400 + context length 类报错）：请求过大、模型本身健康——不冷却，
+                # 继续尝试其他候选；整池都容不下时把该 400 原样透传给客户端（与直连行为一致）
+                if status == 400 and _is_context_overflow_error(e):
+                    last_overflow = e
+                    last_failure_overflow = True
+                    logger.warning(
+                        f"[上游上下文超限] pool={pool_name} model={entry.id} caller={caller!r} "
+                        f"status=400 不冷却，尝试下一候选 | {str(e)[:180]}"
+                    )
+                    actual_calls.append({
+                        "model": entry.id,
+                        "reason": "context_overflow",
+                        "detail": {"status": 400, "no_cooldown": True, "error": str(e)[:500]},
+                    })
+                    if override_id and not use_fallback:
+                        use_fallback = True
+                    continue
+                last_failure_overflow = False
+                # 按异常类型决定冷却时长：429→10s，5xx→5s，网络抖动→5s，其他→15s
                 if isinstance(e, httpx.HTTPStatusError) and status is not None and 500 <= status < 600:
                     cooldown_sec = 5
                 elif isinstance(e, (httpx.TimeoutException, httpx.ConnectError)):
@@ -1086,6 +1145,10 @@ class ModelPool:
                     use_fallback = True
                 continue
 
+        if last_failure_overflow and last_overflow is not None:
+            # 整池都无法容纳该请求：把上游上下文超限 400 原样透传（与直连一致，客户端可据此自愈）
+            await db.log_decision(pool_name, requested_model, None, estimated, actual_calls, caller)
+            raise ContextOverflowPassThrough(400, _upstream_error_body(last_overflow))
         await db.log_decision(pool_name, requested_model, None, estimated, actual_calls, caller)
         return None, 0, actual_calls
 
@@ -1099,6 +1162,8 @@ class ModelPool:
         override_id = self.single_override.get(pool_name)
         fb_name = self.pools.get(pool_name, {}).get("fallback_pool")
         use_fallback = False
+        last_overflow = None            # 最近一次"上下文超限 400"（用于整池失败时透传原文）
+        last_failure_overflow = False
 
         for _ in range(max_attempts):
             if use_fallback:
@@ -1171,6 +1236,24 @@ class ModelPool:
             except Exception as e:
                 # 按异常类型分发冷却：5xx→5s，网络→5s，其他→15s
                 status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+                # 上下文超限（400 + context length 类报错）：请求过大、模型本身健康——不冷却，
+                # 继续尝试其他候选；整池都容不下时把该 400 原样透传给客户端（与直连行为一致）
+                if status == 400 and _is_context_overflow_error(e):
+                    last_overflow = e
+                    last_failure_overflow = True
+                    logger.warning(
+                        f"[上游上下文超限-流式] pool={pool_name} model={entry.id} caller={caller!r} "
+                        f"status=400 不冷却，尝试下一候选 | {str(e)[:180]}"
+                    )
+                    actual_calls.append({
+                        "model": entry.id,
+                        "reason": "context_overflow",
+                        "detail": {"status": 400, "no_cooldown": True, "error": str(e)[:500]},
+                    })
+                    if override_id and not use_fallback:
+                        use_fallback = True
+                    continue
+                last_failure_overflow = False
                 if isinstance(e, httpx.HTTPStatusError) and status is not None and 500 <= status < 600:
                     cooldown_sec = 5
                 elif isinstance(e, (httpx.TimeoutException, httpx.ConnectError)):
@@ -1212,6 +1295,10 @@ class ModelPool:
                     use_fallback = True
                 continue
 
+        if last_failure_overflow and last_overflow is not None:
+            # 整池都无法容纳该请求：把上游上下文超限 400 原样透传（与直连一致，客户端可据此自愈）
+            await db.log_decision(pool_name, requested_model, None, estimated, actual_calls, caller)
+            raise ContextOverflowPassThrough(400, _upstream_error_body(last_overflow))
         await db.log_decision(pool_name, requested_model, None, estimated, actual_calls, caller)
         return None, None, actual_calls
 
