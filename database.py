@@ -14,6 +14,30 @@ def _bj_today() -> str:
     from zoneinfo import ZoneInfo
     return datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
 
+
+def _logical_today(now: float, refresh_time: str = "") -> str:
+    """按模型的 refresh_time 计算逻辑日期。
+    语义：refresh_time 是新窗口的起点。
+    - refresh_time 为空或缺失 → 按北京时间自然日（00:00 为新窗口起点）
+    - refresh_time=14:00 → 15:00 落到"明天"，13:00 落到"今天"
+    返回 YYYY-MM-DD，供 get_daily_usage / add_daily_usage 做窗口判定。"""
+    if not refresh_time:
+        return _bj_today()
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    try:
+        h, m = map(int, refresh_time.split(":"))
+    except (ValueError, IndexError):
+        return _bj_today()
+    now_dt = datetime.fromtimestamp(now, ZoneInfo("Asia/Shanghai"))
+    cutoff = now_dt.replace(hour=h, minute=m, second=0, microsecond=0)
+    if now_dt < cutoff:
+        # 尚未到达今天的窗口起点，逻辑日期为"昨天"
+        return (now_dt.date() - timedelta(days=1)).isoformat()
+    else:
+        # 已到今天的窗口起点，逻辑日期为"今天"
+        return now_dt.date().isoformat()
+
 # Persistent connection + lock: avoids the per-query connect/close overhead that
 # dominated request latency (every _check_available call used to open 1-4 new
 # connections). WAL + NORMAL synchronous keep writes fast and readers unblocked.
@@ -45,9 +69,14 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS token_usage (
                 model_name TEXT PRIMARY KEY,
                 used_tokens INTEGER DEFAULT 0,
-                last_reset_date TEXT DEFAULT ''
+                last_reset_date TEXT DEFAULT '',
+                refresh_time TEXT DEFAULT ''
             )
         """)
+        # 老库迁移：token_usage 补充 refresh_time 列（v2.9.6，14:00 窗口 bug 修复）
+        cols = [r[1] for r in await (await db.execute("PRAGMA table_info(token_usage)")).fetchall()]
+        if "refresh_time" not in cols:
+            await db.execute("ALTER TABLE token_usage ADD COLUMN refresh_time TEXT DEFAULT ''")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS request_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,26 +198,25 @@ async def init_db():
 
 
 async def get_daily_usage(model_name: str) -> int:
-    """读取当日已用 token；跨天惰性重置（幂等）。
-    - last_reset_date == _bj_today(): 直接返回 used_tokens
-    - last_reset_date != _bj_today(): 自动 UPDATE used_tokens=0, last_reset_date=今天，返回 0
+    """读取当日已用 token；按模型的 refresh_time 判断窗口（幂等）。
+    - last_reset_date == _logical_today(now, refresh_time): 直接返回 used_tokens
+    - last_reset_date != 逻辑日期: 自动 UPDATE used_tokens=0, last_reset_date=逻辑日期，返回 0
     - 无记录: 返回 0
-    _lock 保证并发安全；多次调用跨天后只产生一次 UPDATE。"""
+    _lock 保证并发安全；多次调用跨窗口后只产生一次 UPDATE。"""
     async with _lock:
         db = await _get_conn()
         cursor = await db.execute(
-            "SELECT used_tokens, last_reset_date FROM token_usage WHERE model_name = ?",
+            "SELECT used_tokens, last_reset_date, refresh_time FROM token_usage WHERE model_name = ?",
             (model_name,),
         )
         row = await cursor.fetchone()
         if not row:
             return 0
-        today = _bj_today()
-        if row[1] != today:
-            # 跨天：惰性重置（幂等；并发由 _lock 串行化）
+        logical = _logical_today(time.time(), row[2])
+        if row[1] != logical:
             await db.execute(
                 "UPDATE token_usage SET used_tokens = 0, last_reset_date = ? WHERE model_name = ?",
-                (today, model_name),
+                (logical, model_name),
             )
             await db.commit()
             return 0
@@ -198,25 +226,56 @@ async def get_daily_usage(model_name: str) -> int:
 async def add_daily_usage(model_name: str, tokens: int):
     async with _lock:
         db = await _get_conn()
-        today = _bj_today()
+        cursor = await db.execute(
+            "SELECT last_reset_date, refresh_time FROM token_usage WHERE model_name = ?",
+            (model_name,),
+        )
+        row = await cursor.fetchone()
+        if row and row[1]:
+            logical = _logical_today(time.time(), row[1])
+        else:
+            logical = _bj_today()
+        # SQL 占位符：INSERT VALUES 3 个 + subquery 1 个 + ON CONFLICT 4 个 = 8 个
+        # CASE WHEN last_reset_date = 同窗口 THEN 追加 tokens ELSE 跨窗口直接写 tokens（新窗口首笔）
         await db.execute(
-            """INSERT INTO token_usage (model_name, used_tokens, last_reset_date)
-               VALUES (?, ?, ?)
+            """INSERT INTO token_usage (model_name, used_tokens, last_reset_date, refresh_time)
+               VALUES (?, ?, ?, COALESCE((SELECT refresh_time FROM token_usage WHERE model_name = ?), ''))
                ON CONFLICT(model_name) DO UPDATE SET
                    used_tokens = CASE WHEN last_reset_date = ? THEN used_tokens + ? ELSE ? END,
                    last_reset_date = ?""",
-            (model_name, tokens, today, today, tokens, tokens, today),
+            (model_name, tokens, logical, model_name, logical, tokens, tokens, logical),
         )
         await db.commit()
 
 
 async def reset_daily_usage(model_name: str):
+    """显式重置某个 daily 模型的用量（由 scheduler 14:00 触发 / 手动调用）。
+    用逻辑日期作为窗口锚点，保证 14:00 触发后 last_reset_date 立即切换到新窗口日期。"""
     async with _lock:
         db = await _get_conn()
-        today = _bj_today()
+        cursor = await db.execute(
+            "SELECT refresh_time FROM token_usage WHERE model_name = ?",
+            (model_name,),
+        )
+        row = await cursor.fetchone()
+        if row and row[0]:
+            logical = _logical_today(time.time(), row[0])
+        else:
+            logical = _bj_today()
         await db.execute(
             "UPDATE token_usage SET used_tokens = 0, last_reset_date = ? WHERE model_name = ?",
-            (today, model_name),
+            (logical, model_name),
+        )
+        await db.commit()
+
+
+async def sync_model_refresh_time(model_name: str, refresh_time: str):
+    """同步 config 中模型的 refresh_time 到 token_usage 表（供 init_db / scheduler 使用）。"""
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            "UPDATE token_usage SET refresh_time = ? WHERE model_name = ?",
+            (refresh_time, model_name),
         )
         await db.commit()
 

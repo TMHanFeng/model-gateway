@@ -11,7 +11,7 @@ from pool import ModelPool, load_config, ContextOverflowPassThrough
 from database import init_db, close_db
 import database as db
 import keyauth
-from scheduler import start_scheduler
+from scheduler import start_scheduler, sync_all_refresh_times
 from admin import router as admin_router, GATEWAY_VERSION, GATEWAY_COMMIT, get_gateway_version
 from format_adapter import (
     is_anthropic_request,
@@ -37,6 +37,7 @@ def server_bind():
 async def lifespan(app: FastAPI):
     setup_logging()
     await init_db()
+    await sync_all_refresh_times()
     start_scheduler()
     host, port = server_bind()
     base = f"http://{host}:{port}"

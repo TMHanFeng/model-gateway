@@ -12,6 +12,17 @@ scheduler = AsyncIOScheduler()
 
 
 async def refresh_model(model_id: str):
+    # 先同步 config 的 refresh_time 到 DB（防热加载后 DB 滞后）
+    try:
+        cfg = load_config()
+        for m in cfg.get("models", []):
+            if m.get("id") == model_id:
+                rt = m.get("refresh_time", "")
+                if rt:
+                    await db.sync_model_refresh_time(model_id, rt)
+                break
+    except Exception:
+        pass
     await db.reset_daily_usage(model_id)
     # 配额预检有 5s TTL 缓存：刷新后立即失效，避免刚重置的模型在缓存窗口内仍被判"用量已尽"
     try:
@@ -19,6 +30,18 @@ async def refresh_model(model_id: str):
         pool._invalidate_quota_cache(model_id)
     except Exception:
         pass
+
+
+async def sync_all_refresh_times(cfg: dict | None = None):
+    """一次性把 config 中所有带 refresh_time 的模型同步到 token_usage 表。
+    main.py 启动时调用，保证每个模型行都有正确的 refresh_time。"""
+    if cfg is None:
+        cfg = load_config()
+    for m in cfg.get("models", []):
+        if m.get("token_type", "daily") == "daily":
+            rt = m.get("refresh_time", "")
+            if rt:
+                await db.sync_model_refresh_time(m["id"], rt)
 
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
