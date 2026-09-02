@@ -192,9 +192,23 @@ async def _chat_handler(request: Request, auth: dict):
 
     response, tokens, steps = await pool.execute_with_fallback(pool_name, req, None, caller,
                                                                required_json_output=required_json_output)
-    # === Issue 6 诊断日志（DEBUG 级别，默认不输出）===
+    # === Issue 6 诊断日志（DEBUG 级别）===
+    # 截断 content 再记日志：根 logger 为 DEBUG 时此分支恒真，整包 model_dump_json
+    # 会序列化全部 choices 全文（推理模型可达数百 KB），拖慢每个非流式请求
     if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(f"[gateway return] {response.model_dump_json()[:500] if response else None}")
+        if response is None:
+            logger.debug("[gateway return] None")
+        else:
+            try:
+                _c0 = response.choices[0] if response.choices else None
+                logger.debug(
+                    f"[gateway return] model={response.model} usage={response.usage.total_tokens}tok "
+                    f"finish={_c0.finish_reason if _c0 else '-'} "
+                    f"content={( _c0.message.content or '')[:200]!r} "
+                    f"tool_calls={bool(_c0.message.tool_calls) if _c0 else False}"
+                )
+            except Exception:
+                logger.debug("[gateway return] <日志序列化失败>")
     if response is None:
         _detail = pool.failure_detail(steps, has_images)
         logger.error(f"[调用失败] pool={pool_name} caller={caller!r} detail={_detail}")

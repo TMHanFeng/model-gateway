@@ -393,7 +393,7 @@ body {
 
   <div id="tab-pools" class="hidden">
     <div class="toolbar">
-      <div class="hint">拖拽 ⠿ 调整池内优先级（越靠前越先调用）；悬停 ⓘ 查看该接口的限额与刷新详情；测速结果会标注在接口后方。</div>
+      <div class="hint">拖拽 ⠿ 调整池内优先级（越靠前越先调用），手机端点一下条目/池卡片即可上移一格；悬停 ⓘ 查看该接口的限额与刷新详情；测速结果会标注在接口后方。</div>
       <div class="btn-row">
         <button class="btn btn-ghost" id="btn-pool-mode" onclick="togglePoolMode()">🔀 用户专属池模式</button>
         <button class="btn btn-amber" id="btn-add-pool" onclick="showAddPool()">＋ 新增模型池</button>
@@ -537,7 +537,7 @@ body {
         <div class="fg"><label style="display:flex;align-items:center;justify-content:space-between;gap:6px">模型模态<label style="display:inline-flex;align-items:center;gap:3px;white-space:nowrap;cursor:pointer;font-weight:normal"><input type="checkbox" name="json_output" id="f-json-output" style="width:11px;height:11px;flex:none;margin:0"> 支持格式输出（json）</label></label><select name="modality"><option value="text">纯文本（不支持图片）</option><option value="vision">多模态（支持图片）</option><option value="embedding">embedding（嵌入模型）</option><option value="rerank">rerank（重排模型）</option></select></div>
       </div>
       <div class="f2">
-        <div class="fg"><label id="limit-label">每日 Token 上限（0=不限）</label><input name="daily_token_limit" type="number" value="0"></div>
+        <div class="fg" id="limit-fields"><label id="limit-label">每日 Token 上限（0=不限）</label><input name="daily_token_limit" type="number" value="0"></div>
         <div class="fg"><label>上下文窗口（0=不校验）</label><input name="context_window" type="number" value="0"></div>
       </div>
       <div class="f2">
@@ -548,7 +548,7 @@ body {
         <div class="fg"><label>最大并发数（0=不限）</label><input name="max_concurrency" type="number" value="0"></div>
         <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"></div>
       </div>
-      <div class="fg"><label>刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
+      <div class="fg" id="daily-fields"><label>刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
       <div id="once-fields">
         <div class="f2">
           <div class="fg"><label>时区</label><input value="Asia/Shanghai（北京时间，固定）" disabled></div>
@@ -605,6 +605,8 @@ body {
 let editingId = null;
 let statsTimer = null;
 let statDim = 'billing';
+// 触屏设备（手机/平板）不支持 HTML5 拖拽：启用「点一下上移一格」的替代排序交互
+const isTouchDevice = window.matchMedia && window.matchMedia('(hover: none), (pointer: coarse)').matches;
 
 function getKey() {
   let k = localStorage.getItem('gw_key');
@@ -710,6 +712,22 @@ function bindModelDrag() {
     const ok = await api('/admin/models/reorder', { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
     if (ok) { toast('模型顺序已更新'); }
   });
+  // 手机/触屏：点一下模型行即上移一格（仅在同一容器内的模型行之间移动）
+  if (isTouchDevice) {
+    list.addEventListener('click', async e => {
+      if (e.target.closest('button, a, input, select, label')) return;
+      const row = e.target.closest('.model-row[draggable]');
+      if (!row) return;
+      let prev = row.previousElementSibling;
+      while (prev && !prev.matches('.model-row[draggable]')) prev = prev.previousElementSibling;
+      if (!prev) return;
+      row.parentNode.insertBefore(row, prev);
+      const ids = [...list.querySelectorAll('.model-row[draggable]')].map(el => el.dataset.modelId);
+      if (!ids.length) return;
+      const ok = await api('/admin/models/reorder', { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
+      if (ok) { toast('模型顺序已更新'); }
+    });
+  }
 }
 
 function providerCardHTML(p, pmodels, i) {
@@ -1014,14 +1032,25 @@ function renumber(container) {
   });
 }
 
+async function savePoolOrder(poolName, container) {
+  const ids = [...container.querySelectorAll('.pool-item')].map(n => n.dataset.id);
+  renumber(container);
+  const ok = await api(poolPath(poolName), { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
+  if (ok) { api('/admin/reload', { method: 'POST' }); toast('优先级已更新'); }
+}
+
 function bindDrag() {
   document.querySelectorAll('.pool-item[draggable]').forEach(el => {
     el.addEventListener('dragstart', e => {
+      // 阻止冒泡到池卡片层：auto 池卡片层会 preventDefault 取消整个拖拽（问题14：auto 池内拖不动），
+      // 其他池则会误触发卡片层的池顺序保存（问题17：一次拖拽双保存/双提示/整区重渲染）
+      e.stopPropagation();
       dragSrc = el;
       el.classList.add('dragging');
       e.dataTransfer.effectAllowed = 'move';
     });
-    el.addEventListener('dragend', () => {
+    el.addEventListener('dragend', e => {
+      e.stopPropagation();  // 问题17：卡片层 dragend 会再保存一次池顺序并重复提示
       el.classList.remove('dragging');
       document.querySelectorAll('.pool-item').forEach(x => x.classList.remove('drag-over'));
     });
@@ -1041,17 +1070,32 @@ function bindDrag() {
     el.addEventListener('drop', async e => {
       e.preventDefault();
       if (!dragSrc) return;
-      const poolName = dragSrc.dataset.pool;
-      const container = dragSrc.closest('.pool-items');
-      const ids = [...container.querySelectorAll('.pool-item')].map(n => n.dataset.id);
-      renumber(container);
-      const ok = await api(poolPath(poolName), { method: 'PUT', body: JSON.stringify({ model_ids: ids }) });
-      if (ok) { api('/admin/reload', { method: 'POST' }); toast('优先级已更新'); }
+      await savePoolOrder(dragSrc.dataset.pool, dragSrc.closest('.pool-items'));
     });
+    // 手机/触屏不支持 HTML5 拖拽：点一下条目即上移一格
+    if (isTouchDevice) {
+      el.addEventListener('click', async e => {
+        if (e.target.closest('button, .info-wrap')) return;
+        const prev = el.previousElementSibling;
+        if (!prev || !prev.matches('.pool-item')) return;
+        el.parentNode.insertBefore(el, prev);
+        await savePoolOrder(el.dataset.pool, el.closest('.pool-items'));
+      });
+    }
   });
 }
 
 let poolDragSrc = null;
+
+async function savePoolCardOrder(list) {
+  // 完整收集所有池：可见的按新顺序在前，被模式隐藏的按原顺序补尾（防误删）
+  const domNames = [...list.querySelectorAll('[data-pool-card]')].map(el => el.dataset.poolCard);
+  const allOthers = Object.keys(poolLookup || {}).filter(n => n !== 'auto' && n !== '兜底池');
+  const names = domNames.concat(allOthers.filter(n => !domNames.includes(n)));
+  const ok = await api('/admin/pools/reorder', { method: 'PUT', body: JSON.stringify({ pool_names: names }) });
+  if (ok) { await api('/admin/reload', { method: 'POST' }); toast('池顺序已更新'); }
+  loadPools();
+}
 
 function bindPoolDrag() {
   const list = document.getElementById('pool-list');
@@ -1067,13 +1111,7 @@ function bindPoolDrag() {
     if (!poolDragSrc) return;
     poolDragSrc.classList.remove('dragging');
     poolDragSrc = null;
-    // 完整收集所有池：可见的按拖动新顺序在前，被模式隐藏的按原顺序补尾（防误删）
-    const domNames = [...list.querySelectorAll('[data-pool-card]')].map(el => el.dataset.poolCard);
-    const allOthers = Object.keys(poolLookup || {}).filter(n => n !== 'auto' && n !== '兜底池');
-    const names = domNames.concat(allOthers.filter(n => !domNames.includes(n)));
-    const ok = await api('/admin/pools/reorder', { method: 'PUT', body: JSON.stringify({ pool_names: names }) });
-    if (ok) { await api('/admin/reload', { method: 'POST' }); toast('池顺序已更新'); }
-    loadPools();
+    await savePoolCardOrder(list);
   });
   list.addEventListener('dragover', e => {
     e.preventDefault();
@@ -1089,6 +1127,22 @@ function bindPoolDrag() {
   list.addEventListener('drop', e => {
     e.preventDefault();
   });
+  // 手机/触屏：点一下池卡片即上移一格（auto 固定首位、兜底池固定末位规则不变）
+  if (isTouchDevice) {
+    list.addEventListener('click', async e => {
+      if (e.target.closest('button, input, select, label, .switch, .threshold-ctl, .info-wrap')) return;
+      const card = e.target.closest('[data-pool-card]');
+      if (!card) return;
+      const name = card.dataset.poolCard;
+      if (name === 'auto' || name === '兜底池') return;
+      let prev = card.previousElementSibling;
+      while (prev && !prev.matches('[data-pool-card]')) prev = prev.previousElementSibling;
+      if (!prev) return;
+      if (prev.dataset.poolCard === 'auto') { toast('auto 池固定在第一位'); return; }
+      list.insertBefore(card, prev);
+      await savePoolCardOrder(list);
+    });
+  }
 }
 
 let provDragSrc = null;
@@ -1205,16 +1259,28 @@ async function toggleAutoOrder(name, enabled) {
   if (!data) return;
   const p = data.pools[name];
   if (!p) { toast('池 "' + name + '" 不存在，请刷新页面重试', true); return; }
+  const hadLb = !!p.load_balance;
   const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: p.model_ids, auto_order: enabled, load_balance: enabled ? false : undefined }) });
-  if (ok) { await api('/admin/reload', { method: 'POST' }); toast(enabled ? '池 ' + name + ' 已开启自动择优' : '池 ' + name + ' 已关闭自动择优'); loadPools(); }
+  if (ok) {
+    await api('/admin/reload', { method: 'POST' });
+    toast(enabled ? '池 ' + name + ' 已开启自动择优' : '池 ' + name + ' 已关闭自动择优');
+    if (enabled && hadLb) toast('负载均衡已自动关闭（与自动择优互斥）');
+    loadPools();
+  }
 }
 async function toggleLoadBalance(name, enabled) {
   const data = await api('/admin/pools');
   if (!data) return;
   const p = data.pools[name];
   if (!p) { toast('池 "' + name + '" 不存在，请刷新页面重试', true); return; }
+  const hadAo = !!p.auto_order;
   const ok = await api(poolPath(name), { method: 'PUT', body: JSON.stringify({ model_ids: p.model_ids, load_balance: enabled, auto_order: enabled ? false : undefined }) });
-  if (ok) { await api('/admin/reload', { method: 'POST' }); toast(enabled ? '池 ' + name + ' 已开启负载均衡' : '池 ' + name + ' 已关闭负载均衡'); loadPools(); }
+  if (ok) {
+    await api('/admin/reload', { method: 'POST' });
+    toast(enabled ? '池 ' + name + ' 已开启负载均衡' : '池 ' + name + ' 已关闭负载均衡');
+    if (enabled && hadAo) toast('自动择优已自动关闭（与负载均衡互斥）');
+    loadPools();
+  }
 }
 async function setSlowThreshold(name, val) {
   const v = parseInt(val);
@@ -1519,9 +1585,13 @@ function onBillingChange() {
 }
 
 function onTokenTypeChange() {
-  const once = document.getElementById('once-fields');
-  const oneTime = document.getElementById('mform').token_type.value === 'one_time';
-  once.style.display = oneTime ? '' : 'none';
+  const ttype = document.getElementById('mform').token_type.value;
+  document.getElementById('once-fields').style.display = ttype === 'one_time' ? '' : 'none';
+  // 条件显隐（问题16）：刷新时间仅 daily 需要；每日/5h 限额字段对 one_time 无意义
+  const _df = document.getElementById('daily-fields');
+  if (_df) _df.style.display = ttype === 'daily' ? '' : 'none';
+  const _lf = document.getElementById('limit-fields');
+  if (_lf) _lf.style.display = ttype === 'one_time' ? 'none' : '';
   onBillingChange();
 }
 
@@ -1701,10 +1771,7 @@ async function submitModel(e) {
   delete body.extra_param_name; delete body.extra_param_value;
   if (_epn) body.extra_params = { [_epn]: _epv };
   delete body.timezone;
-  // fallback: if one-time fields are filled but token_type is still daily, switch it
-  if (body.token_type !== 'one_time' && (body.max_tokens > 0 || body.ttl_seconds > 0 || body.expire_date)) {
-    body.token_type = 'one_time';
-  }
+  // 一次性字段现已按 token_type 条件显隐（问题16），不再需要「填了就自动切 one_time」的兜底
   let ok;
   if (editingId) ok = await api('/admin/models/' + encodeURIComponent(editingId).replace(/%2F/g, '/'), { method: 'PUT', body: JSON.stringify(body) });
   else ok = await api('/admin/models', { method: 'POST', body: JSON.stringify(body) });

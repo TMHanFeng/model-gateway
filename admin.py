@@ -513,11 +513,19 @@ async def update_pool(pool_name: str, request: Request, _=Depends(verify_admin))
         pools[pool_name]["auto_order"] = bool(body["auto_order"])
     if "load_balance" in body:
         pools[pool_name]["load_balance"] = bool(body["load_balance"])
-    # 互斥：auto_order 与 load_balance 不可同时开启（后开者优先生效，另一者自动关闭）
-    if pools[pool_name].get("load_balance"):
+    # 互斥：auto_order 与 load_balance 不可同时开启；本次请求新开启者优先，另一者自动关闭
+    # （旧逻辑固定 load_balance 优先，想切回 auto_order 时会被静默丢弃）
+    if body.get("load_balance"):
+        pools[pool_name]["load_balance"] = True
         pools[pool_name]["auto_order"] = False
-    elif pools[pool_name].get("auto_order"):
+    elif body.get("auto_order"):
+        pools[pool_name]["auto_order"] = True
         pools[pool_name]["load_balance"] = False
+    else:
+        if pools[pool_name].get("load_balance"):
+            pools[pool_name]["auto_order"] = False
+        elif pools[pool_name].get("auto_order"):
+            pools[pool_name]["load_balance"] = False
     if "slow_latency_threshold" in body:
         try:
             pools[pool_name]["slow_latency_threshold"] = int(body["slow_latency_threshold"])

@@ -140,11 +140,18 @@ class OpenAIProvider:
         resp.raise_for_status()
         data = resp.json()
 
-        # === Issue 6 诊断日志（DEBUG 级别，默认不输出）===
+        # === Issue 6 诊断日志（DEBUG 级别）===
+        # 注意：截断 content/reasoning 再格式化——根 logger 为 DEBUG 时此分支恒真，
+        # 整包 dict 的 f-string 会拖慢每个非流式请求（推理模型 body 可达数百 KB）
         import logging
         logger = logging.getLogger(__name__)
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"[openai upstream raw] model={model_name} status={resp.status_code} body={data}")
+            _m = (data.get("choices") or [{}])[0].get("message") or {}
+            logger.debug(
+                f"[openai upstream raw] model={model_name} status={resp.status_code} "
+                f"usage={data.get('usage')} "
+                f"content={str(_m.get('content'))[:200]!r} reasoning={str(_m.get('reasoning_content'))[:120]!r}"
+            )
         # Issue 6: 上游有 completion_tokens 但 content 为空 — 始终打 WARNING 便于排查
         try:
             _first = (data.get("choices") or [{}])[0]
@@ -194,7 +201,19 @@ class OpenAIProvider:
         ) as resp:
             if resp.status_code == 429:
                 raise RateLimitError("upstream 429")
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                # 流式错误体必须在 with 退出前读出：流关闭后 pool 层的 aread() 拿到空，
+                # 上游真实原因（如上下文超限的 400 文案）会整体丢失
+                try:
+                    _body = (await resp.aread()).decode("utf-8", "replace")
+                except Exception:
+                    _body = ""
+                if _body:
+                    _prefix = e.args[0] if e.args else str(e)
+                    e.args = (f"{_prefix} | 上游响应: {_body[:300]}",)
+                raise
             async for line in resp.aiter_lines():
                 if line.startswith("data: "):
                     yield line + "\n\n"

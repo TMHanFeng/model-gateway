@@ -57,16 +57,39 @@ class ModelEntry:
 
 
 ROLLING_5H_SECONDS = 5 * 3600
+# 配额预检缓存秒数（问题19）：预检结果短缓存，避免每个候选模型每次选择都串行打 sqlite；
+# 该模型的每次调用计费后（log_request 处）立即失效，保证自身计数新鲜
+QUOTA_CACHE_TTL = 5.0
+
+
+_config_cache: dict | None = None
+_config_mtime: float | None = None
 
 
 def load_config() -> dict:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    # 热路径（每个请求的 verify_key）都会调用：mtime 未变化时直接返回缓存，
+    # 避免每请求同步读盘+解析 config.json；外部改动（含手工编辑）会因 mtime 变化自动失效
+    global _config_cache, _config_mtime
+    try:
+        mtime = CONFIG_PATH.stat().st_mtime
+    except OSError:
+        mtime = None
+    if _config_cache is None or mtime != _config_mtime:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            _config_cache = json.load(f)
+        _config_mtime = mtime
+    return _config_cache
 
 
 def save_config(config: dict):
+    global _config_cache, _config_mtime
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
+    _config_cache = config
+    try:
+        _config_mtime = CONFIG_PATH.stat().st_mtime
+    except OSError:
+        _config_mtime = None
 
 
 class ModelPool:
@@ -81,6 +104,8 @@ class ModelPool:
         self.single_override: dict[str, str] = {}
         # 负载均衡（round-robin）：pool_name -> 下一次起始下标
         self.round_robin: dict[str, int] = {}
+        # 配额预检缓存：model_id -> (expires_at, ok, reason, detail)
+        self._quota_cache: dict[str, tuple[float, bool, str, dict | None]] = {}
         self._load()
 
     def _load(self):
@@ -220,6 +245,7 @@ class ModelPool:
     def reload(self):
         old_latency = {mid: e.latency_ms for mid, e in self.registry.items()}
         self.providers_cache.clear()
+        self._quota_cache.clear()
         self.config = load_config()
         self.registry.clear()
         self.by_name.clear()
@@ -244,17 +270,34 @@ class ModelPool:
         for p in self.providers_cache.values():
             await p.close()
 
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        """按字符类型估算 token：CJK 字符约 1 字 = 1 token（GLM 等国产模型 tokenizer 实测），
+        ASCII/拉丁约 4 字符 = 1 token。旧的 len//3 公式对中文低估约 3 倍，
+        导致超长请求通过预检打到上游才报 400。"""
+        if not text:
+            return 0
+        cjk = 0
+        other = 0
+        for ch in text:
+            # CJK 统一表意文字/扩展、假名、谚文、全角标点等（> U+2E7F）按 1 字 1 token
+            if ord(ch) > 0x2E7F:
+                cjk += 1
+            else:
+                other += 1
+        return cjk + (other + 3) // 4 + 1
+
     def _estimate_tokens(self, req) -> int:
         total = 0
         for m in req.messages:
             content = m.content
             if isinstance(content, str):
-                total += len(content) // 3 + 1
+                total += self._estimate_text_tokens(content)
             elif isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict):
                         if part.get("type") == "text":
-                            total += len(part.get("text", "")) // 3 + 1
+                            total += self._estimate_text_tokens(part.get("text", ""))
                         elif part.get("type") in ("image_url", "image"):
                             total += 300
         if req.max_tokens:
@@ -270,15 +313,9 @@ class ModelPool:
                         return True
         return False
 
-    async def _check_available(self, entry: ModelEntry, estimated_tokens: int = 0, has_images: bool = False,
-                               required_modality: str | None = None, required_json_output: bool = False) -> tuple[bool, str, dict | None]:
-        """返回 (ok, reason, detail)。detail 用于调用记录展示具体数值（已用/上限、冷却剩余秒等）。
-        required_modality：要求特定模态（如 "embedding"/"rerank"）时，不匹配的模型一律排除；
-                        None 表示普通 chat/通用调用（此时 embedding/rerank 模型也应被排除）。
-        required_json_output：请求要求 json 输出时，仅 json_output=True 的模型可用。"""
-        now = time.time()
-        detail = None
-
+    async def _quota_check(self, entry: ModelEntry, now: float) -> tuple[bool, str, dict | None]:
+        """配额与限速预检（读 sqlite 的部分，由 _check_available 短缓存包装）。
+        返回 (ok, reason, detail)。"""
         if entry.token_type == "one_time":
             state = await db.get_one_time_state(entry.id)
             if state is None:
@@ -340,6 +377,32 @@ class ModelPool:
             tpm = await db.get_tpm(entry.id)
             if tpm >= entry.tpm_limit:
                 return False, "tpm_limited", {"current": tpm, "limit": entry.tpm_limit}
+
+        return True, "ok", None
+
+    def _invalidate_quota_cache(self, model_id: str):
+        """该模型发生计费/调用后调用：使配额预检缓存立即失效，保证下一次预检读到最新用量"""
+        self._quota_cache.pop(model_id, None)
+
+    async def _check_available(self, entry: ModelEntry, estimated_tokens: int = 0, has_images: bool = False,
+                               required_modality: str | None = None, required_json_output: bool = False) -> tuple[bool, str, dict | None]:
+        """返回 (ok, reason, detail)。detail 用于调用记录展示具体数值（已用/上限、冷却剩余秒等）。
+        required_modality：要求特定模态（如 "embedding"/"rerank"）时，不匹配的模型一律排除；
+                        None 表示普通 chat/通用调用（此时 embedding/rerank 模型也应被排除）。
+        required_json_output：请求要求 json 输出时，仅 json_output=True 的模型可用。"""
+        now = time.time()
+        detail = None
+
+        # 配额/限速预检（问题19）：这部分需读 sqlite（每候选 1-4 次串行查询），
+        # 结果短缓存 QUOTA_CACHE_TTL 秒；该模型每次调用计费后立即失效，自身计数保持新鲜
+        cached = self._quota_cache.get(entry.id)
+        if cached and cached[0] > now:
+            quota_ok, quota_reason, quota_detail = cached[1], cached[2], cached[3]
+        else:
+            quota_ok, quota_reason, quota_detail = await self._quota_check(entry, now)
+            self._quota_cache[entry.id] = (now + QUOTA_CACHE_TTL, quota_ok, quota_reason, quota_detail)
+        if not quota_ok:
+            return False, quota_reason, quota_detail
 
         if has_images and entry.modality != "vision":
             return False, "no_vision", {"modality": entry.modality}
@@ -622,6 +685,7 @@ class ModelPool:
 
         tokens_used = response.usage.total_tokens
         await db.log_request(entry.id, tokens_used)
+        self._invalidate_quota_cache(entry.id)
         await db.add_model_call(entry.id, tokens_used)
 
         if entry.token_type == "one_time":
@@ -663,6 +727,7 @@ class ModelPool:
         finally:
             self._record_latency(entry, (time.perf_counter() - t0) * 1000)
             await db.log_request(entry.id, captured)
+            self._invalidate_quota_cache(entry.id)
             await db.add_model_call(entry.id, captured)
             if captured > 0:
                 if entry.token_type == "one_time":
@@ -692,6 +757,7 @@ class ModelPool:
         usage = response.get("usage") or {}
         tokens_used = int(usage.get("prompt_tokens", 0) or usage.get("total_tokens", 0))
         await db.log_request(entry.id, tokens_used)
+        self._invalidate_quota_cache(entry.id)
         await db.add_model_call(entry.id, tokens_used)
 
         if entry.token_type == "one_time":
@@ -724,6 +790,7 @@ class ModelPool:
         usage = response.get("usage") or {}
         tokens_used = int(usage.get("total_tokens", 0) or usage.get("prompt_tokens", 0))
         await db.log_request(entry.id, tokens_used)
+        self._invalidate_quota_cache(entry.id)
         await db.add_model_call(entry.id, tokens_used)
 
         if entry.token_type == "one_time":
@@ -989,7 +1056,7 @@ class ModelPool:
                 if status is not None:
                     detail["status"] = status
                 err_msg = str(e)
-                if err_msg and len(err_msg) < 200:
+                if err_msg and len(err_msg) < 500:
                     detail["error"] = err_msg
                 # 详细错误日志：含上游原始响应体（前 600 字符），用于定位 4xx/5xx 根因
                 resp_obj = getattr(e, "response", None)
@@ -1077,6 +1144,7 @@ class ModelPool:
                     await db.add_daily_usage(entry.id, 1)
                 elif entry.token_type == "rolling_5h" and entry.billing_mode == "request":
                     await self._charge_rolling_5h(entry, 1)
+                self._invalidate_quota_cache(entry.id)
 
                 last_reason = actual_calls[-1]["reason"] if actual_calls else ""
                 if last_reason in ("selected", "single_override_selected") and actual_calls[-1]["model"] == entry.id:
@@ -1114,7 +1182,7 @@ class ModelPool:
                 if status is not None:
                     detail["status"] = status
                 err_msg = str(e)
-                if err_msg and len(err_msg) < 200:
+                if err_msg and len(err_msg) < 500:
                     detail["error"] = err_msg
                 # 详细错误日志：含上游原始响应体（前 600 字符）
                 resp_obj = getattr(e, "response", None)
@@ -1175,6 +1243,7 @@ class ModelPool:
                         await self._charge_rolling_5h(entry, tokens)
                     else:
                         await db.add_daily_usage(entry.id, tokens)
+                    self._invalidate_quota_cache(entry.id)
                     r["usage_recorded"] = tokens
             return r
 
