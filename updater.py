@@ -81,7 +81,48 @@ error_timeline = []  # 最近异常事件（含启动/重启/异常退出的具�
 _global_version_cache = {
     "gitee": "—", "gitee_date": None,
     "github": "—", "github_date": None,
+    "fetched_at": 0.0,
 }
+VERSION_REFRESH_INTERVAL = 60
+
+
+def _refresh_version_cache():
+    """拉取两远程最新版本写入 _global_version_cache（各远程独立超时，单项失败不影响另一项）"""
+    versions = get_remote_versions(gitee_timeout=15, github_timeout=20)
+    if versions.get("gitee"):
+        _global_version_cache["gitee"] = versions["gitee"]
+        try:
+            gts = get_cached_tags_with_dates("origin")
+            _global_version_cache["gitee_date"] = gts[0][1] if gts else None
+        except Exception:
+            pass
+    if versions.get("github"):
+        _global_version_cache["github"] = versions["github"]
+        try:
+            hts = get_cached_tags_with_dates("github")
+            _global_version_cache["github_date"] = hts[0][1] if hts else None
+        except Exception:
+            pass
+    _global_version_cache["fetched_at"] = time.time()
+
+
+def _version_refresher_once(wait: float = 0.0):
+    """后台触发一次版本缓存刷新；wait>0 时最多等待 wait 秒（供手动刷新按钮拿新值）"""
+    import threading
+    t = threading.Thread(target=_refresh_version_cache, daemon=True)
+    t.start()
+    if wait > 0:
+        t.join(wait)
+
+
+def _version_refresher_loop():
+    """后台循环：每 VERSION_REFRESH_INTERVAL 秒刷新版本缓存（/status 与 /remote-versions 秒读）"""
+    while True:
+        try:
+            _refresh_version_cache()
+        except Exception as e:
+            log.error(f"版本缓存刷新失败: {e}")
+        time.sleep(VERSION_REFRESH_INTERVAL)
 
 # ── 网页仪表盘 HTML（苹果风浅色主题，与 hfadmin 同风格）──────────────
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -268,6 +309,11 @@ async function fetchStatus(){
     var errs=d.recent_errors||[];var list=document.getElementById('err-list');
     if(errs.length){list.innerHTML=errs.slice().reverse().map(function(e){return '<div class="err-item"><span class="t">'+esc(e.time)+'</span><span class="s">['+esc(e.source)+']</span>'+esc(e.message)+'</div>'}).join('')}
     else{list.innerHTML='<div class="no-err">暂无异常记录</div>'}
+    var ge=document.getElementById('gitee-ver'),gh=document.getElementById('github-ver');
+    if(d.git){
+      if(ge&&/加载中/.test(ge.textContent)&&d.git.gitee_version&&d.git.gitee_version!=='获取中…')ge.textContent=d.git.gitee_version;
+      if(gh&&/加载中/.test(gh.textContent)&&d.git.github_version&&d.git.github_version!=='获取中…')gh.textContent=d.git.github_version;
+    }
   }catch(e){}
 }
 async function loadVersions(){
@@ -1559,12 +1605,12 @@ def handle_api_request(conn):
             commit = gw["commit"] if gw["reachable"] and gw["commit"] else get_current_commit_short()
             git_status = {
                 "current": cur_ver,
-                "latest": "请刷新版本",
+                "latest": (_global_version_cache.get("gitee") or _global_version_cache.get("github") or "请刷新版本"),
                 "has_update": False,
                 "commit": commit,
                 "gateway_reachable": gw["reachable"],
-                "gitee_version": "加载中",
-                "github_version": "加载中",
+                "gitee_version": (_global_version_cache.get("gitee") or "获取中…"),
+                "github_version": (_global_version_cache.get("github") or "获取中…"),
                 "source": selected_source,
             }
             response_body = json.dumps({
@@ -1722,52 +1768,32 @@ def handle_api_request(conn):
             response_body = json.dumps(result, ensure_ascii=False)
 
         elif path == "/remote-versions":
-            import threading as _t2
-            rv = {"gitee": "—", "github": "—", "gitee_date": None, "github_date": None, "latest": "", "has_update": False, "tags": [], "source": selected_source}
-            def _gitee():
-                try:
-                    t = get_remote_latest_tag("origin", timeout=30)
-                    if t:
-                        _global_version_cache["gitee"] = t
-                        gts = get_cached_tags_with_dates("origin")
-                        _global_version_cache["gitee_date"] = gts[0][1] if gts else None
-                except Exception as e:
-                    log.error(f"Gitee版本查询失败: {e}")
-            def _github():
-                try:
-                    t = get_remote_latest_tag("github", timeout=120)
-                    if t:
-                        _global_version_cache["github"] = t
-                        hts = get_cached_tags_with_dates("github")
-                        _global_version_cache["github_date"] = hts[0][1] if hts else None
-                except Exception as e:
-                    log.error(f"GitHub版本查询失败: {e}")
-            def _tags():
-                try:
-                    g = get_cached_tags_with_dates("origin")
-                    h = get_cached_tags_with_dates("github")
-                    rv["gitee_tags"] = [{"tag": t, "date": dt, "src": "gitee"} for t, dt in g]
-                    rv["github_tags"] = [{"tag": t, "date": dt, "src": "github"} for t, dt in h]
-                    rv["tags"] = rv["gitee_tags"] + rv["github_tags"]
-                    gw = get_gateway_running_version()
-                    cur = gw["version"] if gw["reachable"] and gw["version"] else get_current_version()
-                    for t, _ in g + h:
-                        if t.startswith("v") and t > cur:
-                            rv["has_update"] = True
+            # 秒读全局缓存；缓存过期(>60s)时后台刷新一次，最多等 12s 让本次点击拿到新值
+            age = time.time() - float(_global_version_cache.get("fetched_at", 0) or 0)
+            if age > VERSION_REFRESH_INTERVAL:
+                _version_refresher_once(wait=12)
+            rv = {
+                "gitee": _global_version_cache["gitee"],
+                "github": _global_version_cache["github"],
+                "gitee_date": _global_version_cache["gitee_date"],
+                "github_date": _global_version_cache["github_date"],
+                "latest": "", "has_update": False,
+                "tags": [], "source": selected_source,
+            }
+            try:
+                gts = get_cached_tags_with_dates("origin")
+                hts = get_cached_tags_with_dates("github")
+                rv["tags"] = ([{"tag": t, "date": dt, "src": "gitee"} for t, dt in gts]
+                              + [{"tag": t, "date": dt, "src": "github"} for t, dt in hts])
+                gw = get_gateway_running_version()
+                cur = gw["version"] if gw["reachable"] and gw["version"] else get_current_version()
+                for t, _ in rv["tags"]:
+                    if t.startswith("v") and t > cur:
+                        if not rv["latest"]:
                             rv["latest"] = t
-                except Exception:
-                    pass
-            # 启动后台线程（不影响上次的缓存读取）
-            t_g = _t2.Thread(target=_gitee, daemon=True); t_g.start()
-            t_h = _t2.Thread(target=_github, daemon=True); t_h.start()
-            t_t = _t2.Thread(target=_tags, daemon=True); t_t.start()
-            t_g.join(timeout=35)
-            t_t.join(timeout=8)
-            # 读缓存：第一次加载可能暂无，之后都秒读
-            rv["gitee"] = _global_version_cache["gitee"]
-            rv["gitee_date"] = _global_version_cache["gitee_date"]
-            rv["github"] = _global_version_cache["github"]
-            rv["github_date"] = _global_version_cache["github_date"]
+                        rv["has_update"] = True
+            except Exception as e:
+                log.error(f"/remote-versions 标签列表失败: {e}")
             response_body = json.dumps(rv, ensure_ascii=False)
 
         elif path in ("/updater", "/dashboard"):
@@ -1880,6 +1906,10 @@ def main():
 
     # 启动 API 服务器
     api_thread = start_api_server()
+
+    # 后台版本缓存刷新线程：/status 与 /remote-versions 秒读缓存，页面加载即有版本
+    import threading as _th
+    _th.Thread(target=_version_refresher_loop, daemon=True).start()
 
     # 注册信号处理
     def handle_signal(signum, frame):
