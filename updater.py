@@ -664,11 +664,16 @@ def get_remote_latest_tag(remote: str, timeout: int = 30) -> str | None:
         return None
 
 
-def get_remote_versions(github_timeout: int = 20, gitee_timeout: int = 15) -> dict:
+def get_remote_versions(github_timeout: int = 20, gitee_timeout: int = 15, result: dict | None = None) -> dict:
     """获取 gitee(origin) / github 两个远程的最新版本 tag。
-    并行查询（总耗时≈最慢一路而非串行累加），超时收紧（GitHub 120→20s，Gitee 30→15s）"""
+    并行查询（总耗时≈最慢一路而非串行累加），超时收紧（GitHub 120→20s，Gitee 30→15s）。
+    result: 传入外部共享字典时，各远程完成后立即写入（外部可在总超时前读到部分结果）。
+    修复 /check 外层 15s 截断早于内部 ~22s 完成、导致版本永远 unknown 的竞态。"""
     import threading
-    result = {"gitee": None, "github": None}
+    if result is None:
+        result = {"gitee": None, "github": None}
+    result.setdefault("gitee", None)
+    result.setdefault("github", None)
 
     def _g():
         result["gitee"] = get_remote_latest_tag("origin", timeout=gitee_timeout)
@@ -1593,19 +1598,23 @@ def handle_api_request(conn):
                 response_body = json.dumps({"status": "update_started", "inner_address": get_inner_address()})
 
         elif path == "/check":
-            # 仅检查是否有更新（带超时保护）
+            # 仅检查是否有更新。
+            # 版本查询共享同一字典：gitee/github 各自完成后立即写入（外部可见部分结果）。
+            # 外层预算 25s ≥ 内部最坏 22s(20+2)——修复旧版 15s 截断早于内部完成、版本永远 unknown 的竞态
             has_update = False
             current = "unknown"
             latest = "unknown"
-            versions = {}
-            def _check():
-                nonlocal has_update, current, latest, versions
-                versions = get_remote_versions()
+            versions = {"gitee": None, "github": None}
+            def _fill():
+                get_remote_versions(result=versions)
+            t = _t.Thread(target=_fill, daemon=True)
+            t.start()
+            t.join(timeout=25)
+            try:
                 h, c, l = has_updates_available(versions)
                 has_update, current, latest = h, c, l
-            t = _t.Thread(target=_check, daemon=True)
-            t.start()
-            t.join(timeout=15)
+            except Exception:
+                pass
             gitee_tags = get_cached_tags_with_dates("origin")
             github_tags = get_cached_tags_with_dates("github")
             response_body = json.dumps({
