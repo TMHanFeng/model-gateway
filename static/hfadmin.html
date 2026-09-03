@@ -1864,6 +1864,7 @@ async function loadStats() {
     const billing = m.billing_mode === 'request' ? '按次计费' : '按 Token 计费';
     const typeBadge = m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>'
       : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>'
+      : windowModel ? `<span class="badge b-5h" title="每日 ${m.refresh_time} 刷新窗口">${m.refresh_time}窗口</span>`
       : '<span class="badge b-ghost">每日</span>';
     const freeBadge = m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>';
     let refresh = m.token_type === 'one_time' ? '不刷新'
@@ -1873,7 +1874,12 @@ async function loadStats() {
       refresh += ` · 自然日 ${(m.today_tokens || 0).toLocaleString()} tok`;
     }
     return { m, used, limit, unit, numsTitle, limitText, pct, cls, pctText, billing, typeBadge, freeBadge, refresh, _used: used, _limit: limit, _wused: wUsed };
-  }).sort((a, b) => (b._wused || 0) - (a._wused || 0));  // 按当前窗口用量（进度条大数字）排序
+  }).sort((a, b) => {
+    // 剩余百分比越少越靠前；不限量（未设限额）固定在最后
+    const ar = a._limit > 0 ? Math.max(0, 100 - Math.min(100, (a._wused || 0) / a._limit * 100)) : Infinity;
+    const br = b._limit > 0 ? Math.max(0, 100 - Math.min(100, (b._wused || 0) / b._limit * 100)) : Infinity;
+    return ar - br;
+  });
 
   grid.innerHTML = items.map((x, i) => `
     <div class="stat-card ${x.cls}" style="animation-delay:${i * 45}ms">

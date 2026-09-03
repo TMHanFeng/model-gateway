@@ -1407,7 +1407,12 @@ async function loadStats() {
       // 自定义刷新窗口（非默认/00:00/24:00）：配额窗口≠自然日，主显窗口用量，小字补自然日用量
       _windowModel: m.token_type === 'daily' && m.refresh_time && !['00:00', '0:00', '24:00'].includes(m.refresh_time.trim()),
     }))
-    .sort((a, b) => (b._used || 0) - (a._used || 0))  // 按当前窗口用量（进度条大数字）排序
+    .sort((a, b) => {
+      // 剩余百分比越少越靠前；不限量（未设限额）固定在最后
+      const ar = a._limit > 0 ? Math.max(0, 100 - Math.min(100, (a._used || 0) / a._limit * 100)) : Infinity;
+      const br = b._limit > 0 ? Math.max(0, 100 - Math.min(100, (b._used || 0) / b._limit * 100)) : Infinity;
+      return ar - br;
+    })
     .map((m, i) => {
     const dim = statDim;
     const isBilling = dim === 'billing';
@@ -1434,6 +1439,7 @@ async function loadStats() {
     const billing = m.billing_mode === 'request' ? '按次计费' : '按 Token 计费';
     const typeBadge = m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>'
       : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>'
+      : m._windowModel ? `<span class="badge b-5h" title="每日 ${m.refresh_time} 刷新窗口">${m.refresh_time}窗口</span>`
       : '<span class="badge b-openai">每日</span>';
     const freeBadge = m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>';
     let refresh = m.token_type === 'one_time' ? '不刷新'
