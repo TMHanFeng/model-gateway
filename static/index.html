@@ -405,7 +405,7 @@ body {
 
   <div id="tab-stats" class="hidden">
     <div class="toolbar">
-      <div class="hint">各模型配额使用情况，每 5 秒自动刷新。</div>
+      <div class="hint">各模型配额使用情况，每 5 秒自动刷新。配了刷新时间的模型按「当前窗口用量」统计与排序，小字为自然日用量。</div>
       <div class="btn-row" style="margin-left:auto">
         <button class="btn btn-sm btn-amber" id="stat-dim-billing" onclick="setStatDim('billing')">计费量</button>
         <button class="btn btn-sm" id="stat-dim-requests" onclick="setStatDim('requests')">调用次数</button>
@@ -1404,13 +1404,10 @@ async function loadStats() {
       ...m,
       _used: m.daily_used_tokens ?? m.used_tokens ?? 0,
       _limit: m.daily_token_limit || m.max_tokens || 0,
+      // 自定义刷新窗口（非默认/00:00/24:00）：配额窗口≠自然日，主显窗口用量，小字补自然日用量
+      _windowModel: m.token_type === 'daily' && m.refresh_time && !['00:00', '0:00', '24:00'].includes(m.refresh_time.trim()),
     }))
-    .sort((a, b) => {
-      // Sort by usage percentage descending: most-used first. Unlimited (-1) last.
-      const ap = a._limit > 0 ? a._used / a._limit : -1;
-      const bp = b._limit > 0 ? b._used / b._limit : -1;
-      return bp - ap;
-    })
+    .sort((a, b) => (b._used || 0) - (a._used || 0))  // 按当前窗口用量（进度条大数字）排序
     .map((m, i) => {
     const dim = statDim;
     const isBilling = dim === 'billing';
@@ -1430,6 +1427,7 @@ async function loadStats() {
       numsTitle = '当日 Token 用量';
       limitText = '—';
     }
+    if (isBilling && m._windowModel) numsTitle = `当前窗口用量（自 ${m.refresh_time} 起）`;
     const pct = isBilling && limit > 0 ? Math.min(100, used / limit * 100) : 0;
     const cls = !isBilling ? '' : (m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : ''));
     const pctText = !isBilling ? '—' : (m.expired ? '已失效' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量'));
@@ -1438,9 +1436,12 @@ async function loadStats() {
       : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>'
       : '<span class="badge b-openai">每日</span>';
     const freeBadge = m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>';
-    const refresh = m.token_type === 'one_time' ? '不刷新'
+    let refresh = m.token_type === 'one_time' ? '不刷新'
       : m.token_type === 'rolling_5h' ? '5h窗口 · 剩 ' + fmtDur(m.window_remaining_sec)
       : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
+    if (m._windowModel && isBilling && (m.today_tokens || 0) > 0) {
+      refresh += ` · 自然日 ${(m.today_tokens || 0).toLocaleString()} tok`;
+    }
     return `
       <div class="stat-card ${cls}" style="animation-delay:${i * 45}ms">
         <div class="stat-top">
