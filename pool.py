@@ -717,10 +717,14 @@ class ModelPool:
     def _reasoning_fragment(self, entry: ModelEntry, req) -> dict | None:
         """按思考档位 + 模型 reasoning_map 解析出上游请求体片段。
 
-        档位来源：客户端显式传参优先；未传时用配置 default_reasoning_effort（缺省 low，
-        设为 auto/"" 等非法值 = 不注入，保持模型默认行为）。无映射/无档位时返回 None。
+        档位来源：客户端显式传参优先（auto = 本次用模型默认，不注入）；未传时用配置
+        default_reasoning_effort（缺省 low，设为 auto/"" 等同样 = 模型默认）。
+        无映射/无档位时返回 None。
         """
-        effort = reasoning.normalize_effort(getattr(req, "reasoning_effort", None))
+        raw = getattr(req, "reasoning_effort", None)
+        if raw is not None and str(raw).strip().lower() == "auto":
+            return None  # 客户端显式 auto：本次请求不注入，保持模型默认行为
+        effort = reasoning.normalize_effort(raw)
         if effort is None:
             raw = self.config.get("default_reasoning_effort", "low")
             effort = reasoning.normalize_effort(raw)

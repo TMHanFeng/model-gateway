@@ -446,7 +446,7 @@ curl -X POST http://127.0.0.1:8650/v1/chat/completions \
 
 ### 🧠 统一思考控制（reasoning_effort）
 
-客户端传 `reasoning_effort`，取值六档：`off / minimal / low / medium / high / max`（大小写不敏感；非法值 422）。不带参数 = 默认 `low` 档（v2.10.2+，config.json 顶层 `default_reasoning_effort` 可调；设 `auto` 恢复模型默认行为）。
+客户端传 `reasoning_effort`，取值六档：`off / minimal / low / medium / high / max`（大小写不敏感；非法值 422）。不带参数 = 默认 `low` 档（v2.10.2+，config.json 顶层 `default_reasoning_effort` 可调）；传 `"reasoning_effort": "auto"`（v2.10.3+）= 本次用模型默认行为。
 
 - **OpenAI 格式入口**：请求体顶层直接传 `"reasoning_effort": "high"`。
 - **Anthropic 格式入口**（`/v1/messages`）：传 `thinking: {"type": "enabled", "budget_tokens": 8192}`，网关自动归一化——`disabled`→off；enabled 按 budget 分档（≤1024→minimal，≤4096→low，≤10240→medium，≤20480→high，>20480→max）。
@@ -492,6 +492,8 @@ SQLite（`gateway.db`）持久化以下表：
 ## 📜 版本
 
 ### 最新
+
+**`v2.10.3`** — **请求级 `reasoning_effort: "auto"`**：客户端可显式传 auto 表示"本次请求不注入思考参数、用模型默认行为"（优先级高于服务端 default_reasoning_effort，含 auto/low 等任何默认档），作为默认档 low 的单次豁免；422 提示文案同步列出 auto
 
 **`v2.10.2`** — **默认思考档位 low**：请求不传 `reasoning_effort` 时不再放任模型默认（多数思考模型默认开思考且深度自选），改为注入默认档 `low`（按各模型 reasoning_map 映射；未配置映射的模型不受影响）。config.json 顶层新增可选 `default_reasoning_effort`（六档任一，缺省 low；设 `auto`/`""` 恢复旧的"模型默认"行为；非法值回落 low），/admin/reload 热生效
 

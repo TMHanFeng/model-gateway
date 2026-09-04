@@ -158,11 +158,13 @@ async def _chat_handler(request: Request, auth: dict):
             detail="请求格式错误: " + str(e.errors(include_input=False, include_url=False))[:500],
         )
 
-    if req.reasoning_effort is not None and reasoning.normalize_effort(req.reasoning_effort) is None:
-        raise HTTPException(
-            status_code=422,
-            detail=f"非法 reasoning_effort '{req.reasoning_effort}'，支持: {'/'.join(reasoning.LEVELS)}",
-        )
+    if req.reasoning_effort is not None:
+        _re = str(req.reasoning_effort).strip().lower()
+        if _re != "auto" and reasoning.normalize_effort(_re) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"非法 reasoning_effort '{req.reasoning_effort}'，支持: {'/'.join(reasoning.LEVELS + ['auto'])}",
+            )
 
     pool_name = _resolve(req.model or "auto")
     if pool_name is None:
