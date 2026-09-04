@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 gateway.db
+gateway.pid
 gateway.db-shm
 gateway.db-wal
 *.log

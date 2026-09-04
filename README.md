@@ -128,6 +128,18 @@ python main.py
 
 ---
 
+### 🔁 开机自启（Windows）
+
+已内置启动器脚本：`start_gateway.ps1`（开窗显示启动进度 → 健康检查通过后自动关窗，主程序隐藏窗口后台静默运行；失败则窗口停留提示日志）与 `stop_gateway.ps1`（按 8650 端口停止）。
+
+注册当前用户开机自启（无需管理员，登录后自动运行启动器）：
+
+```bat
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v ModelGateway /t REG_SZ /d "powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\AIcoding\model-gateway\start_gateway.ps1" /f
+```
+
+手动重启：先运行 `stop_gateway.ps1`（或 taskkill 旧进程），再双击/运行 `start_gateway.ps1` 即可。
+
 ## 📂 项目结构
 
 ```
