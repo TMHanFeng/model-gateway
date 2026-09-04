@@ -434,7 +434,7 @@ curl -X POST http://127.0.0.1:8650/v1/chat/completions \
 
 ### 🧠 统一思考控制（reasoning_effort）
 
-客户端传 `reasoning_effort`，取值六档：`off / minimal / low / medium / high / max`（大小写不敏感；非法值 422）。不带参数 = 上游默认行为。
+客户端传 `reasoning_effort`，取值六档：`off / minimal / low / medium / high / max`（大小写不敏感；非法值 422）。不带参数 = 默认 `low` 档（v2.10.2+，config.json 顶层 `default_reasoning_effort` 可调；设 `auto` 恢复模型默认行为）。
 
 - **OpenAI 格式入口**：请求体顶层直接传 `"reasoning_effort": "high"`。
 - **Anthropic 格式入口**（`/v1/messages`）：传 `thinking: {"type": "enabled", "budget_tokens": 8192}`，网关自动归一化——`disabled`→off；enabled 按 budget 分档（≤1024→minimal，≤4096→low，≤10240→medium，≤20480→high，>20480→max）。
@@ -480,6 +480,8 @@ SQLite（`gateway.db`）持久化以下表：
 ## 📜 版本
 
 ### 最新
+
+**`v2.10.2`** — **默认思考档位 low**：请求不传 `reasoning_effort` 时不再放任模型默认（多数思考模型默认开思考且深度自选），改为注入默认档 `low`（按各模型 reasoning_map 映射；未配置映射的模型不受影响）。config.json 顶层新增可选 `default_reasoning_effort`（六档任一，缺省 low；设 `auto`/`""` 恢复旧的"模型默认"行为；非法值回落 low），/admin/reload 热生效
 
 **`v2.10.1`** — **新增模型自动探测思考档位**：① 非 embedding/rerank 模型新增保存后自动探测——上游组合已有探测缓存时瞬间套用映射，新组合后台探测（约 1~3 分钟）完成后自动写入 reasoning_map 并热重载，面板按探测状态提示 ② "思考映射"输入框对 embedding/rerank 模态自动隐藏，模态改为 embedding/rerank 保存时自动剥离已有映射 ③ probe_reasoning.py 新增 cached_suggestion/probe_single 接口供管理端复用
 
