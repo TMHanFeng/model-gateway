@@ -23,6 +23,8 @@ class ChatCompletionRequest(BaseModel):
     tools: Optional[list[dict]] = None
     tool_choice: Optional[Union[str, dict]] = None
     response_format: Optional[dict] = None
+    # 统一思考档位：off/minimal/low/medium/high/max（按模型 reasoning_map 映射为上游参数）
+    reasoning_effort: Optional[str] = None
 
 
 class EmbeddingRequest(BaseModel):
@@ -54,6 +56,7 @@ class UsageInfo(BaseModel):
 class ChoiceMessage(BaseModel):
     role: str = "assistant"
     content: Optional[str] = ""
+    reasoning_content: Optional[str] = None
     tool_calls: Optional[list[dict]] = None
 
 

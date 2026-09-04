@@ -8,6 +8,8 @@
 
 import json
 
+import reasoning
+
 _OPENAI_REQUEST_KEYS = [
     "model",
     "messages",
@@ -98,6 +100,11 @@ def anthropic_to_openai(body: dict) -> dict:
     """Anthropic Messages 请求 -> OpenAI Chat Completion 请求。返回新 dict，不修改入参。"""
     out = {k: body[k] for k in _OPENAI_REQUEST_KEYS if k in body}
 
+    # 顶层 thinking 参数归一化为统一思考档位（再由模型 reasoning_map 映射为上游参数）
+    effort = reasoning.anthropic_thinking_to_effort(body.get("thinking"))
+    if effort:
+        out["reasoning_effort"] = effort
+
     messages = body.get("messages")
     if not isinstance(messages, list):
         messages = []
@@ -168,13 +175,18 @@ def openai_to_anthropic_response(resp: dict) -> dict:
     first = choices[0] if isinstance(choices, list) and choices else {}
     message = first.get("message") or {}
     content = message.get("content")
+    reasoning_text = message.get("reasoning_content")
     if isinstance(content, list):
         # 多模态回复（罕见）：逐项保留
         out_content = content
     else:
-        out_content = [
+        out_content = []
+        # 思考内容 -> thinking 块（无签名，仅供展示，不做回放校验）
+        if isinstance(reasoning_text, str) and reasoning_text:
+            out_content.append({"type": "thinking", "thinking": reasoning_text})
+        out_content.append(
             {"type": "text", "text": content if isinstance(content, str) else ""}
-        ]
+        )
     usage = resp.get("usage") or {}
     return {
         "id": resp.get("id", ""),
@@ -209,7 +221,8 @@ async def openai_sse_to_anthropic(openai_sse_stream):
     message_delta_sent = False
     last_usage = None  # 记录所有 chunk 的 usage（含 usage-only），供 message_delta 输出真实 output_tokens
     pending_finish = None  # 缓存 finish_reason，延迟到 [DONE]/流结束 时与 usage 一起发出
-    sent_content_block_stop = False
+    block_open = False  # 当前是否有打开的 content_block
+    block_type = None  # "text" | "thinking"；reasoning_content 与 content 增量交替时切换块
 
     def _delta_stop_payload(reason) -> dict:
         # message_delta 消息体：output_tokens 尽量取真实 usage（无则 0）
@@ -237,12 +250,12 @@ async def openai_sse_to_anthropic(openai_sse_stream):
                     if not finished:
                         finished = True
                         pending_finish = pending_finish or "stop"
-                    if not sent_content_block_stop:
+                    if block_open:
+                        block_open = False
                         yield _sse(
                             "content_block_stop",
                             {"type": "content_block_stop", "index": index},
                         )
-                        sent_content_block_stop = True
                     if pending_finish:
                         yield _sse("message_delta", _delta_stop_payload(pending_finish))
                         yield _sse("message_stop", {"type": "message_stop"})
@@ -281,14 +294,7 @@ async def openai_sse_to_anthropic(openai_sse_stream):
                         },
                     },
                 )
-                yield _sse(
-                    "content_block_start",
-                    {
-                        "type": "content_block_start",
-                        "index": index,
-                        "content_block": {"type": "text", "text": ""},
-                    },
-                )
+                # content_block 延迟打开：首个增量到达时按其类型（thinking/text）再开块
 
             choices = obj.get("choices")
             if not isinstance(choices, list) or not choices:
@@ -299,8 +305,54 @@ async def openai_sse_to_anthropic(openai_sse_stream):
 
             delta = choice.get("delta")
             if isinstance(delta, dict):
+                rpiece = delta.get("reasoning_content")
+                if isinstance(rpiece, str) and rpiece:
+                    if block_type != "thinking":
+                        if block_open:
+                            block_open = False
+                            yield _sse(
+                                "content_block_stop",
+                                {"type": "content_block_stop", "index": index},
+                            )
+                        index += 1
+                        block_type = "thinking"
+                        block_open = True
+                        yield _sse(
+                            "content_block_start",
+                            {
+                                "type": "content_block_start",
+                                "index": index,
+                                "content_block": {"type": "thinking", "thinking": ""},
+                            },
+                        )
+                    yield _sse(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {"type": "thinking_delta", "thinking": rpiece},
+                        },
+                    )
                 piece = delta.get("content")
                 if isinstance(piece, str) and piece:
+                    if block_type != "text":
+                        if block_open:
+                            block_open = False
+                            yield _sse(
+                                "content_block_stop",
+                                {"type": "content_block_stop", "index": index},
+                            )
+                        index += 1
+                        block_type = "text"
+                        block_open = True
+                        yield _sse(
+                            "content_block_start",
+                            {
+                                "type": "content_block_start",
+                                "index": index,
+                                "content_block": {"type": "text", "text": ""},
+                            },
+                        )
                     yield _sse(
                         "content_block_delta",
                         {
@@ -314,12 +366,12 @@ async def openai_sse_to_anthropic(openai_sse_stream):
             if finish and not finished:
                 finished = True
                 pending_finish = finish
-                if not sent_content_block_stop:
+                if block_open:
+                    block_open = False
                     yield _sse(
                         "content_block_stop",
                         {"type": "content_block_stop", "index": index},
                     )
-                    sent_content_block_stop = True
                 # message_delta/message_stop 延迟到 [DONE]：等 usage-only chunk 更新 last_usage 后发真实值
     except Exception as e:  # 流中途异常：error 事件后停止（不补发收尾）
         error_emitted = True
@@ -338,7 +390,8 @@ async def openai_sse_to_anthropic(openai_sse_stream):
     # （aclose → GeneratorExit）会抛 "async generator ignored GeneratorExit" 且
     # 无法在生成器内可靠捕获；放循环外则 GeneratorExit 的传播路径不经过此处，天然安全。
     if started and not error_emitted and not message_delta_sent:
-        if not sent_content_block_stop:
+        if block_open:
+            block_open = False
             yield _sse(
                 "content_block_stop",
                 {"type": "content_block_stop", "index": index},

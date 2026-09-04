@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import httpx
 from providers.openai_provider import OpenAIProvider, RateLimitError
 from providers.anthropic_provider import AnthropicProvider
+import reasoning
 import database as db
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class ModelEntry:
     modality: str = "text"
     json_output: bool = False  # 支持格式输出（json）——请求带 response_format json 时只选 true 的模型
     extra_params: dict = field(default_factory=dict)  # 用户自定义参数（注入上游 payload，黑名单过滤）
+    reasoning_map: dict = field(default_factory=dict)  # 统一思考档位 -> 上游请求体片段（reasoning.py 解析）
     provider_id: str = ""
     proxy_url: str = ""
     expire_date: str = ""
@@ -193,6 +195,7 @@ class ModelPool:
                 modality=m.get("modality", "text"),
                 json_output=bool(m.get("json_output", False)),
                 extra_params=(m.get("extra_params") or {}),
+                reasoning_map=(m.get("reasoning_map") or {}),
                 provider_id=pid,
                 proxy_url=proxy_url,
                 expire_date=m.get("expire_date", ""),
@@ -711,12 +714,20 @@ class ModelPool:
             entry.rolling5h_window_start = now
         await db.add_5h_usage(entry.id, amount)
 
+    def _reasoning_fragment(self, entry: ModelEntry, req) -> dict | None:
+        """按请求档位 + 模型 reasoning_map 解析出上游请求体片段（无映射/无参数时 None）"""
+        effort = reasoning.normalize_effort(getattr(req, "reasoning_effort", None))
+        if effort is None:
+            return None
+        return reasoning.resolve_fragment(entry.reasoning_map, effort)
+
     async def execute(self, entry: ModelEntry, req) -> tuple:
         provider = self._get_provider(entry)
+        fragment = self._reasoning_fragment(entry, req)
         t0 = time.perf_counter()
         async with entry.semaphore:
             try:
-                response = await provider.chat(req, entry.name)
+                response = await provider.chat(req, entry.name, reasoning_fragment=fragment)
             except RateLimitError:
                 entry.cooldown_until = time.time() + 10
                 raise
@@ -744,10 +755,11 @@ class ModelPool:
 
     async def execute_stream(self, entry: ModelEntry, req):
         provider = self._get_provider(entry)
+        fragment = self._reasoning_fragment(entry, req)
         t0 = time.perf_counter()
         # 计费在 execute_stream_with_fallback 验证首个分片（真正建连）成功之后进行，
         # 避免"连接即失败"的流式请求被错误计入配额。
-        raw = provider.chat_stream(req, entry.name)
+        raw = provider.chat_stream(req, entry.name, reasoning_fragment=fragment)
         return self._wrap_stream(entry, raw, t0)
 
     async def _wrap_stream(self, entry: ModelEntry, raw, t0: float):

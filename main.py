@@ -11,6 +11,7 @@ from pool import ModelPool, load_config, ContextOverflowPassThrough
 from database import init_db, close_db
 import database as db
 import keyauth
+import reasoning
 from scheduler import start_scheduler, sync_all_refresh_times
 from admin import router as admin_router, GATEWAY_VERSION, GATEWAY_COMMIT, get_gateway_version
 from format_adapter import (
@@ -155,6 +156,12 @@ async def _chat_handler(request: Request, auth: dict):
         raise HTTPException(
             status_code=422,
             detail="请求格式错误: " + str(e.errors(include_input=False, include_url=False))[:500],
+        )
+
+    if req.reasoning_effort is not None and reasoning.normalize_effort(req.reasoning_effort) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"非法 reasoning_effort '{req.reasoning_effort}'，支持: {'/'.join(reasoning.LEVELS)}",
         )
 
     pool_name = _resolve(req.model or "auto")

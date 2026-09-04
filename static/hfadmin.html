@@ -691,6 +691,7 @@ select { max-width: 100%; }
         <div class="fg"><label>自定义参数名（可选）</label><input name="extra_param_name" placeholder="如 reasoning_effort"></div>
         <div class="fg"><label>自定义参数值（可选）</label><input name="extra_param_value" placeholder="如 high"></div>
       </div>
+      <div class="fg"><label>思考映射 reasoning_map（JSON，可选）：统一档位 off/minimal/low/medium/high/max → 透传上游的请求体片段；留空 = 不注入</label><textarea name="reasoning_map" rows="5" placeholder='{"off": {"thinking": {"type": "disabled"}}, "medium": {"thinking": {"type": "enabled"}}, "max": {"thinking": {"type": "enabled"}}}'></textarea></div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="m-test-btn" onclick="testConnectivity()">🔌 测试连接</button>
         <button type="button" class="btn btn-ghost" onclick="closeModal('overlay-model')">取消</button>
@@ -1054,6 +1055,7 @@ function modelRowHTML(m, i) {
       ${freeBadge(m)}
       ${modBadge(m)}
       ${typeBadge(m)}
+      ${m.reasoning_map && Object.keys(m.reasoning_map).length ? '<span class="badge b-5h">思考映射</span>' : ''}
       ${latTag(m.id)}
     </div>
     <div class="m-actions">
@@ -1275,6 +1277,8 @@ async function editModel(id) {
   const _jc = document.getElementById('f-json-output'); if (_jc) _jc.checked = !!m.json_output;
   const _ep = m.extra_params || {}; const _ek = Object.keys(_ep)[0];
   if (f.extra_param_name) { f.extra_param_name.value = _ek || ''; f.extra_param_value.value = _ek ? String(_ep[_ek]) : ''; }
+  const _rm = m.reasoning_map || {};
+  if (f.reasoning_map) f.reasoning_map.value = Object.keys(_rm).length ? JSON.stringify(_rm, null, 2) : '';
   f.daily_token_limit.value = m.daily_token_limit || 0; f.rpm_limit.value = m.rpm_limit || 0;
   f.tpm_limit.value = m.tpm_limit || 0; f.context_window.value = m.context_window || 0;
   f.timeout_seconds.value = (m.timeout_seconds == null ? 120 : m.timeout_seconds);
@@ -1298,6 +1302,16 @@ async function submitModel(e) {
   const _epn = (body.extra_param_name || '').trim(), _epv = (body.extra_param_value || '').trim();
   delete body.extra_param_name; delete body.extra_param_value;
   if (_epn) body.extra_params = { [_epn]: _epv };
+  // 思考映射：始终显式提交（空对象 = 清除），避免 PUT 时未提交键被保留旧值
+  const _rmRaw = (body.reasoning_map || '').trim();
+  body.reasoning_map = {};
+  if (_rmRaw) {
+    try {
+      const _rmParsed = JSON.parse(_rmRaw);
+      if (typeof _rmParsed !== 'object' || _rmParsed === null || Array.isArray(_rmParsed)) throw new Error('必须是 JSON 对象（键为档位，值为请求体片段）');
+      body.reasoning_map = _rmParsed;
+    } catch (err) { toast('思考映射 JSON 格式错误：' + err.message, 'error'); return; }
+  }
   delete body.timezone;
   // 一次性字段现已按 token_type 条件显隐（问题16），不再需要「填了就自动切 one_time」的兜底
   let ok;

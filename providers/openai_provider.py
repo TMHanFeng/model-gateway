@@ -1,9 +1,12 @@
 import httpx
+import json
+import re
 import time
 import uuid
 import asyncio
 from typing import AsyncGenerator
 from models import ChatCompletionRequest, ChatCompletionResponse, UsageInfo, Choice, ChoiceMessage
+import reasoning
 
 
 class RateLimitError(Exception):
@@ -27,7 +30,8 @@ class OpenAIProvider:
     async def close(self):
         await self.client.aclose()
 
-    def _build_payload(self, req: ChatCompletionRequest, model_name: str, stream: bool = False) -> dict:
+    def _build_payload(self, req: ChatCompletionRequest, model_name: str, stream: bool = False,
+                       reasoning_fragment: dict | None = None) -> dict:
         messages = []
         for m in req.messages:
             d = m.model_dump(exclude_none=True)
@@ -67,6 +71,8 @@ class OpenAIProvider:
             for k, v in extra.items():
                 if k not in _reserved:
                     payload[k] = v
+        # 统一思考档位映射片段（模型 reasoning_map 配置，reasoning.resolve_fragment 产出）
+        reasoning.merge_fragment(payload, reasoning_fragment)
         return payload
 
     def _headers(self) -> dict:
@@ -128,8 +134,9 @@ class OpenAIProvider:
         resp.raise_for_status()
         return resp.json()
 
-    async def chat(self, req: ChatCompletionRequest, model_name: str) -> ChatCompletionResponse:
-        payload = self._build_payload(req, model_name)
+    async def chat(self, req: ChatCompletionRequest, model_name: str,
+                   reasoning_fragment: dict | None = None) -> ChatCompletionResponse:
+        payload = self._build_payload(req, model_name, reasoning_fragment=reasoning_fragment)
         resp = await self.client.post(
             f"{self.base_url}/chat/completions",
             json=payload,
@@ -171,22 +178,35 @@ class OpenAIProvider:
             pass
 
         usage = data.get("usage", {})
-        return ChatCompletionResponse(
-            id=data.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
-            created=data.get("created", int(time.time())),
-            model=data.get("model", model_name),
-            choices=[
+        choices = []
+        for c in data.get("choices", []):
+            _content = c["message"].get("content") or ""
+            _rc = c["message"].get("reasoning_content")
+            # 部分模型（MiniMax-M3 等）把思考内联在 content 的 <think>...</think> 里：
+            # 非流式时提取到 reasoning_content（DeepSeek 风格），保持各上游回传口径统一
+            if isinstance(_content, str) and _content.lstrip().startswith("<think>") and _rc is None:
+                _m = re.search(r"<think>(.*?)</think>", _content, re.S)
+                if _m:
+                    _rc = _m.group(1).strip()
+                    _content = _content[:_m.start()] + _content[_m.end():]
+                    _content = _content.lstrip("\n")
+            choices.append(
                 Choice(
                     index=c.get("index", 0),
                     message=ChoiceMessage(
                         role=c["message"]["role"],
-                        content=c["message"].get("content") or "",
+                        content=_content,
+                        reasoning_content=_rc,
                         tool_calls=c["message"].get("tool_calls"),
                     ),
                     finish_reason=c.get("finish_reason", "stop"),
                 )
-                for c in data.get("choices", [])
-            ],
+            )
+        return ChatCompletionResponse(
+            id=data.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
+            created=data.get("created", int(time.time())),
+            model=data.get("model", model_name),
+            choices=choices,
             usage=UsageInfo(
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
@@ -194,8 +214,40 @@ class OpenAIProvider:
             ),
         )
 
-    async def chat_stream(self, req: ChatCompletionRequest, model_name: str) -> AsyncGenerator[str, None]:
-        payload = self._build_payload(req, model_name, stream=True)
+    @staticmethod
+    def _split_think_line(line: str, splitter) -> str:
+        """把一条 OpenAI SSE data 行里 delta.content 的 <think> 内联段转成 reasoning_content。
+
+        非 JSON 行 / 无 choices / 无 content 增量时原样返回。
+        """
+        try:
+            obj = json.loads(line[6:])
+        except Exception:
+            return line
+        if not isinstance(obj, dict):
+            return line
+        choices = obj.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            return line
+        delta = choices[0].get("delta")
+        if not isinstance(delta, dict):
+            return line
+        piece = delta.get("content")
+        if not isinstance(piece, str) or not piece:
+            return line
+        rc, content = splitter.feed(piece)
+        if not rc and content == piece:
+            return line
+        if rc:
+            delta["reasoning_content"] = rc
+        delta["content"] = content
+        return "data: " + json.dumps(obj, ensure_ascii=False)
+
+    async def chat_stream(self, req: ChatCompletionRequest, model_name: str,
+                          reasoning_fragment: dict | None = None) -> AsyncGenerator[str, None]:
+        payload = self._build_payload(req, model_name, stream=True, reasoning_fragment=reasoning_fragment)
+        splitter = reasoning.ThinkTagSplitter()
+        done_sent = False
         async with self.client.stream(
             "POST",
             f"{self.base_url}/chat/completions",
@@ -219,9 +271,16 @@ class OpenAIProvider:
                 raise
             async for line in resp.aiter_lines():
                 if line.startswith("data: "):
+                    if line[6:].strip() == "[DONE]":
+                        done_sent = True
+                    else:
+                        line = self._split_think_line(line, splitter)
                     yield line + "\n\n"
                 elif line.strip() == "":
                     continue
+            # 部分上游（MiniMax 等）不发 [DONE]：补一条终结符，避免客户端挂起等待
+            if not done_sent:
+                yield "data: [DONE]\n\n"
 
     async def speedtest(self, model_name: str) -> dict:
         payload = {

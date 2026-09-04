@@ -129,6 +129,7 @@ async def add_model(request: Request, _=Depends(verify_admin)):
         "modality": body.get("modality", "text"),
         "json_output": bool(body.get("json_output", False)),
         "extra_params": body.get("extra_params") or {},
+        "reasoning_map": body.get("reasoning_map") or {},
     }
     if pid:
         entry["provider_id"] = pid

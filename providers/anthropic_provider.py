@@ -5,6 +5,7 @@ import json
 from typing import AsyncGenerator
 from models import ChatCompletionRequest, ChatCompletionResponse, UsageInfo, Choice, ChoiceMessage
 from .openai_provider import RateLimitError
+import reasoning
 
 
 class AnthropicProvider:
@@ -143,7 +144,8 @@ class AnthropicProvider:
             return "tool_calls"
         return "stop"
 
-    def _build_payload(self, req: ChatCompletionRequest, model_name: str, stream: bool = False) -> dict:
+    def _build_payload(self, req: ChatCompletionRequest, model_name: str, stream: bool = False,
+                       reasoning_fragment: dict | None = None) -> dict:
         system_msg = ""
         messages = []
         for m in req.messages:
@@ -198,6 +200,17 @@ class AnthropicProvider:
             for k, v in extra.items():
                 if k not in _reserved:
                     payload[k] = v
+        # 统一思考档位映射片段（模型 reasoning_map 配置，reasoning.resolve_fragment 产出）
+        reasoning.merge_fragment(payload, reasoning_fragment)
+        # anthropic 硬性要求 max_tokens > thinking.budget_tokens：不足时自动抬高
+        th = payload.get("thinking")
+        if isinstance(th, dict) and th.get("type") == "enabled":
+            try:
+                budget = int(th.get("budget_tokens") or 0)
+            except (TypeError, ValueError):
+                budget = 0
+            if budget > 0 and (payload.get("max_tokens") or 0) <= budget:
+                payload["max_tokens"] = budget + 1024
         return payload
 
     def _headers(self) -> dict:
@@ -207,8 +220,9 @@ class AnthropicProvider:
             "Content-Type": "application/json",
         }
 
-    async def chat(self, req: ChatCompletionRequest, model_name: str) -> ChatCompletionResponse:
-        payload = self._build_payload(req, model_name)
+    async def chat(self, req: ChatCompletionRequest, model_name: str,
+                   reasoning_fragment: dict | None = None) -> ChatCompletionResponse:
+        payload = self._build_payload(req, model_name, reasoning_fragment=reasoning_fragment)
         resp = await self.client.post(
             f"{self.base_url}/v1/messages",
             json=payload,
@@ -222,6 +236,11 @@ class AnthropicProvider:
         usage = data.get("usage", {})
         content_blocks = data.get("content", [])
         text = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
+        # thinking 块正文并入 reasoning_content（仅供展示，无签名不做回放校验）
+        thinking_text = "".join(
+            b.get("thinking", "") for b in content_blocks
+            if b.get("type") == "thinking" and isinstance(b.get("thinking"), str)
+        )
         tool_calls = []
         for b in content_blocks:
             if b.get("type") == "tool_use":
@@ -247,6 +266,7 @@ class AnthropicProvider:
                     message=ChoiceMessage(
                         role="assistant",
                         content=text,
+                        reasoning_content=thinking_text or None,
                         tool_calls=tool_calls if tool_calls else None,
                     ),
                     finish_reason=self._map_finish(data.get("stop_reason", "end_turn")),
@@ -259,8 +279,9 @@ class AnthropicProvider:
             ),
         )
 
-    async def chat_stream(self, req: ChatCompletionRequest, model_name: str) -> AsyncGenerator[str, None]:
-        payload = self._build_payload(req, model_name, stream=True)
+    async def chat_stream(self, req: ChatCompletionRequest, model_name: str,
+                          reasoning_fragment: dict | None = None) -> AsyncGenerator[str, None]:
+        payload = self._build_payload(req, model_name, stream=True, reasoning_fragment=reasoning_fragment)
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created = int(time.time())
 
@@ -317,7 +338,21 @@ class AnthropicProvider:
                         yield f"data: {json.dumps(chunk)}\n\n"
                 elif event_type == "content_block_delta":
                     delta = event.get("delta", {}) or {}
-                    if delta.get("type") == "input_json_delta":
+                    if delta.get("type") == "thinking_delta":
+                        # thinking 块 -> OpenAI 风格 reasoning_content 增量（DeepSeek 风格）
+                        chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model_name,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"reasoning_content": delta.get("thinking", "")},
+                                "finish_reason": None,
+                            }],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                    elif delta.get("type") == "input_json_delta":
                         chunk = {
                             "id": completion_id,
                             "object": "chat.completion.chunk",

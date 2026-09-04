@@ -423,7 +423,38 @@ curl -X POST http://127.0.0.1:8650/v1/rerank \
   -H "Authorization: Bearer your-key" \
   -H "Content-Type: application/json" \
   -d '{"model": "auto", "query": "什么是重排", "documents": ["文档A", "文档B"], "top_n": 2}'
+
+# 统一思考控制：reasoning_effort 六档 off/minimal/low/medium/high/max
+# 网关按各模型配置的 reasoning_map 自动换算为上游思考参数；未配置的模型忽略该参数
+curl -X POST http://127.0.0.1:8650/v1/chat/completions \
+  -H "Authorization: Bearer your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "auto", "reasoning_effort": "high", "messages": [{"role":"user","content":"9.11 和 9.8 哪个大？"}]}'
 ```
+
+### 🧠 统一思考控制（reasoning_effort）
+
+客户端传 `reasoning_effort`，取值六档：`off / minimal / low / medium / high / max`（大小写不敏感；非法值 422）。不带参数 = 上游默认行为。
+
+- **OpenAI 格式入口**：请求体顶层直接传 `"reasoning_effort": "high"`。
+- **Anthropic 格式入口**（`/v1/messages`）：传 `thinking: {"type": "enabled", "budget_tokens": 8192}`，网关自动归一化——`disabled`→off；enabled 按 budget 分档（≤1024→minimal，≤4096→low，≤10240→medium，≤20480→high，>20480→max）。
+- **模型配置 `reasoning_map`**（管理面板模型编辑 → "思考映射" JSON 框，或 config.json 模型条目）：显式声明"档位 → 透传上游的请求体片段"，例如：
+
+```json
+"reasoning_map": {
+  "off":     {"thinking": {"type": "disabled"}},
+  "minimal": {"reasoning_effort": "minimal"},
+  "low":     {"reasoning_effort": "low"},
+  "medium":  {"reasoning_effort": "medium"},
+  "high":     {"reasoning_effort": "high"},
+  "max":     {"reasoning_effort": "max"}
+}
+```
+
+规则：片段原样 merge 进上游请求体（禁止覆盖 model/messages/tools/max_tokens 等核心字段）；请求档位未配置时回落到更低档位中最近的（无更低取最低配置档）；未配置 `reasoning_map` 的模型不注入任何参数。anthropic 协议上游注入 `thinking.budget_tokens` 时若大于 max_tokens 会自动抬高（+1024）。
+
+- **思考内容回传**：非流式 OpenAI 响应统一带 `reasoning_content` 字段（MiniMax 等 `<think>` 内联的模型自动提取）；Anthropic 客户端方向自动转换为 `thinking` 块 / 流式 `thinking_delta`。流式 OpenAI→OpenAI 原样透传。
+- **全池探测**：`python probe_reasoning.py` 实测每个上游模型支持的写法与档位并生成 `思考参数探测报告.md`；`--apply` 把实测映射写入 config.json；`--filter 关键字` / `--force` / `--report` 控制范围。
 
 ---
 
@@ -450,12 +481,13 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
-**`v2.9.2`** — **updater 更新提速**：① 版本查询并行化（gitee/github 同时查询，超时收紧 GitHub 120s→20s、Gitee 30s→15s），选源时两个远程 fetch 与版本查询并行执行，总耗时≈最慢一路而非串行累加 ② `git pull` 改为 fetch 后直接 `merge --ff-only FETCH_HEAD`，省一次网络往返 ③ **requirements.txt 未变化时跳过 pip install**（通常省 10-40 秒），pip 增加 `--disable-pip-version-check` ④ 启动/重启探测改"先探测后等待"1 秒粒度（原来固定先睡 5 秒），并去掉更新尾部的重复健康验证等待
+**`v2.10.0`** — **统一思考控制（reasoning_effort）**：① `/v1/chat/completions` 顶层新增 `reasoning_effort` 六档（off/minimal/low/medium/high/max，非法值 422），`/v1/messages` 的 `thinking{type,budget_tokens}` 自动归一化到同档位 ② 模型条目新增 `reasoning_map` 配置（档位 → 透传上游的请求体片段，缺档自动回落到更低档），在 pool 层统一注入，未配置的模型不注入 ③ `probe_reasoning.py` 全池实测各上游思考参数写法与档位并生成《思考参数探测报告》，`--apply` 一键写入 config.json ④ 思考内容回传统一口径：非流式 OpenAI 响应统一带 `reasoning_content`（MiniMax 等 `<think>` 内联自动提取）、流式 `<think>` 内联自动转 `reasoning_content` 增量并补发缺失的 `[DONE]`、Anthropic 客户端方向转 thinking 块/thinking_delta（此前非流式与 anthropic 协议上游的思考内容均被丢弃）⑤ 双面板模型编辑新增"思考映射"JSON 框 + 列表徽章
 
 ### 历史（按时间倒序）
 
 | 版本 | 主要变更 |
 |:---|:---|
+| **v2.9.2** | updater 更新提速：版本查询并行化、fetch+ff-only 合并、requirements 未变跳过 pip install、启动/重启探测 1 秒粒度 |
 | **v2.9.1** | 守护面板交互安全加固：诊断卡片移至操作下方；所有操作按钮二次确认；强制释放端口需输入操作密码（服务端校验） |
 | **v2.9.0** | 双管理面板手机适配：hfadmin（≤760px）与 index（≤640px）完整响应式，桌面端零改动 |
 | **v2.8.5** | "重启 updater"交互闭环：按钮"重启中"态 + 已等待秒数倒计时 + 轮询 /health 自动探测恢复 + 45s 超时排查指引，修复静默失联 |
