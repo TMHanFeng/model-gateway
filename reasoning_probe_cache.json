@@ -3363,5 +3363,161 @@
   "notes": [
    "档位梯度实测有效；off 采用完全关闭写法（与档位不同参数族）"
   ]
+ },
+ "openai|https://api.minimaxi.com/v1|MiniMax-M2.7": {
+  "ts": "2026-09-04 16:02:37",
+  "protocol": "openai",
+  "name": "MiniMax-M2.7",
+  "calls": [
+   {
+    "fragment": null,
+    "status": 200,
+    "error": "",
+    "reasoning_len": 995,
+    "content_len": 1020,
+    "completion_tokens": 276
+   },
+   {
+    "fragment": {
+     "reasoning_effort": "minimal"
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 1309,
+    "content_len": 1359,
+    "completion_tokens": 363
+   },
+   {
+    "fragment": {
+     "reasoning_effort": "high"
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 443,
+    "content_len": 479,
+    "completion_tokens": 157
+   },
+   {
+    "fragment": {
+     "reasoning_effort": "minimal"
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 778,
+    "content_len": 819,
+    "completion_tokens": 253
+   },
+   {
+    "fragment": {
+     "reasoning_effort": "low"
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 452,
+    "content_len": 500,
+    "completion_tokens": 158
+   },
+   {
+    "fragment": {
+     "reasoning_effort": "medium"
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 609,
+    "content_len": 653,
+    "completion_tokens": 191
+   },
+   {
+    "fragment": {
+     "reasoning_effort": "high"
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 1464,
+    "content_len": 1518,
+    "completion_tokens": 440
+   },
+   {
+    "fragment": {
+     "reasoning_effort": "max"
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 576,
+    "content_len": 621,
+    "completion_tokens": 190
+   },
+   {
+    "fragment": {
+     "thinking": {
+      "type": "disabled"
+     }
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 835,
+    "content_len": 893,
+    "completion_tokens": 255
+   },
+   {
+    "fragment": {
+     "enable_thinking": false
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 574,
+    "content_len": 617,
+    "completion_tokens": 183
+   },
+   {
+    "fragment": {
+     "reasoning": {
+      "enabled": false
+     }
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 1538,
+    "content_len": 1590,
+    "completion_tokens": 465
+   }
+  ],
+  "baseline_reasoning": 995,
+  "default_thinking": "开",
+  "family": "reasoning_effort",
+  "off_fragment": {
+   "reasoning_effort": "minimal"
+  },
+  "on_fragment": {
+   "reasoning_effort": "high"
+  },
+  "level_lens": {
+   "minimal": 778,
+   "low": 452,
+   "medium": 609,
+   "high": 1464,
+   "max": 576
+  },
+  "levels_effective": true,
+  "suggested": {
+   "minimal": {
+    "reasoning_effort": "minimal"
+   },
+   "low": {
+    "reasoning_effort": "low"
+   },
+   "medium": {
+    "reasoning_effort": "medium"
+   },
+   "high": {
+    "reasoning_effort": "high"
+   },
+   "max": {
+    "reasoning_effort": "max"
+   }
+  },
+  "notes": [
+   "档位有梯度但不支持关闭，未映射 off"
+  ]
  }
 }

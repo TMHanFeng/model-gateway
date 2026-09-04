@@ -454,7 +454,7 @@ curl -X POST http://127.0.0.1:8650/v1/chat/completions \
 规则：片段原样 merge 进上游请求体（禁止覆盖 model/messages/tools/max_tokens 等核心字段）；请求档位未配置时回落到更低档位中最近的（无更低取最低配置档）；未配置 `reasoning_map` 的模型不注入任何参数。anthropic 协议上游注入 `thinking.budget_tokens` 时若大于 max_tokens 会自动抬高（+1024）。
 
 - **思考内容回传**：非流式 OpenAI 响应统一带 `reasoning_content` 字段（MiniMax 等 `<think>` 内联的模型自动提取）；Anthropic 客户端方向自动转换为 `thinking` 块 / 流式 `thinking_delta`。流式 OpenAI→OpenAI 原样透传。
-- **全池探测**：`python probe_reasoning.py` 实测每个上游模型支持的写法与档位并生成 `思考参数探测报告.md`；`--apply` 把实测映射写入 config.json；`--filter 关键字` / `--force` / `--report` 控制范围。
+- **自动探测**：新增模型（非 embedding/rerank）保存时自动探测思考档位——缓存命中瞬间套用，新组合后台探测完成后自动写入并热重载；embedding/rerank 模态不参与思考控制（输入框隐藏、映射自动剥离）。存量模型/批量补测用 `python probe_reasoning.py`：实测每个上游模型支持的写法与档位并生成 `思考参数探测报告.md`；`--apply` 写入 config.json；`--filter 关键字` / `--force` / `--report` 控制范围。
 
 ---
 
@@ -480,6 +480,8 @@ SQLite（`gateway.db`）持久化以下表：
 ## 📜 版本
 
 ### 最新
+
+**`v2.10.1`** — **新增模型自动探测思考档位**：① 非 embedding/rerank 模型新增保存后自动探测——上游组合已有探测缓存时瞬间套用映射，新组合后台探测（约 1~3 分钟）完成后自动写入 reasoning_map 并热重载，面板按探测状态提示 ② "思考映射"输入框对 embedding/rerank 模态自动隐藏，模态改为 embedding/rerank 保存时自动剥离已有映射 ③ probe_reasoning.py 新增 cached_suggestion/probe_single 接口供管理端复用
 
 **`v2.10.0`** — **统一思考控制（reasoning_effort）**：① `/v1/chat/completions` 顶层新增 `reasoning_effort` 六档（off/minimal/low/medium/high/max，非法值 422），`/v1/messages` 的 `thinking{type,budget_tokens}` 自动归一化到同档位 ② 模型条目新增 `reasoning_map` 配置（档位 → 透传上游的请求体片段，缺档自动回落到更低档），在 pool 层统一注入，未配置的模型不注入 ③ `probe_reasoning.py` 全池实测各上游思考参数写法与档位并生成《思考参数探测报告》，`--apply` 一键写入 config.json ④ 思考内容回传统一口径：非流式 OpenAI 响应统一带 `reasoning_content`（MiniMax 等 `<think>` 内联自动提取）、流式 `<think>` 内联自动转 `reasoning_content` 增量并补发缺失的 `[DONE]`、Anthropic 客户端方向转 thinking 块/thinking_delta（此前非流式与 anthropic 协议上游的思考内容均被丢弃）⑤ 双面板模型编辑新增"思考映射"JSON 框 + 列表徽章
 
