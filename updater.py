@@ -125,7 +125,7 @@ def _version_refresher_loop():
         time.sleep(VERSION_REFRESH_INTERVAL)
 
 # ── 网页仪表盘 HTML（苹果风浅色主题，与 hfadmin 同风格）──────────────
-DASHBOARD_HTML = """<!DOCTYPE html>
+DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
