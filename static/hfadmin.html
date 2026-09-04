@@ -667,7 +667,7 @@ select { max-width: 100%; }
         <div class="fg"><label>收费标注</label><select name="is_free"><option value="true">免费模型（绿）</option><option value="false">付费模型（红）</option></select></div>
       </div>
       <div class="f3">
-        <div class="fg"><label style="display:flex;align-items:center;justify-content:space-between;gap:6px">模型模态<label style="display:inline-flex;align-items:center;gap:3px;white-space:nowrap;cursor:pointer;font-weight:normal"><input type="checkbox" name="json_output" id="f-json-output" style="width:11px;height:11px;flex:none;margin:0"> 支持格式输出（json）</label></label><select name="modality"><option value="text">纯文本</option><option value="vision">多模态</option><option value="embedding">embedding（嵌入模型）</option><option value="rerank">rerank（重排模型）</option></select></div>
+        <div class="fg"><label style="display:flex;align-items:center;justify-content:space-between;gap:6px">模型模态<label style="display:inline-flex;align-items:center;gap:3px;white-space:nowrap;cursor:pointer;font-weight:normal"><input type="checkbox" name="json_output" id="f-json-output" style="width:11px;height:11px;flex:none;margin:0"> 支持格式输出（json）</label></label><select name="modality" onchange="onModalityChange()"><option value="text">纯文本</option><option value="vision">多模态</option><option value="embedding">embedding（嵌入模型）</option><option value="rerank">rerank（重排模型）</option></select></div>
         <div class="fg" id="limit-fields"><label id="limit-label">每日 Token 上限（0=不限）</label><input name="daily_token_limit" type="number" value="0"></div>
         <div class="fg"><label>上下文窗口（0=不校验）</label><input name="context_window" type="number" value="0"></div>
       </div>
@@ -691,7 +691,7 @@ select { max-width: 100%; }
         <div class="fg"><label>自定义参数名（可选）</label><input name="extra_param_name" placeholder="如 reasoning_effort"></div>
         <div class="fg"><label>自定义参数值（可选）</label><input name="extra_param_value" placeholder="如 high"></div>
       </div>
-      <div class="fg"><label>思考映射 reasoning_map（JSON，可选）：统一档位 off/minimal/low/medium/high/max → 透传上游的请求体片段；留空 = 不注入</label><textarea name="reasoning_map" rows="5" placeholder='{"off": {"thinking": {"type": "disabled"}}, "medium": {"thinking": {"type": "enabled"}}, "max": {"thinking": {"type": "enabled"}}}'></textarea></div>
+      <div class="fg" id="reasoning-map-fg"><label>思考映射 reasoning_map（JSON，可选）：统一档位 off/minimal/low/medium/high/max → 透传上游的请求体片段；留空 = 不注入（embedding/rerank 模型不适用）</label><textarea name="reasoning_map" rows="5" placeholder='{"off": {"thinking": {"type": "disabled"}}, "medium": {"thinking": {"type": "enabled"}}, "max": {"thinking": {"type": "enabled"}}}'></textarea></div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="m-test-btn" onclick="testConnectivity()">🔌 测试连接</button>
         <button type="button" class="btn btn-ghost" onclick="closeModal('overlay-model')">取消</button>
@@ -1241,7 +1241,7 @@ function showAdd() {
   document.getElementById('mform').reset();
   document.getElementById('f-model-id').disabled = false;
   populateProviderSelect('').then(() => { onBillingChange(); onProviderSelect(); });
-  onTokenTypeChange();
+  onTokenTypeChange(); onModalityChange();
   document.getElementById('overlay-model').classList.add('show');
 }
 async function showAddUnder(pid) {
@@ -1251,7 +1251,7 @@ async function showAddUnder(pid) {
   document.getElementById('f-model-id').disabled = false;
   document.getElementById('f-model-id').placeholder = '例如: glm-4.7-flash（供应商将自动前缀）';
   await populateProviderSelect(pid);
-  onBillingChange(); onProviderSelect(); onTokenTypeChange();
+  onBillingChange(); onProviderSelect(); onTokenTypeChange(); onModalityChange();
   document.getElementById('overlay-model').classList.add('show');
 }
 async function populateProviderSelect(selected) {
@@ -1261,6 +1261,14 @@ async function populateProviderSelect(selected) {
   if (data) data.providers.forEach(p => opts.push(`<option value="${esc(p.id)}">${esc(p.name)}（${esc(p.id)}）</option>`));
   sel.innerHTML = opts.join('');
   sel.value = selected || '';
+}
+function onModalityChange() {
+  // embedding/rerank 不参与思考控制：隐藏"思考映射"输入框
+  const f = document.getElementById('mform');
+  const el = document.getElementById('reasoning-map-fg');
+  if (!f || !el) return;
+  const v = (f.modality && f.modality.value) || 'text';
+  el.classList.toggle('hidden', v === 'embedding' || v === 'rerank');
 }
 async function editModel(id) {
   const data = await api('/admin/models');
@@ -1288,7 +1296,7 @@ async function editModel(id) {
   onTokenTypeChange();
   document.getElementById('f-model-id').disabled = true;
   await populateProviderSelect(m.provider_id || '');
-  onBillingChange(); onProviderSelect();
+  onBillingChange(); onProviderSelect(); onModalityChange();
   document.getElementById('overlay-model').classList.add('show');
 }
 async function submitModel(e) {
@@ -1319,7 +1327,10 @@ async function submitModel(e) {
   else ok = await api('/admin/models', { method: 'POST', body: JSON.stringify(body) });
   if (!ok) return;
   await api('/admin/reload', { method: 'POST' });
-  closeModal('overlay-model'); toast(editingId ? '模型已更新' : '模型已添加');
+  closeModal('overlay-model');
+  if (!editingId && ok && ok.probe === 'queued') toast('模型已添加；思考档位后台探测中，完成后自动保存');
+  else if (!editingId && ok && ok.probe === 'applied') toast('模型已添加；思考映射已按实测缓存自动套用');
+  else toast(editingId ? '模型已更新' : '模型已添加');
   loadModels();
 }
 async function delModel(id) {

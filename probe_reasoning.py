@@ -345,6 +345,33 @@ def probe_openai(target: dict, rec: dict, log):
         rec["notes"].append("所有思考参数写法均无效/被拒绝，映射留空（不支持思考控制）")
 
 
+def cached_suggestion(model: dict, providers: list[dict]) -> dict | None:
+    """该模型的上游组合已有探测缓存时直接返回建议映射（不发起任何请求）；否则 None。"""
+    targets = build_targets({"providers": providers, "models": [model]})
+    if not targets:
+        return None
+    rec = load_cache().get(targets[0]["key"])
+    return (rec or {}).get("suggested") or None
+
+
+def probe_single(model: dict, providers: list[dict]) -> dict | None:
+    """探测单个模型条目（命中缓存则复用），返回建议 reasoning_map；不支持/失败返回 None。
+
+    供 admin 新增模型时自动探测调用；结果同步写入缓存。
+    """
+    targets = build_targets({"providers": providers, "models": [model]})
+    if not targets:
+        return None
+    t = targets[0]
+    cache = load_cache()
+    rec = cache.get(t["key"])
+    if not rec or not rec.get("calls"):
+        rec = probe_target(t)
+        cache[t["key"]] = rec
+        save_cache(cache)
+    return rec.get("suggested") or None
+
+
 def generate_report(cache: dict, config: dict):
     providers = {p["id"]: p for p in config.get("providers", [])}
     lines = ["# 思考参数探测报告", "",

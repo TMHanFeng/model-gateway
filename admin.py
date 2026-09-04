@@ -1,7 +1,9 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import HTMLResponse
 from pathlib import Path
+import logging
 import subprocess
+import threading
 from pool import load_config, save_config
 from scheduler import restart_scheduler
 from providers.openai_provider import OpenAIProvider
@@ -77,6 +79,32 @@ async def admin_page():
 async def get_models(_=Depends(verify_admin)):
     config = load_config()
     return {"models": config.get("models", [])}
+
+
+def _auto_probe_model(model_id: str):
+    """后台线程：探测新增模型的思考档位并自动写入 reasoning_map（写完热重载）。
+
+    embedding/rerank、无连接信息、探测失败的模型静默跳过——不影响模型本身使用。
+    """
+    try:
+        import probe_reasoning
+        config = load_config()
+        model = next((m for m in config.get("models", []) if m.get("id") == model_id), None)
+        if not model or model.get("modality") in ("embedding", "rerank"):
+            return
+        suggested = probe_reasoning.probe_single(model, config.get("providers", []))
+        if not suggested:
+            return
+        config = load_config()
+        model = next((m for m in config.get("models", []) if m.get("id") == model_id), None)
+        if not model:
+            return
+        model["reasoning_map"] = suggested
+        save_config(config)
+        _sync_pool()
+        logging.getLogger(__name__).info(f"[思考探测] 新增模型 {model_id} 自动探测完成，已保存 reasoning_map")
+    except Exception:
+        logging.getLogger(__name__).exception(f"[思考探测] 新增模型 {model_id} 自动探测失败")
 
 
 @router.post("/models")
@@ -157,7 +185,25 @@ async def add_model(request: Request, _=Depends(verify_admin)):
     config["models"] = models
     save_config(config)
     restart_scheduler()
-    return {"ok": True, "model": entry}
+
+    # 非 embedding/rerank 模型：新增后自动探测思考档位。
+    # 命中探测缓存 → 即时套用；否则后台线程探测，完成后自动写入 config 并热重载。
+    probe_status = "skipped"
+    if entry.get("modality") not in ("embedding", "rerank"):
+        try:
+            import probe_reasoning
+            cached = probe_reasoning.cached_suggestion(entry, config.get("providers", []))
+            if cached:
+                entry["reasoning_map"] = cached
+                save_config(config)
+                probe_status = "applied"
+            else:
+                threading.Thread(target=_auto_probe_model, args=(entry["id"],), daemon=True).start()
+                probe_status = "queued"
+        except Exception:
+            probe_status = "skipped"  # 探测失败不影响模型本身的使用（默认思考行为）
+
+    return {"ok": True, "model": entry, "probe": probe_status}
 
 
 @router.put("/models/reorder")
@@ -227,6 +273,10 @@ async def update_model(model_id: str, request: Request, _=Depends(verify_admin))
     if models[idx].get("provider_id"):
         for k in ("provider", "base_url", "api_key"):
             models[idx].pop(k, None)
+
+    # embedding/rerank 模型不参与思考控制：显式剥离映射，避免残留
+    if models[idx].get("modality") in ("embedding", "rerank"):
+        models[idx].pop("reasoning_map", None)
 
     config["models"] = models
     save_config(config)
