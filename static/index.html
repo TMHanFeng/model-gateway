@@ -1582,6 +1582,7 @@ async function loadDecisions() {
           <span class="log-pool">池 ${esc(d.pool_name)}</span>
           ${d.requested ? `<span class="rsn rsn-neutral">指定 ${esc(d.requested)}</span>` : ''}
           <span class="rsn rsn-neutral">估算 ${d.estimated_tokens} tok</span>
+          ${d.actual_tokens != null && d.actual_tokens !== '' ? `<span class="rsn rsn-ok">实际 ${d.actual_tokens} tok</span>` : ''}
           <span class="log-selected ${ok ? 'ok' : 'fail'}">${ok ? '✓ ' + esc(d.selected) : '✕ 无可用接口'}</span>
         </div>
         <div class="log-steps">${steps || '<span class="hint">无候选</span>'}</div>

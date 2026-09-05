@@ -105,6 +105,7 @@ async def init_db():
                 requested TEXT,
                 selected TEXT,
                 estimated_tokens INTEGER,
+                actual_tokens INTEGER,
                 steps TEXT,
                 caller TEXT
             )
@@ -113,6 +114,9 @@ async def init_db():
         cols = [r[1] for r in await (await db.execute("PRAGMA table_info(decision_log)")).fetchall()]
         if "caller" not in cols:
             await db.execute("ALTER TABLE decision_log ADD COLUMN caller TEXT")
+        # 老库迁移：decision_log 补充 actual_tokens 列（调用完成后的真实 usage.total_tokens）
+        if "actual_tokens" not in cols:
+            await db.execute("ALTER TABLE decision_log ADD COLUMN actual_tokens INTEGER")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS rolling5h_state (
                 model_name TEXT PRIMARY KEY,
@@ -453,15 +457,29 @@ async def reset_5h_window(model_name: str):
         await db.commit()
 
 
-async def log_decision(pool_name: str, requested: str | None, selected: str | None, estimated: int, steps: list, caller: str = ""):
+async def log_decision(pool_name: str, requested: str | None, selected: str | None, estimated: int, steps: list, caller: str = "", actual_tokens: int | None = None) -> int:
+    """写入调用决策。流式请求可先写 0，usage 到达后调用 update_decision_actual_tokens 补真实值。"""
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "INSERT INTO decision_log (ts, pool_name, requested, selected, estimated_tokens, actual_tokens, steps, caller) VALUES (?,?,?,?,?,?,?,?)",
+            (time.time(), pool_name, requested or "", selected or "", estimated, actual_tokens, json.dumps(steps, ensure_ascii=False), caller),
+        )
+        decision_id = cursor.lastrowid
+        await db.execute(
+            "DELETE FROM decision_log WHERE id NOT IN (SELECT id FROM decision_log ORDER BY id DESC LIMIT 500)"
+        )
+        await db.commit()
+    return decision_id
+
+
+async def update_decision_actual_tokens(decision_id: int, actual_tokens: int | None):
+    """流式请求完成后补写真实 usage.total_tokens；decision_id 来自 log_decision。"""
     async with _lock:
         db = await _get_conn()
         await db.execute(
-            "INSERT INTO decision_log (ts, pool_name, requested, selected, estimated_tokens, steps, caller) VALUES (?,?,?,?,?,?,?)",
-            (time.time(), pool_name, requested or "", selected or "", estimated, json.dumps(steps, ensure_ascii=False), caller),
-        )
-        await db.execute(
-            "DELETE FROM decision_log WHERE id NOT IN (SELECT id FROM decision_log ORDER BY id DESC LIMIT 500)"
+            "UPDATE decision_log SET actual_tokens = ? WHERE id = ?",
+            (actual_tokens, decision_id),
         )
         await db.commit()
 
