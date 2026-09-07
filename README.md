@@ -493,6 +493,8 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
+**`v2.11.0`** — **计费安全网 + 中转提速 + 策略精简（整合 v2.10.6~v2.10.10）**：①新增 `test_billing_regression.py` 计费回归套件（33 断言，隔离实例+mock 上游：流式/非流式入账、缺失 usage 记 0、request/one_time/5h 语义、用户 key 计费、并发 10 路无重复无丢失、思考透传、智能估算、stream_options 开关），任何改动先跑套件再上线 ②流式热路径提速：`<think>` 切分器 done 快速路径 + 仅 usage 行解析，每 chunk JSON 处理 3 次→0~1 次；输入估算按请求缓存；决策日志后置（流结束一次写入，移出首包路径）；`db.bulk()` 事务上下文，非流式 5 次串行 commit 合并为 1、keyauth 两写合一 ③决策明细新增 route_ms/upstream_ms 耗时分解 ④模型级 `no_stream_options` 开关、空 api_key 不发鉴权头、无 tools 不下发 tool_choice（修本地模型偶现 400）⑤修复 one_time 未校准模型被窗口估算永久误杀的死锁 ⑥回退问题23：配额预检恢复 `used >= limit` 旧口径，est_effective 仅用于决策日志展示
+
 **`v2.10.10`** — **回退问题23（配额预检不再计入本次估算）**：应用户研判，配额预检恢复旧口径——仅 `used >= limit` 才拒绝，不再计算"调用后是否超额"（省估算计算、逻辑更简、消除未校准误杀风险）；est_effective 保留仅用于决策日志展示；修复过程中曾发现并保留 one_time 死锁防护
 
 **`v2.10.9`** — **中转提速（问题21-A）+ 本地模型 400 修复（问题21-B），计费回归套件 33 断言全绿**：①`test_billing_regression.py` 计费回归套件（隔离实例+mock 上游，固化问题24 全部计费不变量与并发场景，任何改动先跑套件再上线）②流式热路径：`<think>` 切分器 done 快速路径 + 仅 usage 行解析，每 chunk JSON 处理 3 次→0~1 次 ③输入估算按请求缓存 ④流式决策日志后置（结束时一次写入含 actual_tokens，INSERT 移出 TTFB）⑤`db.bulk()` 事务上下文，非流式 5 次串行 commit 合并为 1、keyauth 两写合一 ⑥决策明细新增 route_ms/upstream_ms 耗时分解 ⑦模型级 `no_stream_options` 开关、空 api_key 不发鉴权头、无 tools 不下发 tool_choice ⑧修复 v2.10.4 引入的 one_time 未校准死锁
