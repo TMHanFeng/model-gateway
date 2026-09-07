@@ -1116,10 +1116,10 @@ class ModelPool:
                 actual_calls.append({"model": entry.id, "reason": "switch_429", "detail": {"cooldown_sec": 10, "status": 429}})
                 continue
             except Exception as e:
-                entry.cooldown_until = time.time() + 15
+                entry.cooldown_until = time.time() + 5
                 err_type = type(e).__name__
                 status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
-                detail = {"cooldown_sec": 15, "error_type": err_type}
+                detail = {"cooldown_sec": 5, "error_type": err_type}
                 if status is not None:
                     detail["status"] = status
                 if str(e) and len(str(e)) < 200:
@@ -1183,10 +1183,10 @@ class ModelPool:
                 actual_calls.append({"model": entry.id, "reason": "switch_429", "detail": {"cooldown_sec": 10, "status": 429}})
                 continue
             except Exception as e:
-                entry.cooldown_until = time.time() + 15
+                entry.cooldown_until = time.time() + 5
                 err_type = type(e).__name__
                 status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
-                detail = {"cooldown_sec": 15, "error_type": err_type}
+                detail = {"cooldown_sec": 5, "error_type": err_type}
                 if status is not None:
                     detail["status"] = status
                 if str(e) and len(str(e)) < 200:
@@ -1326,13 +1326,13 @@ class ModelPool:
                         use_fallback = True
                     continue
                 last_failure_overflow = False
-                # 按异常类型决定冷却时长：429→10s，5xx→5s，网络抖动→5s，其他→15s
+                # 按异常类型决定冷却时长（v2.10.5）：429→10s，5xx→5s，网络→5s，其他→5s（上下文超限 400 不冷却）
                 if isinstance(e, httpx.HTTPStatusError) and status is not None and 500 <= status < 600:
                     cooldown_sec = 5
                 elif isinstance(e, (httpx.TimeoutException, httpx.ConnectError)):
                     cooldown_sec = 5
                 else:
-                    cooldown_sec = 15
+                    cooldown_sec = 5
                 entry.cooldown_until = time.time() + cooldown_sec
                 detail = {
                     "cooldown_sec": cooldown_sec,
@@ -1474,7 +1474,7 @@ class ModelPool:
                     use_fallback = True
                 continue
             except Exception as e:
-                # 按异常类型分发冷却：5xx→5s，网络→5s，其他→15s
+                # 按异常类型分发冷却（v2.10.5）：5xx→5s，网络→5s，其他→5s（上下文超限 400 不冷却）
                 status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
                 # 上下文超限（400 + context length 类报错）：请求过大、模型本身健康——不冷却，
                 # 继续尝试其他候选；整池都容不下时把该 400 原样透传给客户端（与直连行为一致）
@@ -1499,7 +1499,7 @@ class ModelPool:
                 elif isinstance(e, (httpx.TimeoutException, httpx.ConnectError)):
                     cooldown_sec = 5
                 else:
-                    cooldown_sec = 15
+                    cooldown_sec = 5
                 entry.cooldown_until = time.time() + cooldown_sec
                 detail = {"cooldown_sec": cooldown_sec, "error_type": type(e).__name__}
                 if status is not None:
