@@ -228,6 +228,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 40px 24px 90px; }
 .b-ghost { background: rgba(120, 120, 128, 0.09); color: var(--muted); }
 .b-embedding { background: rgba(175, 82, 222, 0.12); color: #7d26a8; }
 .b-rerank { background: rgba(255, 55, 95, 0.1); color: #c81e58; }
+.b-json { background: rgba(88, 86, 214, 0.12); color: #4646c6; }
 
 /* 开关（iOS 拨动） */
 .switch { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; font-size: 12.5px; color: var(--muted); user-select: none; }
@@ -295,6 +296,21 @@ select { max-width: 100%; }
 .fg { display: flex; flex-direction: column; gap: 5px; margin-bottom: 13px; }
 .fg label { font-size: 12px; color: var(--muted); font-weight: 500; }
 .fg input, .fg select, .fg textarea { width: 100%; }
+
+/* 编辑弹窗：分组标题 + 选项卡片 */
+.form-sec { font-size: 11px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 20px 0 12px; padding-top: 16px; border-top: 1px solid rgba(0, 0, 0, 0.06); display: flex; align-items: center; gap: 6px; }
+.form-sec::before { content: ''; width: 3px; height: 11px; border-radius: 2px; background: var(--teal); opacity: .8; }
+.opt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; margin-bottom: 13px; }
+.opt {
+  display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px;
+  border: 1px solid rgba(0, 0, 0, 0.12); border-radius: 11px; background: #fff;
+  cursor: pointer; font-size: 12px; color: var(--muted); line-height: 1.55;
+  transition: border-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out), background 180ms var(--ease-out);
+}
+.opt input[type="checkbox"] { width: 14px; height: 14px; flex: none; margin: 2px 0 0; accent-color: var(--teal); cursor: pointer; }
+.opt b { color: var(--text); font-weight: 600; display: block; font-size: 12.5px; margin-bottom: 1px; }
+.opt:hover { border-color: rgba(0, 0, 0, 0.26); }
+.opt:has(input:checked) { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.12); }
 
 /* 延迟阈值输入控件（pool 卡片自动择优旁） */
 .threshold-ctl { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); padding: 4px 0; }
@@ -446,7 +462,12 @@ select { max-width: 100%; }
 }
 .overlay.show .modal { opacity: 1; transform: none; }
 .modal h3 { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.modal-actions {
+  display: flex; justify-content: flex-end; gap: 8px; margin: 20px -28px -26px; padding: 14px 28px 18px;
+  position: sticky; bottom: -26px; z-index: 4;
+  background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border-top: 1px solid rgba(0, 0, 0, 0.06); border-radius: 0 0 22px 22px;
+}
 
 /* Toast（底部滑入的胶囊通知） */
 #toast {
@@ -509,11 +530,12 @@ select { max-width: 100%; }
   .pool-item { padding: 10px 12px; gap: 8px; }
   .add-model-row select { flex: 1 1 100%; min-width: 0; }
   .add-model-row .btn { flex: 1; min-height: 38px; }
-  /* 弹窗窄屏满宽 */
+  /* 弹窗窄屏满宽 + 吸底操作栏贴合窄屏内边距 */
   .overlay { padding: 10px 10px 0; }
   .modal { max-height: 92vh; padding: 18px 15px; border-radius: 14px; }
-  .modal-actions { flex-wrap: wrap; }
+  .modal-actions { flex-wrap: wrap; bottom: -18px; margin: 16px -15px -18px; padding: 12px 15px 16px; border-radius: 0 0 14px 14px; }
   .modal-actions .btn { flex: 1 1 calc(50% - 8px); min-height: 42px; }
+  .opt-grid { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
@@ -661,23 +683,25 @@ select { max-width: 100%; }
         <div class="fg"><label>API Key</label><input name="api_key" id="f-api-key" required placeholder="sk-..."></div>
       </div>
       <div id="inherit-note" class="hint hidden" style="margin-bottom:13px">✨ 将继承所选供应商的协议 / Base URL / API Key。</div>
+      <div class="form-sec">计费与额度</div>
       <div class="f3">
         <div class="fg"><label>令牌类型</label><select name="token_type" id="f-token-type" onchange="onTokenTypeChange()"><option value="daily">daily（每日刷新）</option><option value="rolling_5h">rolling_5h（5h 限额）</option><option value="one_time">one_time（一次性）</option></select></div>
         <div class="fg"><label>计费模式</label><select name="billing_mode" onchange="onBillingChange()"><option value="token">按 Token 计费</option><option value="request">按请求次数计费</option></select></div>
         <div class="fg"><label>收费标注</label><select name="is_free"><option value="true">免费模型（绿）</option><option value="false">付费模型（红）</option></select></div>
       </div>
       <div class="f3">
-        <div class="fg"><label style="display:flex;align-items:center;justify-content:space-between;gap:6px">模型模态<label style="display:inline-flex;align-items:center;gap:3px;white-space:nowrap;cursor:pointer;font-weight:normal"><input type="checkbox" name="json_output" id="f-json-output" style="width:11px;height:11px;flex:none;margin:0"> 支持格式输出（json）</label></label><select name="modality" onchange="onModalityChange()"><option value="text">纯文本</option><option value="vision">多模态</option><option value="embedding">embedding（嵌入模型）</option><option value="rerank">rerank（重排模型）</option></select></div>
+        <div class="fg"><label>模型模态</label><select name="modality" onchange="onModalityChange()"><option value="text">纯文本</option><option value="vision">多模态</option><option value="embedding">embedding（嵌入模型）</option><option value="rerank">rerank（重排模型）</option></select></div>
         <div class="fg" id="limit-fields"><label id="limit-label">每日 Token 上限（0=不限）</label><input name="daily_token_limit" type="number" value="0"></div>
         <div class="fg"><label>上下文窗口（0=不校验）</label><input name="context_window" type="number" value="0"></div>
       </div>
+      <div class="form-sec">配额与限流</div>
       <div class="f3">
         <div class="fg"><label>RPM 限制（0=不限）</label><input name="rpm_limit" type="number" value="0"></div>
         <div class="fg"><label>TPM 限制（0=不限）</label><input name="tpm_limit" type="number" value="0"></div>
         <div class="fg"><label>最大并发数（0=不限）</label><input name="max_concurrency" type="number" value="0"></div>
       </div>
       <div class="f2">
-        <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"><label style="display:inline-flex;align-items:center;gap:5px;margin-top:6px;cursor:pointer;font-size:12px;color:var(--muted)"><input type="checkbox" name="smart_estimate" id="f-smart-estimate" style="width:11px;height:11px;flex:none;margin:0" onchange="onSmartToggle()"> 智能估算超时（按 token 量动态计算，忽略手动秒数）</label><label style="display:inline-flex;align-items:center;gap:5px;margin-top:4px;cursor:pointer;font-size:12px;color:var(--muted)"><input type="checkbox" name="no_stream_options" id="f-nso" style="width:11px;height:11px;flex:none;margin:0"> 不发 stream_options（本地 vllm 等不认时勾选，该流将无 usage 统计）</label><div id="smart-live" class="hidden" style="font-size:12px;color:var(--muted);margin-top:5px;line-height:1.6"></div></div>
+        <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"></div>
         <div class="fg" id="daily-fields"><label>每日刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
       </div>
       <div id="once-fields" class="hidden">
@@ -687,10 +711,13 @@ select { max-width: 100%; }
           <div class="fg"><label>一次性·过期日期（北京时间）</label><input name="expire_date" type="date"></div>
         </div>
       </div>
-      <div class="f2">
-        <div class="fg"><label>自定义参数名（可选）</label><input name="extra_param_name" placeholder="如 reasoning_effort"></div>
-        <div class="fg"><label>自定义参数值（可选）</label><input name="extra_param_value" placeholder="如 high"></div>
+      <div class="form-sec">流式与输出选项</div>
+      <div class="opt-grid">
+        <label class="opt"><input type="checkbox" name="json_output" id="f-json-output"><span><b>支持 JSON 格式输出</b>请求带 response_format(json) 时只路由到勾选的模型</span></label>
+        <label class="opt"><input type="checkbox" name="smart_estimate" id="f-smart-estimate" onchange="onSmartToggle()"><span><b>智能估算超时</b>按 token 量动态计算总超时，忽略手动秒数</span></label>
+        <label class="opt"><input type="checkbox" name="no_stream_options" id="f-nso"><span><b>不发 stream_options</b>本地 vllm 等不认时勾选，该流将无 usage 统计</span></label>
       </div>
+      <div id="smart-live" class="hidden" style="font-size:12px;color:var(--muted);margin-bottom:13px;line-height:1.6"></div>
       <div class="fg" id="reasoning-map-fg"><label>思考映射 reasoning_map（JSON，可选）：统一档位 off/minimal/low/medium/high/max → 透传上游的请求体片段；留空 = 不注入（embedding/rerank 模型不适用）</label><textarea name="reasoning_map" rows="5" placeholder='{"off": {"thinking": {"type": "disabled"}}, "medium": {"thinking": {"type": "enabled"}}, "max": {"thinking": {"type": "enabled"}}}'></textarea></div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="m-test-btn" onclick="testConnectivity()">🔌 测试连接</button>
@@ -929,6 +956,7 @@ const isTouchDevice = window.matchMedia && window.matchMedia('(hover: none), (po
 /* ═══════════ 模型管理 ═══════════ */
 let editingId = null, editingProviderId = null, editingKeyId = null;
 let modelLookup = {}, providerLookup = {}, poolLookup = {};
+let cachedModels = null, cachedProviders = null;
 let speedCache = JSON.parse(localStorage.getItem('gw_speed') || '{}');
 
 function provBadge(p) { return p === 'anthropic' ? '<span class="badge b-anthropic">anthropic</span>' : '<span class="badge b-openai">openai</span>'; }
@@ -952,6 +980,9 @@ async function loadModels() {
   if (!mdata || !provdata) return;
   providerLookup = {};
   provdata.providers.forEach(p => providerLookup[p.id] = p);
+  // 编辑弹窗数据缓存：随 loadModels 刷新，点「编辑」时零请求直开（消除弹窗前置卡顿）
+  cachedModels = mdata.models;
+  cachedProviders = provdata.providers;
 
   const models = mdata.models;
   const providers = provdata.providers; // 顺序即 reorder 持久化后的顺序，渲染必须以此为准
@@ -959,7 +990,7 @@ async function loadModels() {
   providers.forEach((p, i) => {
     const pmodels = models.filter(m => m.provider_id === p.id);
     html += `
-    <div class="card provider-card" draggable="true" data-provider-drag="${esc(p.id)}" style="animation-delay:${i * 50}ms;cursor:grab" title="拖拽排序供应商">
+    <div class="card provider-card" draggable="true" data-provider-drag="${esc(p.id)}" style="animation-delay:${Math.min(i * 50, 400)}ms;cursor:grab" title="拖拽排序供应商">
       <div class="card-head provider-head">
         <div>
           <div class="card-title"><span class="drag-handle">⠿</span> ${esc(p.name)} ${provBadge(p.protocol)}</div>
@@ -1047,13 +1078,14 @@ function bindModelDrag() {
 
 function modelRowHTML(m, i) {
   return `
-  <div class="model-row" draggable="true" data-model-id="${esc(m.id)}" style="animation:cardIn 300ms var(--ease-out) ${i * 40}ms backwards">
+  <div class="model-row" draggable="true" data-model-id="${esc(m.id)}" style="animation:cardIn 300ms var(--ease-out) ${Math.min(i * 40, 400)}ms backwards">
     <div class="m-info">
       <span class="model-id">${esc(m.id)}</span>
       <span class="model-name">${esc(m.name)}</span>
       ${provBadge(m.provider || 'openai')}
       ${freeBadge(m)}
       ${modBadge(m)}
+      ${m.json_output && m.modality !== 'embedding' && m.modality !== 'rerank' ? '<span class="badge b-json" title="支持 response_format JSON 格式输出">JSON</span>' : ''}
       ${typeBadge(m)}
       ${m.reasoning_map && Object.keys(m.reasoning_map).length ? '<span class="badge b-5h">思考映射</span>' : ''}
       ${m.smart_estimate ? '<span class="badge b-5h">智能超时</span>' : ''}
@@ -1239,6 +1271,7 @@ function onProviderSelect() {
 function showAdd() {
   editingId = null;
   document.getElementById('model-modal-title').textContent = '添加模型';
+  document.getElementById('model-submit-btn').textContent = '添加';
   document.getElementById('mform').reset();
   document.getElementById('f-model-id').disabled = false;
   populateProviderSelect('').then(() => { onBillingChange(); onProviderSelect(); });
@@ -1248,18 +1281,24 @@ function showAdd() {
 async function showAddUnder(pid) {
   editingId = null;
   document.getElementById('model-modal-title').textContent = '在供应商下添加模型';
+  document.getElementById('model-submit-btn').textContent = '添加';
   document.getElementById('mform').reset();
   document.getElementById('f-model-id').disabled = false;
   document.getElementById('f-model-id').placeholder = '例如: glm-4.7-flash（供应商将自动前缀）';
   await populateProviderSelect(pid);
-  onBillingChange(); onProviderSelect(); onTokenTypeChange(); onModalityChange(); onSmartToggle(); onSmartToggle();
+  onBillingChange(); onProviderSelect(); onTokenTypeChange(); onModalityChange(); onSmartToggle();
   document.getElementById('overlay-model').classList.add('show');
 }
 async function populateProviderSelect(selected) {
-  const data = await api('/admin/providers');
+  let providers = cachedProviders;
+  if (!providers) {
+    const data = await api('/admin/providers');
+    if (!data) return;
+    providers = data.providers; cachedProviders = providers;
+  }
   const sel = document.getElementById('f-provider-id');
   const opts = ['<option value="">— 独立模型（内联填写）—</option>'];
-  if (data) data.providers.forEach(p => opts.push(`<option value="${esc(p.id)}">${esc(p.name)}（${esc(p.id)}）</option>`));
+  providers.forEach(p => opts.push(`<option value="${esc(p.id)}">${esc(p.name)}（${esc(p.id)}）</option>`));
   sel.innerHTML = opts.join('');
   sel.value = selected || '';
 }
@@ -1298,21 +1337,25 @@ function onSmartToggle() {
       + (d.sample_count < 10 ? ' · <span style="color:#b58900">样本不足 10，暂回退固定超时</span>' : '');
   }).catch(() => { live.textContent = ''; });
 }
-async function editModel(id) {
+async function fetchModelCached(id) {
+  let m = (cachedModels || []).find(x => x.id === id);
+  if (m) return m;
   const data = await api('/admin/models');
-  if (!data) return;
-  const m = data.models.find(x => x.id === id);
+  if (data) { cachedModels = data.models; m = (cachedModels || []).find(x => x.id === id); }
+  return m;
+}
+async function editModel(id) {
+  const m = await fetchModelCached(id);
   if (!m) return;
   editingId = id;
   document.getElementById('model-modal-title').textContent = '编辑模型';
+  document.getElementById('model-submit-btn').textContent = '保存';
   const f = document.getElementById('mform');
   f.id.value = m.id; f.name.value = m.name; f.provider.value = m.provider || 'openai';
   f.base_url.value = m.base_url || ''; f.api_key.value = m.api_key || ''; f.token_type.value = m.token_type;
   f.billing_mode.value = m.billing_mode || 'token'; f.is_free.value = m.is_free ? 'true' : 'false';
   f.modality.value = m.modality || 'text';
   const _jc = document.getElementById('f-json-output'); if (_jc) _jc.checked = !!m.json_output;
-  const _ep = m.extra_params || {}; const _ek = Object.keys(_ep)[0];
-  if (f.extra_param_name) { f.extra_param_name.value = _ek || ''; f.extra_param_value.value = _ek ? String(_ep[_ek]) : ''; }
   const _rm = m.reasoning_map || {};
   if (f.reasoning_map) f.reasoning_map.value = Object.keys(_rm).length ? JSON.stringify(_rm, null, 2) : '';
   f.daily_token_limit.value = m.daily_token_limit || 0; f.rpm_limit.value = m.rpm_limit || 0;
@@ -1339,9 +1382,8 @@ async function submitModel(e) {
   body.json_output = document.getElementById('f-json-output') ? document.getElementById('f-json-output').checked : false;
   body.smart_estimate = document.getElementById('f-smart-estimate') ? document.getElementById('f-smart-estimate').checked : false;
   body.no_stream_options = document.getElementById('f-nso') ? document.getElementById('f-nso').checked : false;
-  const _epn = (body.extra_param_name || '').trim(), _epv = (body.extra_param_value || '').trim();
-  delete body.extra_param_name; delete body.extra_param_value;
-  if (_epn) body.extra_params = { [_epn]: _epv };
+  // 自定义参数（extra_params）已废弃：显式提交空对象，避免 PUT 合并语义保留旧值
+  body.extra_params = {};
   // 思考映射：始终显式提交（空对象 = 清除），避免 PUT 时未提交键被保留旧值
   const _rmRaw = (body.reasoning_map || '').trim();
   body.reasoning_map = {};
