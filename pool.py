@@ -38,6 +38,7 @@ class ModelEntry:
     billing_mode: str = "token"
     is_free: bool = True
     modality: str = "text"
+    gift_refund: bool = False  # 余额返还制（火山/Ark 供应商自动识别）：配额走连续余额账本而非每日清零
     json_output: bool = False  # 支持格式输出（json）——请求带 response_format json 时只选 true 的模型
     extra_params: dict = field(default_factory=dict)  # 用户自定义参数（注入上游 payload，黑名单过滤）
     reasoning_map: dict = field(default_factory=dict)  # 统一思考档位 -> 上游请求体片段（reasoning.py 解析）
@@ -65,6 +66,27 @@ class ModelEntry:
 
 
 ROLLING_5H_SECONDS = 5 * 3600
+
+# 余额返还制识别：供应商 id/name（legacy 内联则 provider/base_url）含「火山」或「ark」
+# （不区分大小写）即视为该平台的"按昨日消耗返还额度"活动，配额自动走余额账本。
+GIFT_PATTERNS = ("火山", "ark")
+
+
+def is_gift_refund(m: dict, providers: list[dict] | None = None) -> bool:
+    """模型是否适用余额返还制：daily 计费类 + 供应商特征命中 GIFT_PATTERNS。"""
+    if (m.get("token_type") or "daily") != "daily":
+        return False
+    pid = m.get("provider_id", "")
+    prov = next((p for p in (providers or []) if p.get("id") == pid), None) if pid else None
+    hay = " ".join([
+        pid,
+        (prov or {}).get("id", ""),
+        (prov or {}).get("name", ""),
+        m.get("provider", ""),
+        m.get("base_url", ""),
+    ]).lower()
+    return any(p.lower() in hay for p in GIFT_PATTERNS)
+
 # 配额预检缓存秒数（问题19）：预检结果短缓存，避免每个候选模型每次选择都串行打 sqlite；
 # 该模型的每次调用计费后（log_request 处）立即失效，保证自身计数新鲜
 QUOTA_CACHE_TTL = 5.0
@@ -199,6 +221,7 @@ class ModelPool:
                 billing_mode=m.get("billing_mode", "token"),
                 is_free=m.get("is_free", True),
                 modality=m.get("modality", "text"),
+                gift_refund=is_gift_refund(m, self.config.get("providers", [])),
                 json_output=bool(m.get("json_output", False)),
                 extra_params=(m.get("extra_params") or {}),
                 reasoning_map=(m.get("reasoning_map") or {}),
@@ -438,6 +461,14 @@ class ModelPool:
                     }
             else:
                 entry.rolling5h_window_start = None
+        elif entry.gift_refund and entry.daily_token_limit > 0:
+            # 余额返还制：连续余额账本，balance <= 0 即额度耗尽（get_gift_balance 内含惰性补账）
+            balance = await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time)
+            if balance <= 0:
+                return False, "quota_exhausted", {
+                    "gift_balance": 0,
+                    "limit": entry.daily_token_limit,
+                }
         elif entry.daily_token_limit > 0:
             used = await db.get_daily_usage(entry.id)
             if used >= entry.daily_token_limit:
@@ -855,7 +886,10 @@ class ModelPool:
                 )
             except Exception:
                 logger.debug(f"[call_metrics] 非流式样本写入失败 model={entry.id}", exc_info=True)
-            if entry.token_type == "one_time":
+            if entry.gift_refund and entry.token_type == "daily":
+                charge = 1 if entry.billing_mode == "request" else tokens_used
+                await db.add_gift_usage(entry.id, charge)
+            elif entry.token_type == "one_time":
                 charge = 1 if entry.billing_mode == "request" else tokens_used
                 await db.add_one_time_usage(entry.id, charge)
                 state = await db.get_one_time_state(entry.id)
@@ -972,7 +1006,9 @@ class ModelPool:
         self._invalidate_quota_cache(entry.id)
         await db.add_model_call(entry.id, tokens)
         charge = 1 if entry.billing_mode == "request" else tokens
-        if entry.token_type == "one_time":
+        if entry.gift_refund and entry.token_type == "daily":
+            await db.add_gift_usage(entry.id, charge)
+        elif entry.token_type == "one_time":
             await db.add_one_time_usage(entry.id, charge)
             state = await db.get_one_time_state(entry.id)
             if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
@@ -1001,7 +1037,10 @@ class ModelPool:
         self._invalidate_quota_cache(entry.id)
         await db.add_model_call(entry.id, tokens_used)
 
-        if entry.token_type == "one_time":
+        if entry.gift_refund and entry.token_type == "daily":
+            charge = 1 if entry.billing_mode == "request" else tokens_used
+            await db.add_gift_usage(entry.id, charge)
+        elif entry.token_type == "one_time":
             charge = 1 if entry.billing_mode == "request" else tokens_used
             await db.add_one_time_usage(entry.id, charge)
             state = await db.get_one_time_state(entry.id)
@@ -1034,7 +1073,10 @@ class ModelPool:
         self._invalidate_quota_cache(entry.id)
         await db.add_model_call(entry.id, tokens_used)
 
-        if entry.token_type == "one_time":
+        if entry.gift_refund and entry.token_type == "daily":
+            charge = 1 if entry.billing_mode == "request" else tokens_used
+            await db.add_gift_usage(entry.id, charge)
+        elif entry.token_type == "one_time":
             charge = 1 if entry.billing_mode == "request" else tokens_used
             await db.add_one_time_usage(entry.id, charge)
             state = await db.get_one_time_state(entry.id)
@@ -1425,7 +1467,9 @@ class ModelPool:
                         yield chunk
 
                 # 流建立成功后才计费（按次计费计 1 次；按 token 计费由 _wrap_stream 结束时按实际 token 计）
-                if entry.token_type == "daily" and entry.billing_mode == "request":
+                if entry.gift_refund and entry.token_type == "daily" and entry.billing_mode == "request":
+                    await db.add_gift_usage(entry.id, 1)
+                elif entry.token_type == "daily" and entry.billing_mode == "request":
                     await db.add_daily_usage(entry.id, 1)
                 elif entry.token_type == "rolling_5h" and entry.billing_mode == "request":
                     await self._charge_rolling_5h(entry, 1)
@@ -1543,7 +1587,9 @@ class ModelPool:
                 tokens = r.get("tokens", 0)
                 if tokens > 0:
                     await db.add_model_call(entry.id, tokens)
-                    if entry.token_type == "one_time":
+                    if entry.gift_refund and entry.token_type == "daily":
+                        await db.add_gift_usage(entry.id, tokens)
+                    elif entry.token_type == "one_time":
                         await db.add_one_time_usage(entry.id, tokens)
                     elif entry.token_type == "rolling_5h":
                         await self._charge_rolling_5h(entry, tokens)
@@ -1606,6 +1652,15 @@ class ModelPool:
                 s["daily_remaining"] = max(0, entry.daily_token_limit - used) if entry.daily_token_limit > 0 else -1
                 s["refresh_time"] = ""
                 s["window_remaining_sec"] = remaining
+            elif entry.gift_refund and entry.daily_token_limit > 0:
+                # 余额返还制：展示口径为"余额"，等效已用 = cap - balance（供进度条复用）
+                balance = await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time)
+                s["gift_refund"] = True
+                s["gift_balance"] = max(0, balance)
+                s["daily_used_tokens"] = min(entry.daily_token_limit, max(0, entry.daily_token_limit - balance))
+                s["daily_token_limit"] = entry.daily_token_limit
+                s["daily_remaining"] = max(0, balance)
+                s["refresh_time"] = entry.refresh_time
             else:
                 used = await db.get_daily_usage(entry.id)
                 s["daily_used_tokens"] = used

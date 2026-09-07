@@ -173,6 +173,15 @@ async def init_db():
                 window_start REAL NOT NULL
             )
         """)
+        # 余额返还制（火山/Ark 供应商自动识别）：连续余额账本，无"清零重置"；
+        # refresh_time 时刻补入 min(上一自然日用量, cap)，预检 balance <= 0 即额度耗尽
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS gift_state (
+                model_name TEXT PRIMARY KEY,
+                balance INTEGER DEFAULT 0,
+                last_grant_date TEXT DEFAULT ''
+            )
+        """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS api_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -339,6 +348,83 @@ async def reset_all_daily():
         await db.execute(
             "UPDATE token_usage SET used_tokens = 0, last_reset_date = date('now')"
         )
+        await _commit(db)
+
+
+# ── 余额返还制（火山/Ark 供应商自动识别）：余额账本 ─────────────────────
+# 与 daily 清零制的区别：余额跨窗口连续，refresh_time 时刻补账而非重置授权。
+# 余额允许短暂为负（在途并发扣减），展示时钳 0；预检 balance <= 0 即额度耗尽。
+
+async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "") -> int:
+    """读取赠还余额；首见惰性初始化为 cap，并按 model_daily_stats 历史逐日补齐错过的赠还。
+
+    补账口径：逻辑日 D（_logical_today，锚定 refresh_time）补入 min(自然日 D-1 用量, cap)，
+    与"14:00 补昨日消耗"的活动语义一致；网关停机跨天后首次访问自愈，不丢账。"""
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT balance, last_grant_date FROM gift_state WHERE model_name = ?", (model_name,))
+        row = await cursor.fetchone()
+        if not row:
+            balance = max(0, int(cap or 0))
+            await db.execute(
+                "INSERT INTO gift_state (model_name, balance, last_grant_date) VALUES (?, ?, '')",
+                (model_name, balance))
+            await _commit(db)
+            return balance
+        balance, last = int(row[0] or 0), row[1] or ""
+        logical = _logical_today(time.time(), refresh_time)
+        if last == logical:
+            return balance
+        if cap <= 0:  # 不限额度：无补账概念，仅推进锚点日期
+            await db.execute("UPDATE gift_state SET last_grant_date = ? WHERE model_name = ?",
+                             (logical, model_name))
+            await _commit(db)
+            return balance
+        from datetime import datetime, timedelta
+        try:
+            day = datetime.strptime(last, "%Y-%m-%d").date()
+            target = datetime.strptime(logical, "%Y-%m-%d").date()
+        except ValueError:
+            # 无有效锚点（如刚初始化）：只落锚不补账，初始 cap 即当日额度
+            await db.execute("UPDATE gift_state SET last_grant_date = ? WHERE model_name = ?",
+                             (logical, model_name))
+            await _commit(db)
+            return balance
+        steps = 0
+        while day < target and steps < 400:  # 逐日补账；上限防脏数据拖垮预检
+            day += timedelta(days=1)
+            basis = (day - timedelta(days=1)).isoformat()
+            cursor = await db.execute(
+                "SELECT total_tokens FROM model_daily_stats WHERE model_name = ? AND date = ?",
+                (model_name, basis))
+            r = await cursor.fetchone()
+            balance = min(cap, balance + min(int(r[0] or 0) if r else 0, cap))
+            steps += 1
+        await db.execute("UPDATE gift_state SET balance = ?, last_grant_date = ? WHERE model_name = ?",
+                         (balance, logical, model_name))
+        await _commit(db)
+        return balance
+
+
+async def add_gift_usage(model_name: str, tokens: int):
+    """赠还余额扣减（预检 get_gift_balance 先行，保证 gift_state 行已存在）。"""
+    async with _lock:
+        db = await _get_conn()
+        await db.execute("UPDATE gift_state SET balance = balance - ? WHERE model_name = ?",
+                         (tokens, model_name))
+        await _commit(db)
+
+
+async def set_gift_balance(model_name: str, balance: int):
+    """手动校准赠还余额（对齐上游真实剩余 / 测试用）。"""
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            """INSERT INTO gift_state (model_name, balance, last_grant_date)
+               VALUES (?, ?, '')
+               ON CONFLICT(model_name) DO UPDATE SET balance = excluded.balance""",
+            (model_name, balance))
         await _commit(db)
 
 

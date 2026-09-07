@@ -278,7 +278,17 @@ Anthropic 适配器自动完成：
 - 到达 `max_tokens` 或超过 `ttl_seconds` 后永久失效
 - 任何刷新都不重置
 
-### 7️⃣ 计费模式
+### 7️⃣ 余额返还制（火山/Ark 供应商自动识别）
+
+针对"每天到账时刻赠送昨日消耗量（有日上限）"类活动（火山方舟 Ark 等）的配额模式。**无需任何显式开关**：模型的供应商 id/名称（或内联 Base URL）含「火山」或「ark」（不区分大小写）且 `token_type` 为 daily 时自动启用，面板会在供应商旁显示「余额返还制」徽章。
+
+- **连续余额账本**：每笔调用扣减余额；到 `refresh_time` 时刻补入 `min(昨日自然日用量, daily_token_limit)`——不再是"清零重置为满额"，消耗不均匀时也不会虚高
+- 每天花 ≤ 上限 → 余额恒满；某天花超 → 超出部分永久扣除（与平台真实语义一致）
+- 余额耗尽即预检拒绝（走兜底/下一候选），不会打到平台扣真实额度；网关停机错过到账时刻会按 `model_daily_stats` 历史惰性补账，不丢账
+- `daily_token_limit` 复用为余额上限、`refresh_time` 复用为到账补账时刻；统计页对这类模型显示「余额」而非「已用」
+- 状态存于 `gift_state` 表（首次自动初始化为满额；如需对齐当前真实剩余可手工修改该表）
+
+### 8️⃣ 计费模式
 
 - `billing_mode: "token"`：按消耗 Token 计数
 - `billing_mode: "request"`：按请求次数计数（每次 +1；流式在流建立成功时预扣 1 次，流式不再重复计）
@@ -330,7 +340,7 @@ Anthropic 适配器自动完成：
       "json_output": false,             // true = 支持 response_format(json)，硬门槛路由
       "smart_estimate": false,          // true = 按 token 量动态计算非流式超时（吞吐 EMA 校准）
       "no_stream_options": false,       // true = 流式不下发 stream_options（本地 vllm 等不认时勾选）
-      "refresh_time": "00:00",          // 每日窗口起点（北京时间）；如 "14:00" = 14:00 开新窗口
+      "refresh_time": "00:00",          // daily 窗口起点 / 余额返还制的到账补账时刻（北京时间）
       "timezone": "Asia/Shanghai",
       "reasoning_map": { },             // 思考映射：off/minimal/low/medium/high/max → 透传上游片段（可省略）
       // one_time 专属:
@@ -452,6 +462,8 @@ Anthropic 适配器自动完成：
 | `/admin/keys/{id}/usage` | GET | 密钥用量（当前窗口 + 1 小时粒度历史） |
 | `/admin/test_model` | POST | 单模型连通性测试 |
 | `/admin/test_proxy` | POST | 代理连通性测试 |
+| `/admin/reasoning` | GET | 各模型思考参数探测结论 + 生效映射 + 六档实际注入片段（纯本地读取） |
+| `/admin/reasoning/probe` | POST | 强制重测单个模型的思考参数（后台执行，只更新探测缓存） |
 
 > 另有 Ollama / Open WebUI 兼容探测端点（`/api/tags`、`/api/show`、`/props` 等），供客户端"连接检测"通过，真实对话仍走 OpenAI / Anthropic 协议。
 

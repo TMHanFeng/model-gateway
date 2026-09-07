@@ -354,19 +354,19 @@ def cached_suggestion(model: dict, providers: list[dict]) -> dict | None:
     return (rec or {}).get("suggested") or None
 
 
-def probe_single(model: dict, providers: list[dict]) -> dict | None:
-    """探测单个模型条目（命中缓存则复用），返回建议 reasoning_map；不支持/失败返回 None。
+def probe_single(model: dict, providers: list[dict], force: bool = False) -> dict | None:
+    """探测单个模型条目（命中缓存则复用；force=True 忽略缓存强制重测），返回建议 reasoning_map。
 
-    供 admin 新增模型时自动探测调用；结果同步写入缓存。
-    """
+    供 admin 新增模型自动探测 / 编辑弹窗"重新探测"调用；结果同步写入缓存。"""
     targets = build_targets({"providers": providers, "models": [model]})
     if not targets:
         return None
     t = targets[0]
     cache = load_cache()
     rec = cache.get(t["key"])
-    if not rec or not rec.get("calls"):
+    if force or not rec or not rec.get("calls"):
         rec = probe_target(t)
+        cache = load_cache()  # 重读：避免覆盖并发探测刚写入的其他组合条目
         cache[t["key"]] = rec
         save_cache(cache)
     return rec.get("suggested") or None

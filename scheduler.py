@@ -4,7 +4,7 @@ from pathlib import Path
 from shutil import copyfile
 import logging
 import database as db
-from pool import load_config
+from pool import load_config, is_gift_refund
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,29 @@ async def refresh_model(model_id: str):
         pass
     await db.reset_daily_usage(model_id)
     # 配额预检有 5s TTL 缓存：刷新后立即失效，避免刚重置的模型在缓存窗口内仍被判"用量已尽"
+    try:
+        from main import pool
+        pool._invalidate_quota_cache(model_id)
+    except Exception:
+        pass
+
+
+async def grant_gift_model(model_id: str):
+    """余额返还制到账补账：balance = min(cap, balance + min(昨日自然日用量, cap))。
+
+    具体补账逻辑在 db.get_gift_balance（惰性、逐日、可自愈）；此处仅定时触发，
+    即便错过时点（网关重启/停机），下次预检读余额时也会按历史补齐。"""
+    try:
+        cfg = load_config()
+        m = next((x for x in cfg.get("models", []) if x.get("id") == model_id), None)
+        if not m:
+            return
+        cap = int(m.get("daily_token_limit", 0) or 0)
+        rt = m.get("refresh_time", "")
+        balance = await db.get_gift_balance(model_id, cap, rt)
+        logger.info(f"[赠还补账] {model_id} 当前余额 {balance}/{cap}")
+    except Exception:
+        logger.exception(f"[赠还补账] {model_id} 失败")
     try:
         from main import pool
         pool._invalidate_quota_cache(model_id)
@@ -60,19 +83,33 @@ def backup_config():
 
 def _add_jobs():
     config = load_config()
+    providers = config.get("providers", [])
     for m in config.get("models", []):
         if m.get("token_type", "daily") != "daily":
+            continue
+        model_id = m["id"]
+        if is_gift_refund(m, providers) and int(m.get("daily_token_limit", 0) or 0) > 0:
+            # 余额返还制：refresh_time = 到账补账时刻（非清零重置）
+            refresh_time = m.get("refresh_time", "")
+            if not refresh_time:
+                continue
+            hour, minute = refresh_time.split(":")
+            scheduler.add_job(
+                grant_gift_model,
+                CronTrigger(hour=int(hour), minute=int(minute), timezone=m.get("timezone", "UTC")),
+                args=[model_id],
+                id=f"gift_{model_id.replace('/', '_')}",
+                replace_existing=True,
+            )
             continue
         refresh_time = m.get("refresh_time", "")
         if not refresh_time:
             continue
-        model_id = m["id"]
-        timezone = m.get("timezone", "UTC")
         hour, minute = refresh_time.split(":")
         trigger = CronTrigger(
             hour=int(hour),
             minute=int(minute),
-            timezone=timezone,
+            timezone=m.get("timezone", "UTC"),
         )
         job_id = f"refresh_{model_id.replace('/', '_')}"
         scheduler.add_job(refresh_model, trigger, args=[model_id], id=job_id, replace_existing=True)

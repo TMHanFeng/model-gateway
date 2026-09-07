@@ -4,7 +4,7 @@ from pathlib import Path
 import logging
 import subprocess
 import threading
-from pool import load_config, save_config
+from pool import load_config, save_config, is_gift_refund
 import database as db
 from scheduler import restart_scheduler
 from providers.openai_provider import OpenAIProvider
@@ -79,7 +79,113 @@ async def admin_page():
 @router.get("/models")
 async def get_models(_=Depends(verify_admin)):
     config = load_config()
-    return {"models": config.get("models", [])}
+    providers = config.get("providers", [])
+    models = []
+    for m in config.get("models", []):
+        m2 = dict(m)
+        m2["gift_refund"] = is_gift_refund(m, providers)
+        models.append(m2)
+    return {"models": models}
+
+
+# 思考参数探测辅助：查询 / 强制重测（探测结论只进缓存，reasoning_map 是否采用由用户在编辑框决定）
+
+_reasoning_probe_inflight: set = set()
+
+
+def _probe_key_of(m: dict, providers: dict, protocol_default: str = "openai") -> str:
+    """与 probe_reasoning 缓存键同源：协议|base_url|上游模型名"""
+    pid = m.get("provider_id", "")
+    prov = providers.get(pid) or {}
+    protocol = prov.get("protocol") or m.get("provider", protocol_default)
+    base_url = (prov.get("base_url") or m.get("base_url", "")).rstrip("/")
+    return f"{protocol}|{base_url}|{m.get('name', '')}"
+
+
+@router.get("/reasoning")
+async def get_reasoning(_=Depends(verify_admin)):
+    """思考参数查询（纯本地读取，不发上游请求）：每个模型的探测结论 + 当前生效映射 +
+    六档实际注入片段。供编辑弹窗辅助填空与调试查询。"""
+    import reasoning as _reasoning
+    import probe_reasoning
+    config = load_config()
+    providers_by_id = {p["id"]: p for p in config.get("providers", [])}
+    pools_cfg = config.get("pools", {})
+    cache = probe_reasoning.load_cache()
+    levels = list(_reasoning.LEVELS)
+    models: dict = {}
+    with_map = 0
+    for m in config.get("models", []):
+        if m.get("modality") in ("embedding", "rerank"):
+            continue
+        mid = m.get("id", "")
+        key = _probe_key_of(m, providers_by_id)
+        rec = cache.get(key) or {}
+        rmap = m.get("reasoning_map") or {}
+        if rmap:
+            with_map += 1
+        if not rmap:
+            off_behavior = "无映射：reasoning_effort 被忽略（模型走上游默认行为）"
+        elif "off" in rmap:
+            off_behavior = "可真正关闭思考"
+        else:
+            off_behavior = "请求 off 时回落到最低配置档"
+        models[mid] = {
+            "probed": bool(rec),
+            "probe_time": rec.get("ts") or None,
+            "param_family": rec.get("family") or None,
+            "default_thinking": rec.get("default_thinking") or None,
+            "levels_effective": bool(rec.get("levels_effective")),
+            "notes": rec.get("notes") or [],
+            "suggested": rec.get("suggested") or None,
+            "current_map": rmap,
+            "configured_levels": [lv for lv in levels if lv in rmap],
+            "effective": {lv: _reasoning.resolve_fragment(rmap, lv) for lv in levels},
+            "off_behavior": off_behavior,
+            "upstream_name": m.get("name", ""),
+            "protocol": (providers_by_id.get(m.get("provider_id", "")) or {}).get("protocol") or m.get("provider", "openai"),
+            "pools": sorted(p for p, pc in pools_cfg.items() if mid in (pc.get("model_ids") or [])),
+        }
+    return {
+        "default_reasoning_effort": config.get("default_reasoning_effort", "low"),
+        "levels": levels,
+        "summary": {"models": len(models), "with_map": with_map, "without_map": len(models) - with_map},
+        "models": models,
+    }
+
+
+@router.post("/reasoning/probe")
+async def probe_reasoning_api(request: Request, _=Depends(verify_admin)):
+    """强制重测单个模型的思考参数（后台执行，结果只写探测缓存，不改 reasoning_map）。"""
+    import probe_reasoning
+    body = await request.json()
+    model_id = (body.get("model_id") or "").strip()
+    if not model_id:
+        raise HTTPException(status_code=400, detail="Missing field: model_id")
+    config = load_config()
+    model = next((m for m in config.get("models", []) if m.get("id") == model_id), None)
+    if not model:
+        raise HTTPException(status_code=404, detail=f"模型 '{model_id}' 不存在")
+    if model.get("modality") in ("embedding", "rerank"):
+        raise HTTPException(status_code=400, detail="embedding/rerank 模型不参与思考控制")
+    if model_id in _reasoning_probe_inflight:
+        raise HTTPException(status_code=409, detail="该模型的探测已在进行中")
+    providers = config.get("providers", [])
+    if not probe_reasoning.build_targets({"providers": providers, "models": [model]}):
+        raise HTTPException(status_code=400, detail="模型缺少连接信息（base_url/api_key），无法探测")
+    _reasoning_probe_inflight.add(model_id)
+
+    def _run():
+        try:
+            probe_reasoning.probe_single(model, providers, force=True)
+            logging.getLogger(__name__).info(f"[思考探测] 模型 {model_id} 强制重测完成（结论已写入探测缓存）")
+        except Exception:
+            logging.getLogger(__name__).exception(f"[思考探测] 模型 {model_id} 强制重测失败")
+        finally:
+            _reasoning_probe_inflight.discard(model_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"queued": True, "model_id": model_id}
 
 
 def _auto_probe_model(model_id: str):

@@ -544,10 +544,11 @@ body {
         <select name="provider_id" id="f-provider-id" onchange="onProviderSelect()">
           <option value="">— 独立模型（下方内联填写连接信息）—</option>
         </select>
+        <span class="badge b-5h hidden" id="gift-badge" title="该供应商命中火山/Ark 余额返还制：到账时刻按昨日消耗补回额度（上限=余额上限），无清零重置">余额返还制</span>
       </div>
       <div id="inline-conn">
         <div class="fg"><label>提供商协议</label><select name="provider"><option value="openai">openai（兼容格式）</option><option value="anthropic">anthropic</option></select></div>
-        <div class="fg"><label>Base URL</label><input name="base_url" id="f-base-url" required placeholder="https://api.openai.com/v1"></div>
+        <div class="fg"><label>Base URL</label><input name="base_url" id="f-base-url" required placeholder="https://api.openai.com/v1" oninput="updateGiftHint()"></div>
         <div class="fg"><label>API Key</label><input name="api_key" id="f-api-key" required placeholder="sk-..."></div>
       </div>
       <div id="inherit-note" class="auto-note" style="display:none">该模型继承所属供应商的协议 / Base URL / API Key，无需在此填写。</div>
@@ -591,7 +592,7 @@ body {
         <label class="opt"><input type="checkbox" name="no_stream_options" id="f-nso"><span><b>不发 stream_options</b>本地 vllm 等不认时勾选，该流将无 usage 统计</span></label>
       </div>
       <div id="smart-live" class="hidden" style="font-size:12px;color:var(--muted);margin-bottom:13px;line-height:1.6"></div>
-      <div class="fg" id="reasoning-map-fg"><label>思考映射 reasoning_map（JSON，可选）：统一档位 off/minimal/low/medium/high/max → 透传上游的请求体片段；留空 = 不注入（embedding/rerank 模型不适用）</label><textarea name="reasoning_map" rows="5" placeholder='{"off": {"thinking": {"type": "disabled"}}, "medium": {"thinking": {"type": "enabled"}}, "max": {"thinking": {"type": "enabled"}}}'></textarea></div>
+      <div class="fg" id="reasoning-map-fg"><label>思考映射 reasoning_map（JSON，可选）：统一档位 off/minimal/low/medium/high/max → 透传上游的请求体片段；留空 = 不注入（embedding/rerank 模型不适用）</label><textarea name="reasoning_map" rows="5" placeholder='{"off": {"thinking": {"type": "disabled"}}, "medium": {"thinking": {"type": "enabled"}}, "max": {"thinking": {"type": "enabled"}}}'></textarea><div id="reasoning-probe-strip" style="margin-top:6px"></div></div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" onclick="testConnectivity()" id="m-test-btn">⚡ 测试连通性</button>
         <button type="submit" class="btn btn-amber">保存</button>
@@ -800,11 +801,12 @@ function modelRowHTML(m, i) {
         </div>
         <div class="btn-row">
           ${provBadge(proto)}
+          ${m.gift_refund ? '<span class="badge b-5h" title="余额返还制：到账时刻按昨日消耗补回额度（上限=每日Token上限），无清零重置">余额返还制</span>' : ''}
           ${m.modality === 'embedding' ? '<span class="badge b-embedding">embedding</span>' : m.modality === 'rerank' ? '<span class="badge b-rerank">rerank</span>' : m.modality === 'vision' ? '<span class="badge b-vision">多模态</span>' : '<span class="badge b-text">纯文本</span>'}
           ${m.json_output && m.modality !== 'embedding' && m.modality !== 'rerank' ? '<span class="badge b-json" title="支持 response_format JSON 格式输出">JSON</span>' : ''}
           ${m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>'}
           ${m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>' : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>' : ''}
-          ${m.reasoning_map && Object.keys(m.reasoning_map).length ? '<span class="badge b-5h">思考映射</span>' : ''}
+          ${m.reasoning_map && Object.keys(m.reasoning_map).length ? `<span class="badge b-5h" style="cursor:pointer" title="点击打开编辑，查看思考参数探测结论" onclick="editModel('${m.id}')">思考映射</span>` : ''}
           ${m.expire_date ? `<span class="badge b-once">到期 ${esc(m.expire_date)}</span>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="editModel('${m.id}')">编辑</button>
           <button class="btn btn-red btn-sm" onclick="delModel('${m.id}')">删除</button>
@@ -1440,6 +1442,7 @@ async function loadStats() {
       ...m,
       _used: m.daily_used_tokens ?? m.used_tokens ?? 0,
       _limit: m.daily_token_limit || m.max_tokens || 0,
+      _gift: !!m.gift_refund,
       // 自定义刷新窗口（非默认/00:00/24:00）：配额窗口≠自然日，主显窗口用量，小字补自然日用量
       _windowModel: m.token_type === 'daily' && m.refresh_time && !['00:00', '0:00', '24:00'].includes(m.refresh_time.trim()),
     }))
@@ -1467,19 +1470,26 @@ async function loadStats() {
       unit = 'tokens';
       numsTitle = '当日 Token 用量';
       limitText = '—';
+    } else if (isBilling && m._gift && limit > 0) {
+      used = m.gift_balance ?? Math.max(0, limit - m._used);
+      numsTitle = '当前余额（到账时刻按昨日消耗补回）';
     }
-    if (isBilling && m._windowModel) numsTitle = `当前窗口用量（自 ${m.refresh_time} 起）`;
+    if (isBilling && m._windowModel && !m._gift) numsTitle = `当前窗口用量（自 ${m.refresh_time} 起）`;
     const pct = isBilling && limit > 0 ? Math.min(100, used / limit * 100) : 0;
-    const cls = !isBilling ? '' : (m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : ''));
+    const cls = !isBilling ? '' : (m.expired ? 'full' : m._gift
+      ? (pct <= 25 ? 'full' : pct <= 45 ? 'warn' : '')
+      : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : ''));
     const pctText = !isBilling ? '—' : (m.expired ? '已失效' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量'));
     const billing = m.billing_mode === 'request' ? '按次计费' : '按 Token 计费';
     const typeBadge = m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>'
       : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>'
+      : m._gift ? '<span class="badge b-5h" title="余额返还制：到账时刻按昨日消耗补回额度">余额返还制</span>'
       : m._windowModel ? `<span class="badge b-5h" title="每日 ${m.refresh_time} 刷新窗口">${m.refresh_time}窗口</span>`
       : '<span class="badge b-openai">每日</span>';
     const freeBadge = m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>';
     let refresh = m.token_type === 'one_time' ? '不刷新'
       : m.token_type === 'rolling_5h' ? '5h窗口 · 剩 ' + fmtDur(m.window_remaining_sec)
+      : m._gift ? (m.refresh_time ? '补账 ' + m.refresh_time : '按日补账')
       : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
     if (m._windowModel && isBilling && (m.today_tokens || 0) > 0) {
       refresh += ` · 自然日 ${(m.today_tokens || 0).toLocaleString()} tok`;
@@ -1645,6 +1655,7 @@ function onTokenTypeChange() {
   if (_df) _df.style.display = ttype === 'daily' ? '' : 'none';
   const _lf = document.getElementById('limit-fields');
   if (_lf) _lf.style.display = ttype === 'one_time' ? 'none' : '';
+  updateGiftHint();
   onBillingChange();
 }
 
@@ -1653,6 +1664,7 @@ function showAdd() {
   document.getElementById('modal-title').textContent = '添加模型';
   document.getElementById('mform').reset();
   document.getElementById('f-model-id').disabled = false;
+  renderReasoningStrip(null);
   populateProviderSelect('').then(() => { onBillingChange(); onProviderSelect(); });
   onTokenTypeChange(); onModalityChange(); onSmartToggle();
   document.getElementById('overlay').classList.add('show');
@@ -1663,6 +1675,7 @@ async function showAddUnder(pid) {
   document.getElementById('modal-title').textContent = '在供应商下添加模型';
   document.getElementById('mform').reset();
   document.getElementById('f-model-id').disabled = false;
+  renderReasoningStrip(null);
   await populateProviderSelect(pid);
   document.getElementById('f-model-id').placeholder = '例如: glm-4.7-flash（供应商将自动前缀）';
   onBillingChange(); onProviderSelect();
@@ -1699,6 +1712,23 @@ function onProviderSelect() {
     document.getElementById('f-base-url').required = true;
     document.getElementById('f-api-key').required = true;
   }
+  updateGiftHint();
+}
+function providerIsGiftSource(pid, baseUrl) {
+  const prov = (cachedProviders || []).find(p => p.id === pid);
+  const hay = ((prov && prov.id || '') + ' ' + (prov && prov.name || '') + ' ' + (baseUrl || '')).toLowerCase();
+  return hay.includes('火山') || hay.includes('ark');
+}
+function updateGiftHint() {
+  const badge = document.getElementById('gift-badge');
+  if (!badge) return;
+  const ttype = (document.getElementById('f-token-type') || {}).value || 'daily';
+  const pid = document.getElementById('f-provider-id').value;
+  const baseEl = document.getElementById('f-base-url');
+  const on = ttype === 'daily' && providerIsGiftSource(pid, baseEl ? baseEl.value : '');
+  badge.classList.toggle('hidden', !on);
+  const lbl = document.getElementById('limit-label');
+  if (lbl) lbl.textContent = on ? '余额上限（到账时刻按昨日消耗补回，0=不限）' : '每日 Token 上限（0=不限）';
 }
 
 let editingProviderId = null;
@@ -1855,6 +1885,8 @@ async function editModel(id) {
   onBillingChange();
   onProviderSelect();
   onModalityChange();
+  reasoningTouched = false;
+  renderReasoningStrip(id);
   document.getElementById('overlay').classList.add('show');
 }
 
@@ -1894,6 +1926,94 @@ async function submitModel(e) {
   else if (!editingId && ok && ok.probe === 'applied') toast('模型已添加；思考映射已按实测缓存自动套用');
   else toast(editingId ? '模型已更新' : '模型已添加');
   loadModels();
+}
+
+/* ═══════════ 思考参数探测辅助（查询位置=编辑界面；建议只辅助填空，决策权在用户） ═══════════ */
+let reasoningInfo = null;      // /admin/reasoning 整页缓存（纯本地数据，无上游请求）
+let reasoningTouched = false;  // 用户手动输入过思考映射则不自动预填
+async function fetchReasoningInfo(force) {
+  if (reasoningInfo && !force) return reasoningInfo;
+  const data = await api('/admin/reasoning');
+  if (data) reasoningInfo = data;
+  return reasoningInfo;
+}
+async function renderReasoningStrip(modelId, opts = {}) {
+  const strip = document.getElementById('reasoning-probe-strip');
+  if (!strip) return;
+  if (!modelId) {
+    strip.innerHTML = '<span class="hint">🧠 模型添加后，这里会显示云端思考参数探测结论，可一键填入/重测</span>';
+    strip.dataset.built = '';
+    return;
+  }
+  if (!strip.dataset.built) {
+    strip.innerHTML = '<div id="reasoning-probe-text" class="hint" style="margin-bottom:4px">🧠 探测结论加载中…</div>'
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px">'
+      + '<button type="button" class="btn btn-ghost btn-sm" id="reasoning-fill-btn" onclick="fillReasoningSuggestion()">📥 填入建议</button>'
+      + '<button type="button" class="btn btn-ghost btn-sm" id="reasoning-probe-btn" onclick="reprobeReasoning()">🔄 重新探测</button>'
+      + '<button type="button" class="btn btn-ghost btn-sm" onclick="renderReasoningStrip(editingId, {force:true})" title="重新拉取探测结论（纯本地缓存，不发上游请求）">⟳</button>'
+      + '<span id="reasoning-probe-status" class="hint"></span></div>';
+    strip.dataset.built = '1';
+    const ta = document.querySelector('#mform textarea[name="reasoning_map"]');
+    if (ta) ta.addEventListener('input', () => { reasoningTouched = true; });
+  }
+  const info = await fetchReasoningInfo(opts.force);
+  if (editingId !== modelId) return;  // 弹窗已切到其他模型，丢弃过期渲染
+  const txt = document.getElementById('reasoning-probe-text');
+  if (!txt) return;
+  const statusEl = document.getElementById('reasoning-probe-status');
+  if (statusEl) statusEl.textContent = '';  // 清掉上一次弹窗残留的状态文案
+  const rec = info ? info.models[modelId] : undefined;
+  if (!info) txt.textContent = '🧠 探测结论加载失败';
+  else if (!rec || !rec.probed) txt.innerHTML = '🧠 探测结论：<b>未探测</b>（点「🔄 重新探测」实测该云端模型支持的思考参数写法）';
+  else if (rec.default_thinking && String(rec.default_thinking).indexOf('不可用') === 0)
+    txt.innerHTML = '🧠 探测结论：<span style="color:#c0392b">' + esc(rec.default_thinking) + '</span>（可点「🔄 重新探测」重试）';
+  else {
+    const bits = ['🧠 探测于 ' + esc((rec.probe_time || '').slice(0, 10) || '?')];
+    bits.push(rec.param_family ? '参数族 <b>' + esc(rec.param_family) + '</b>' : '不支持思考控制');
+    bits.push('默认思考' + esc(rec.default_thinking || '?'));
+    bits.push(rec.levels_effective ? '六档梯度有效' : '仅开/关两档');
+    bits.push(esc(rec.off_behavior || ''));
+    txt.innerHTML = bits.join(' · ');
+    txt.title = (rec.notes || []).join('\n');
+  }
+  const fillBtn = document.getElementById('reasoning-fill-btn');
+  if (fillBtn) fillBtn.disabled = !(rec && rec.suggested);
+  const probeBtn = document.getElementById('reasoning-probe-btn');
+  if (probeBtn) { probeBtn.disabled = false; probeBtn.textContent = '🔄 重新探测'; }
+  const status = document.getElementById('reasoning-probe-status');
+  // 空框自动预填（辅助填空；用户手动输入过则绝不覆盖）
+  if (rec && rec.suggested && !reasoningTouched) {
+    const f = document.getElementById('mform');
+    if (f && f.reasoning_map && !f.reasoning_map.value.trim()) {
+      f.reasoning_map.value = JSON.stringify(rec.suggested, null, 2);
+      if (status) status.textContent = '已按探测建议预填，可修改或清空';
+    }
+  }
+}
+function fillReasoningSuggestion() {
+  const rec = reasoningInfo && editingId ? reasoningInfo.models[editingId] : null;
+  if (!rec || !rec.suggested) { toast('该模型暂无探测建议（可先「重新探测」）', true); return; }
+  const f = document.getElementById('mform');
+  if (!f || !f.reasoning_map) return;
+  const sug = JSON.stringify(rec.suggested, null, 2);
+  const cur = f.reasoning_map.value.trim();
+  if (cur && cur !== sug && !confirm('将覆盖当前已填的思考映射，继续？')) return;
+  f.reasoning_map.value = sug;
+  reasoningTouched = true;
+  const status = document.getElementById('reasoning-probe-status');
+  if (status) status.textContent = '已填入探测建议，可继续修改后保存';
+}
+async function reprobeReasoning() {
+  if (!editingId) return;
+  const btn = document.getElementById('reasoning-probe-btn');
+  const status = document.getElementById('reasoning-probe-status');
+  if (btn) { btn.disabled = true; btn.textContent = '探测中…'; }
+  if (status) status.textContent = '向云端发探测请求（约 30~60 秒）…';
+  const r = await api('/admin/reasoning/probe', { method: 'POST', body: JSON.stringify({ model_id: editingId }) });
+  if (btn) { btn.disabled = false; btn.textContent = '🔄 重新探测'; }
+  if (!r) { if (status) status.textContent = ''; return; }
+  if (status) status.textContent = '重测已开始，完成后点「⟳」刷新结论';
+  toast('后台重测已开始');
 }
 
 async function delModel(id) {

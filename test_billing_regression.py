@@ -93,6 +93,8 @@ TEST_MODELS = [
      "is_free": True, "daily_token_limit": 1000000000, "smart_estimate": True},
     {"id": "zzbt/echo-nso", "name": "mock-echo-nso", "provider_id": "zzmock", "modality": "text",
      "is_free": True, "daily_token_limit": 1000000000, "no_stream_options": True},
+    {"id": "zzbt/echo-gift", "name": "mock-echo-gift", "provider_id": "zzark", "modality": "text",
+     "is_free": True, "token_type": "daily", "daily_token_limit": 266},
 ]
 TEST_IDS = [m["id"] for m in TEST_MODELS]
 
@@ -105,14 +107,18 @@ def db_exec(sql, args=()):
 
 def deep_clean():
     c = json.load(open(os.path.join(REPO, "config.json"), encoding="utf-8"))
-    c["providers"] = [p for p in c.get("providers", []) if p["id"] != "zzmock"]
+    c["providers"] = [p for p in c.get("providers", []) if p["id"] not in ("zzmock", "zzark")]
     c["models"] = [m for m in c.get("models", []) if not str(m.get("id", "")).startswith("zzbt/")]
     c.get("pools", {}).pop("zzall", None)
-    for pn in ("zzreq", "zzonce", "zzsmart", "zznso"):
+    for pn in ("zzreq", "zzonce", "zzsmart", "zznso", "zzgift"):
         c.get("pools", {}).pop(pn, None)
     json.dump(c, open(os.path.join(REPO, "config.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     q = " OR ".join([f"model_name='{i}'" for i in TEST_IDS])
-    for t in ["token_usage", "model_daily_stats", "call_metrics", "request_log"]:
+    db_exec("""CREATE TABLE IF NOT EXISTS gift_state (
+                model_name TEXT PRIMARY KEY,
+                balance INTEGER DEFAULT 0,
+                last_grant_date TEXT DEFAULT '')""")
+    for t in ["token_usage", "model_daily_stats", "call_metrics", "request_log", "gift_state"]:
         db_exec(f"DELETE FROM {t} WHERE {q}")
     db_exec(f"DELETE FROM decision_log WHERE selected IN ({','.join(chr(39)+i+chr(39) for i in TEST_IDS)}) OR pool_name='zzall'")
     db_exec("DELETE FROM one_time_state WHERE model_name='zzbt/echo-once'")
@@ -154,12 +160,16 @@ def main():
     c = json.load(open(os.path.join(REPO, "config.json"), encoding="utf-8"))
     c["providers"].append({"id": "zzmock", "name": "zzmock", "protocol": "openai",
                            "base_url": f"http://127.0.0.1:{MOCK_PORT}/v1", "api_key": "x"})
+    # 供应商名含"火山"+"ark"（不区分大小写）→ 其 daily 模型自动识别为余额返还制
+    c["providers"].append({"id": "zzark", "name": "zz-火山引擎-ark模拟", "protocol": "openai",
+                           "base_url": f"http://127.0.0.1:{MOCK_PORT}/v1", "api_key": "x"})
     c["models"].extend(TEST_MODELS)
     c["pools"]["zzall"] = {"model_ids": TEST_IDS, "strategy": "sequential"}
     c["pools"]["zzreq"] = {"model_ids": ["zzbt/echo-req"], "strategy": "sequential"}
     c["pools"]["zzonce"] = {"model_ids": ["zzbt/echo-once"], "strategy": "sequential"}
     c["pools"]["zzsmart"] = {"model_ids": ["zzbt/echo-smart"], "strategy": "sequential"}
     c["pools"]["zznso"] = {"model_ids": ["zzbt/echo-nso"], "strategy": "sequential"}
+    c["pools"]["zzgift"] = {"model_ids": ["zzbt/echo-gift"], "strategy": "sequential"}
     json.dump(c, open(os.path.join(REPO, "config.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
     # 启动隔离实例
@@ -308,6 +318,41 @@ def main():
         r = chat("zzall", stream=True, max_tokens=500)
         b = captured_bodies[-1]
         check("T10b 普通模型流式保留stream_options", r.status_code == 200 and b.get("stream_options") == {"include_usage": True}, b.get("stream_options"))
+
+        # ===== T11 余额返还制（火山/Ark 供应商自动识别）=====
+        r = httpx.get(f"{BASE}/admin/models", headers=ADMIN, timeout=15)
+        mj = {x["id"]: x for x in r.json()["models"]}
+        check("T11a ark供应商自动识别gift_refund",
+              mj.get("zzbt/echo-gift", {}).get("gift_refund") is True
+              and mj.get("zzbt/echo-token", {}).get("gift_refund") is False,
+              {k: mj.get(k, {}).get("gift_refund") for k in ("zzbt/echo-gift", "zzbt/echo-token")})
+
+        def gift_bal():
+            row = DB.execute("SELECT balance FROM gift_state WHERE model_name='zzbt/echo-gift'").fetchone()
+            return row["balance"] if row else None
+
+        r = chat("zzgift", max_tokens=500)  # 首次预检惰性初始化 266 → 扣 133
+        check("T11b 首次调用200且余额=266-133", r.status_code == 200 and gift_bal() == 133, gift_bal())
+        r = chat("zzgift", max_tokens=500)  # 133 → 0
+        check("T11c 第二次调用后余额归零", r.status_code == 200 and gift_bal() == 0, gift_bal())
+        r = chat("zzgift", max_tokens=500)  # 余额 0 → 预检拒绝
+        check("T11d 余额耗尽调用被拒(503)", r.status_code == 503, r.status_code)
+        # 模拟"昨日用量赠还"（火山语义：到账时刻补回 min(昨日自然日用量, 上限)）
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        yday = (datetime.now(ZoneInfo("Asia/Shanghai")).date() - timedelta(days=1)).isoformat()
+        db_exec("""INSERT INTO model_daily_stats (model_name, date, request_count, total_tokens)
+                   VALUES ('zzbt/echo-gift', ?, 2, 133)
+                   ON CONFLICT(model_name, date) DO UPDATE SET total_tokens = 133, request_count = 2""", (yday,))
+        db_exec("UPDATE gift_state SET balance = 1, last_grant_date = ? WHERE model_name = 'zzbt/echo-gift'", (yday,))
+        httpx.post(f"{BASE}/admin/reload", headers=ADMIN, timeout=30)  # 清 5s 配额预检缓存
+        time.sleep(0.5)
+        r = chat("zzgift", max_tokens=500)
+        # 惰性补账 min(133, 266) → 余额 1+133=134，再扣本次 133 → 1
+        check("T11e 昨日用量补账后调用成功且余额正确", r.status_code == 200 and gift_bal() == 1, (r.status_code, gift_bal()))
+        r = httpx.get(f"{BASE}/stats", headers=ADMIN, timeout=15)
+        row = next((x for x in r.json().get("models", []) if x.get("id") == "zzbt/echo-gift"), {})
+        check("T11f stats含gift_balance展示", row.get("gift_refund") is True and row.get("gift_balance") == 1, row.get("gift_balance"))
 
     finally:
         try:
