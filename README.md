@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.9.2-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.11.1-orange)](#-版本)
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 
 对外暴露 **OpenAI 兼容**与 **Anthropic Messages** 接口，
@@ -58,6 +58,14 @@
 | 🔌 OpenAI / Anthropic 双协议 | 📡 流式支持 | ⚡ 自动测速 |
 |:---|:---|:---|
 | 客户端可用任一协议调用，网关自动转换 | SSE 流式透传，Anthropic 自动转 OpenAI chunk | 管理后台一键并发测速，滑动平均延迟 |
+
+| 🧠 统一思考控制 | 🧪 计费回归安全网 | 📐 智能估算超时 |
+|:---|:---|:---|
+| `reasoning_effort` 六档 → 按模型 `reasoning_map` 换算上游思考参数；思考内容统一回传 `reasoning_content` / `thinking` | 33 断言计费回归套件（`test_billing_regression.py`）：流式/非流式/一次性/并发入账零丢失，任何改动先跑套件再上线 | `smart_estimate` 模型按 token 量动态计算超时（吞吐 EMA 校准），样本不足自动回退固定值 |
+
+| 📡 Embedding / Rerank | 🔑 用户密钥管理 | 📄 JSON 输出路由 |
+|:---|:---|:---|
+| `/v1/embeddings`、`/v1/rerank` 独立端点，仅路由到对应模态的模型 | 用户密钥可设限额（daily / 5h / 一次性）、计费模式、可用池，1 小时粒度用量历史，到期自动轮换 | 勾选 `json_output` 的模型组成硬门槛：带 `response_format(json)` 的请求只路由到支持的模型 |
 
 ---
 
@@ -117,14 +125,16 @@ python main.py
 
 ### 首次配置
 
-1. 浏览器打开 `/admin/`，输入管理密码（默认 `config.json` 的 `server.api_key`，即 `123456`）
-2. 在 **模型管理** 添加你的模型（OpenAI / Anthropic / 自建）
+1. 浏览器打开 `/admin/`，输入管理密码（`config.json` 的 `server.api_key`；**首次部署务必改成强随机值**）
+2. 在 **模型管理** 添加你的模型（OpenAI / Anthropic / 自建；推荐先建"供应商"再在其下挂模型）
 3. 在 **模型池** 调整 `auto` 池的模型顺序
 4. 在客户端（如 hermes）填 Base URL `http://127.0.0.1:8650/v1` 和同一 API Key
 
 > 💡 **外部访问**：将 `config.json` 的 `server.host` 改为 `0.0.0.0`。Windows 防火墙会首次弹窗询问是否放行，需同意。
 >
 > 💡 **Ubuntu / Linux**：`python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 main.py`
+>
+> 🧪 **改动计费相关代码后**：`python test_billing_regression.py` 运行 33 断言计费回归套件（自动在 8651 起隔离实例 + mock 上游，不触碰生产端口），全绿再上线。
 
 ---
 
@@ -145,21 +155,29 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v ModelGateway /t 
 ```
 model-gateway/
 ├── main.py                   # FastAPI 入口，对外 API 路由
-├── admin.py                  # 管理后台 API（CRUD + 拖拽 reorder + 兜底配置）
+├── admin.py                  # 管理后台 API（模型/供应商/池/密钥 CRUD + 拖拽 reorder + 决策查询）
 ├── pool.py                   # 核心：模型池、可用性判定、择优、切换、计费
 ├── models.py                 # 请求/响应 Pydantic 模型
-├── database.py               # SQLite 持久化（用量/请求日志/决策记录/密钥）
+├── database.py               # SQLite 持久化（用量/决策/校准样本/密钥），WAL 单连接 + bulk 事务
+├── keyauth.py                # 用户 API 密钥鉴权、限额、计费与轮换
 ├── scheduler.py              # 每模型独立定时刷新（APScheduler）
 ├── format_adapter.py         # Anthropic ↔ OpenAI 格式双向转换
+├── reasoning.py              # reasoning_effort 归一化与 reasoning_map 档位回落
+├── probe_reasoning.py        # 思考档位探测：实测各上游写法并生成报告（--apply 写入配置）
+├── updater.py                # 更新服务：GitHub/Gitee 拉取更新、停旧起新、存活监控自动重启（含守护面板）
+├── logging_config.py         # 统一日志（时间戳 + 控制台 + 文件）
+├── test_billing_regression.py # 计费回归套件（33 断言，隔离实例 + mock 上游，python 直接运行）
 ├── config.json               # 全部配置：服务、模型注册、池定义
 ├── requirements.txt
+├── start_gateway.ps1         # Windows 启动器（后台静默运行 + 健康检查）
+├── stop_gateway.ps1          # 按端口停止
 ├── providers/
 │   ├── openai_provider.py    # OpenAI 兼容适配器（含流式、测速）
 │   └── anthropic_provider.py # Anthropic 适配器（含格式转换、流式）
 ├── static/
-│   ├── index.html            # 传统管理后台
-│   └── hfadmin.html          # 科技感管理面板（v2.1bate 引入）
-└── gateway.db                # 运行时自动生成（SQLite）
+│   ├── index.html            # 传统管理后台（/admin）
+│   └── hfadmin.html          # 科技感管理面板（/hfadmin）
+└── gateway.db                # 运行时自动生成（SQLite，WAL）
 ```
 
 ---
@@ -216,8 +234,9 @@ Anthropic 适配器自动完成：
 | 2 | **RPM** | 最近 60 秒请求数触顶 → 排除（实时重算，恢复快） |
 | 3 | **TPM** | 最近 60 秒 Token 总量触顶 → 排除 |
 | 4 | **多模态** | 请求含图片但模型为纯文本 → 排除 |
-| 5 | **冷却** | 上游 429 / 5xx / 超时后冷却（v2.3.8 时长分级） → 排除 |
+| 5 | **冷却** | 上游 429 / 5xx / 超时后冷却（时长分级见下） → 排除 |
 | 6 | **上下文** | 估算 Token 超过模型 `context_window` → 排除 |
+| 7 | **JSON 输出** | 请求带 `response_format(json)` 时仅保留勾选 `json_output` 的模型 |
 
 ### 2️⃣ 调用顺序（仅在可用模型中生效）
 
@@ -229,14 +248,15 @@ Anthropic 适配器自动完成：
 
 选中模型调用上游，成功则返回；遇到 429 / 异常则标记冷却并切换下一个，直到成功或候选耗尽（返回 503 及具体原因）。
 
-**冷却时长分级**（v2.3.8）：
+**冷却时长分级**（v2.10.5+）：
 
 | 错误类型 | 冷却 |
 |:---|:---|
-| 上游 429 限流 | 20s |
-| 上游 5xx（500-599） | 15s |
-| 网络超时 / 连接失败 | 10s |
-| 其他异常 | 30s（兜底） |
+| 上游 429 限流 | 10s |
+| 上游 5xx（500-599） | 5s |
+| 网络超时 / 连接失败 | 5s |
+| 其他异常 | 5s（兜底） |
+| 上下文超限（400 + context length 类报错） | **不冷却**（模型本身健康），尝试下一候选；整池容不下时把上游 400 原文透传给客户端 |
 
 **兜底池回退**：当主池（及其子池）所有模型都不可用时，自动回退到该池 `fallback_pool` 指定的兜底池。可在管理后台从兜底池卡片一键勾选"为哪些池兜底"（auto 池强制兜底）。
 
@@ -261,8 +281,9 @@ Anthropic 适配器自动完成：
 ### 7️⃣ 计费模式
 
 - `billing_mode: "token"`：按消耗 Token 计数
-- `billing_mode: "request"`：按请求次数计数（每次 +1）
-- 流式请求同样计入每日配额（从响应的 `usage` 提取 Token）
+- `billing_mode: "request"`：按请求次数计数（每次 +1；流式在流建立成功时预扣 1 次，流式不再重复计）
+- 流式按上游返回的 `usage.total_tokens` 真实入账（usage 到达即记 + 流结束兜底重试）；上游全程未返回 usage 时**不静默丢**——记调用次数并告警，token 记 0
+- 所有计费写入合并为单事务（`db.bulk()`），并发入账经回归套件验证零丢失、零重复
 
 ---
 
@@ -278,11 +299,23 @@ Anthropic 适配器自动完成：
     "api_key": "your-strong-key"        // ⚠️ 暴露到局域网前务必修改
   },
   "default_mode": "auto",
+  "default_reasoning_effort": "low",    // 请求不带 reasoning_effort 时的默认档（v2.10.2+，缺省 low；"auto"/"" = 用模型默认）
+  "providers": [                        // 供应商：连接信息共享，模型通过 provider_id 继承
+    {
+      "id": "my-openai",
+      "name": "我的 OpenAI",
+      "protocol": "openai",             // openai / anthropic
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "sk-xxx",
+      "proxy_url": ""                   // 可选：该供应商走代理（http://127.0.0.1:7890）
+    }
+  ],
   "models": [
     {
       "id": "openai/gpt-4o",            // 唯一标识（标签/模型名）
       "name": "gpt-4o",                 // 模型名（同名自动归入大池子）
-      "provider": "openai",             // openai（兼容）或 anthropic
+      "provider_id": "my-openai",       // 继承供应商的协议/base_url/api_key（与内联三件套互斥）
+      "provider": "openai",             // 内联模式：openai（兼容）或 anthropic
       "base_url": "https://api.openai.com/v1",
       "api_key": "sk-xxx",
       "daily_token_limit": 1000000,     // 每日上限（0=不限；按次计费时单位为次）
@@ -291,21 +324,27 @@ Anthropic 适配器自动完成：
       "context_window": 128000,         // 上下文窗口（0=不校验）
       "max_concurrency": 0,             // 最大并发（0=不限，默认 0）
       "token_type": "daily",            // daily / rolling_5h / one_time
-      "billing_mode": "token",          // token / request
-      "is_free": true,                  // 默认免费（v2.3.3+）；付费模型显式设为 false
-      "modality": "vision",             // text（纯文本）/ vision（多模态）/ embedding（嵌入）/ rerank（重排）
-      "refresh_time": "00:00",          // 每日刷新时间（北京时间）
-      "timezone": "Asia/Shanghai"
+      "billing_mode": "token",          // token（按 Token）/ request（按请求次数）
+      "is_free": true,                  // 免费标注（绿）；付费模型显式设为 false（红）
+      "modality": "vision",             // text / vision / embedding / rerank
+      "json_output": false,             // true = 支持 response_format(json)，硬门槛路由
+      "smart_estimate": false,          // true = 按 token 量动态计算非流式超时（吞吐 EMA 校准）
+      "no_stream_options": false,       // true = 流式不下发 stream_options（本地 vllm 等不认时勾选）
+      "refresh_time": "00:00",          // 每日窗口起点（北京时间）；如 "14:00" = 14:00 开新窗口
+      "timezone": "Asia/Shanghai",
+      "reasoning_map": { },             // 思考映射：off/minimal/low/medium/high/max → 透传上游片段（可省略）
       // one_time 专属:
-      // "max_tokens": 0,              // 一次性最大用量
-      // "ttl_seconds": 0              // 一次性存活时长（秒）
+      "max_tokens": 0,                  // 一次性最大用量
+      "ttl_seconds": 0,                 // 一次性存活时长（秒）
+      "expire_date": ""                 // 一次性过期日期（YYYY-MM-DD，北京时间，到期次日失效）
     }
   ],
   "pools": {
     "auto": {
       "strategy": "sequential",
       "auto_order": false,              // true = 按延迟自动择优
-      "slow_latency_threshold": 3000,  // 自动择优降级阈值（ms，0=不限）
+      "load_balance": false,            // true = 轮转分配（与自动择优互斥）
+      "slow_latency_threshold": 3000,   // 自动择优降级阈值（ms，0=不限）
       "fallback_pool": "兜底池",        // 主池耗尽时回退到此处
       "model_ids": ["openai/gpt-4o", "pool:fixed"]
     },
@@ -315,6 +354,9 @@ Anthropic 适配器自动完成：
       "fallback_pool": null,            // 留空则不启用兜底
       "model_ids": ["openai/gpt-4o-mini"]
     }
+  },
+  "single_override": {                  // auto 池"一键单模型"模式（面板开关，持久化于此）
+    "auto": ""
   }
 }
 ```
@@ -336,10 +378,11 @@ Anthropic 适配器自动完成：
 
 | 标签页 | 核心功能 |
 |:---|:---|
-| 📦 **模型管理** | 增删改模型接口；标注免费/付费、纯文本/多模态/嵌入/重排、计费模式；同名模型自动归入大池子；**模型条目可拖拽排序并持久化** |
-| 🪆 **模型池** | 新增/删除池；拖拽 ⠿ 调整优先级与池内模型顺序；加入模型或子池；开关"自动择优"；**配置延迟阈值 ms（0=不限）**；⚡ 测速本池；**从兜底池卡片一键选择为哪些池兜底**；悬停 ⓘ 查看接口详情 |
-| 📊 **用量统计** | 卡片式可视化，横向进度条展示 已用/总量（青→琥珀→红分级），支持 **计费量 / 调用次数 / Token 用量** 三维度切换，每 5 秒自动刷新 |
-| 📜 **调用记录** | 每次调用的完整选模过程与切换依据（选中/排除原因），支持按池筛选 |
+| 📦 **模型管理** | 增删改模型；标注免费/付费、纯文本/多模态/嵌入/重排、计费模式；**JSON / 思考映射 / 智能超时 等能力徽章一眼可辨**；同名模型自动归入大池子；模型条目可拖拽排序并持久化；编辑弹窗按"计费与额度 / 配额与限流 / 流式与输出选项"分组，点编辑零请求直开，手机端单列适配 |
+| 🪆 **模型池** | 新增/删除/重命名池；拖拽 ⠿ 调整优先级与池内模型顺序；加入模型或子池；开关"自动择优"；配置延迟阈值 ms（0=不限）；🎯 一键单模型（auto 池临时锁定单个模型）；⚡ 测速本池；从兜底池卡片一键选择为哪些池兜底 |
+| 📊 **用量统计** | 卡片式可视化，进度条展示 已用/总量（青→琥珀→红分级），支持 计费量 / 调用次数 / Token 用量 三维度切换，每 5 秒自动刷新 |
+| 📜 **调用记录** | 每次调用的完整选模过程与切换依据（选中/排除原因），支持按池筛选；每步携带 route_ms / upstream_ms 耗时分解，决策行含估算/实际 Token 对照 |
+| 🔑 **API 密钥** | 用户密钥 CRUD：限额类型（daily / rolling_5h / 一次性）、限额值、计费模式（按 Token/按次）、可用池白名单、过期自动轮换，1 小时粒度用量历史条形图 |
 
 ### 调用记录的原因标签（v2.3.4+）
 
@@ -357,8 +400,8 @@ Anthropic 适配器自动完成：
 | 一次性已失效 · 已用 50,000/50,000 | 一次性模型到期/用完 |
 | 一次性已失效 · 已存活 3700s / TTL 3600s | 同上，TTL 触发 |
 | 子池无可用接口 | 嵌套子池内全部不可用 |
-| **上游限流 → 切换 · HTTP 429 · 234ms · 冷却 20s** | 上游 429 限流后切换 |
-| **上游错误 → 切换 · TimeoutError · HTTP 500 · 2300ms · 冷却 15s** | 上游错误后切换 |
+| **上游限流 → 切换 · HTTP 429 · 234ms · 冷却 10s** | 上游 429 限流后切换 |
+| **上游错误 → 切换 · TimeoutError · HTTP 500 · 2300ms · 冷却 5s** | 上游错误后切换 |
 
 **`detail` 字段参考**：
 
@@ -373,6 +416,7 @@ Anthropic 适配器自动完成：
 | `one_time_expired` | `{used, limit}` / `{age_sec, ttl_sec}` / `{expire_date}` |
 | `switch_429` / `fallback_switch_429` | `{status: 429, latency_ms, cooldown_sec}` |
 | `switch_error` / `fallback_switch_error` | `{error_type, status?, latency_ms, cooldown_sec, error?}` |
+| `context_overflow` | `{status: 400, no_cooldown: true, error}`（上下文超限透传） |
 
 ---
 
@@ -396,12 +440,20 @@ Anthropic 适配器自动完成：
 
 | 端点 | 方法 | 说明 |
 |:---|:---:|:---|
+| `/admin/models` | GET/POST/PUT/DELETE | 模型 CRUD（编辑时 ID 不可变；PUT 为按键合并，显式提交的键才覆盖） |
 | `/admin/models/reorder` | PUT | 调整模型管理列表顺序 |
-| `/admin/pools/reorder` | PUT | 调整池顺序 |
-| `/admin/providers/reorder` | PUT | 调整供应商顺序 |
-| `/admin/pools/fallback_targets` | PUT | 一键设置哪些池的 fallback 指向兜底池 |
-| `/admin/pools/{name}` | PUT | 更新池（model_ids / strategy / auto_order / slow_latency_threshold） |
-| `/admin/keys` | POST/PUT/DELETE | 用户 API 密钥 CRUD（含 `expire_seconds` 自动轮换） |
+| `/admin/model/{id}/metrics` | GET | 智能估算校准数据（样本数 / 吞吐 EMA / 平均输出） |
+| `/admin/providers` | GET/POST/PUT/DELETE | 供应商 CRUD（含 reorder） |
+| `/admin/pools` | GET/POST/PUT/DELETE | 池 CRUD（含 rename / reorder / fallback_targets） |
+| `/admin/pools/{name}/single_override` | POST/DELETE | auto 池"一键单模型"开关 |
+| `/admin/decisions` | GET | 调用决策记录（含 estimated/actual_tokens、route_ms/upstream_ms） |
+| `/admin/reload` | POST | 热重载配置（保存模型/池后自动调用） |
+| `/admin/keys` | GET/POST/PUT/DELETE | 用户 API 密钥 CRUD（含 `expire_seconds` 自动轮换） |
+| `/admin/keys/{id}/usage` | GET | 密钥用量（当前窗口 + 1 小时粒度历史） |
+| `/admin/test_model` | POST | 单模型连通性测试 |
+| `/admin/test_proxy` | POST | 代理连通性测试 |
+
+> 另有 Ollama / Open WebUI 兼容探测端点（`/api/tags`、`/api/show`、`/props` 等），供客户端"连接检测"通过，真实对话仍走 OpenAI / Anthropic 协议。
 
 ### 调用示例
 
@@ -476,16 +528,21 @@ SQLite（`gateway.db`）持久化以下表：
 
 | 表 | 用途 |
 |:---|:---|
-| `token_usage` | 每模型每日累计用量 |
+| `token_usage` | 每模型每日累计用量（按 `refresh_time` 窗口判定） |
 | `request_log` | 最近 60 秒请求记录（RPM/TPM 滑动窗口） |
 | `one_time_state` | 一次性模型的用量、创建时间、是否过期 |
-| `decision_log` | 最近 500 条调用决策记录（选模过程与切换依据） |
-| `api_keys` | 用户/管理员 API 密钥（`expire_seconds` / `rotated_at` / `previous_secret`） |
-| `key_rotation_log` | 密钥轮换审计日志（仅存前 8 字符前缀，不存完整密钥） |
+| `rolling5h_state` | 滚动 5h 窗口限额的用量与窗口起点 |
+| `decision_log` | 最近 500 条调用决策（选模过程、估算/实际 Token、route_ms/upstream_ms 耗时分解） |
+| `call_metrics` | 智能估算校准样本（估算值、真实 prompt/completion/total、耗时），驱动吞吐 EMA |
 | `model_daily_stats` | 模型每日调用次数 / Token 用量统计 |
-| `5h_state` | 滚动 5h 窗口限额的用量与窗口起点 |
+| `api_keys` | 用户/管理员 API 密钥（`expire_seconds` / `rotated_at` / `previous_secret`） |
+| `api_key_usage` / `api_key_hourly_usage` | 密钥当前窗口用量 / 1 小时粒度历史用量 |
+| `key_rotation_log` | 密钥轮换审计日志（仅存前 8 字符前缀，不存完整密钥） |
+| `users` | 守护面板用户 |
 
 > 🔐 **API 密钥轮换**：密钥可设置过期时长（秒），到期自动轮换新 secret，旧 secret 宽限期（约过期时长的 20%，1~24 小时）内仍可认证。
+>
+> 💾 写入均为 WAL 单连接 + `db.bulk()` 合并事务（计费多表一次 commit），读不阻塞写。
 
 ---
 
