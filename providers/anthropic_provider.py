@@ -221,12 +221,14 @@ class AnthropicProvider:
         }
 
     async def chat(self, req: ChatCompletionRequest, model_name: str,
-                   reasoning_fragment: dict | None = None) -> ChatCompletionResponse:
+                   reasoning_fragment: dict | None = None, timeout: float | None = None) -> ChatCompletionResponse:
         payload = self._build_payload(req, model_name, reasoning_fragment=reasoning_fragment)
+        _kw = {"timeout": httpx.Timeout(timeout, connect=10)} if timeout else {}
         resp = await self.client.post(
             f"{self.base_url}/v1/messages",
             json=payload,
             headers=self._headers(),
+            **_kw,
         )
         if resp.status_code == 429:
             raise RateLimitError("upstream 429")

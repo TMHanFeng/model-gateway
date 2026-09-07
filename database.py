@@ -105,6 +105,7 @@ async def init_db():
                 requested TEXT,
                 selected TEXT,
                 estimated_tokens INTEGER,
+                actual_tokens INTEGER,
                 steps TEXT,
                 caller TEXT
             )
@@ -113,6 +114,24 @@ async def init_db():
         cols = [r[1] for r in await (await db.execute("PRAGMA table_info(decision_log)")).fetchall()]
         if "caller" not in cols:
             await db.execute("ALTER TABLE decision_log ADD COLUMN caller TEXT")
+        # 老库迁移（v2.10.4，问题24）：decision_log 补充 actual_tokens 列（调用完成后的真实 usage.total_tokens）
+        if "actual_tokens" not in cols:
+            await db.execute("ALTER TABLE decision_log ADD COLUMN actual_tokens INTEGER")
+        # 问题22：call_metrics 校准样本表（独立于 decision_log，全量保留，供吞吐/输出长度 EMA 校准）
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS call_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_name TEXT NOT NULL,
+                ts REAL NOT NULL,
+                estimated_tokens INTEGER,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                max_tokens INTEGER,
+                latency_ms REAL
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_call_metrics_model ON call_metrics(model_name, id)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS rolling5h_state (
                 model_name TEXT PRIMARY KEY,
@@ -453,17 +472,90 @@ async def reset_5h_window(model_name: str):
         await db.commit()
 
 
-async def log_decision(pool_name: str, requested: str | None, selected: str | None, estimated: int, steps: list, caller: str = ""):
+async def log_decision(pool_name: str, requested: str | None, selected: str | None, estimated: int, steps: list, caller: str = "", actual_tokens: int | None = None) -> int:
+    """写入调用决策。流式请求可先写 actual_tokens=0，usage 到达后调用 update_decision_actual_tokens 补真实值。"""
     async with _lock:
         db = await _get_conn()
-        await db.execute(
-            "INSERT INTO decision_log (ts, pool_name, requested, selected, estimated_tokens, steps, caller) VALUES (?,?,?,?,?,?,?)",
-            (time.time(), pool_name, requested or "", selected or "", estimated, json.dumps(steps, ensure_ascii=False), caller),
+        cursor = await db.execute(
+            "INSERT INTO decision_log (ts, pool_name, requested, selected, estimated_tokens, actual_tokens, steps, caller) VALUES (?,?,?,?,?,?,?,?)",
+            (time.time(), pool_name, requested or "", selected or "", estimated, actual_tokens, json.dumps(steps, ensure_ascii=False), caller),
         )
+        decision_id = cursor.lastrowid
         await db.execute(
             "DELETE FROM decision_log WHERE id NOT IN (SELECT id FROM decision_log ORDER BY id DESC LIMIT 500)"
         )
         await db.commit()
+    return decision_id
+
+
+async def update_decision_actual_tokens(decision_id: int, actual_tokens: int | None):
+    """流式请求 usage 到达后补写真实 usage.total_tokens；decision_id 来自 log_decision。"""
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            "UPDATE decision_log SET actual_tokens = ? WHERE id = ?",
+            (actual_tokens, decision_id),
+        )
+        await db.commit()
+
+
+async def add_call_metric(model_name: str, estimated_tokens: int | None, prompt_tokens: int | None,
+                          completion_tokens: int | None, total_tokens: int | None,
+                          max_tokens: int | None, latency_ms: float | None):
+    """问题22：写入一条成功调用校准样本（call_metrics 全量保留）。"""
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            "INSERT INTO call_metrics (model_name, ts, estimated_tokens, prompt_tokens, completion_tokens, total_tokens, max_tokens, latency_ms) VALUES (?,?,?,?,?,?,?,?)",
+            (model_name, time.time(), estimated_tokens, prompt_tokens, completion_tokens, total_tokens, max_tokens, latency_ms),
+        )
+        # 全量保留但控制体积：仅裁剪最老的样本，保留每个模型最近 500 条
+        await db.execute(
+            "DELETE FROM call_metrics WHERE model_name = ? AND id NOT IN "
+            "(SELECT id FROM call_metrics WHERE model_name = ? ORDER BY id DESC LIMIT 500)",
+            (model_name, model_name),
+        )
+        await db.commit()
+
+
+async def get_model_metrics(model_name: str, last_n: int = 50) -> dict:
+    """问题22：取该模型最近 N 条校准样本的聚合（供 EMA 冷启动与面板 live 展示）。"""
+    async with _lock:
+        db = await _get_conn()
+        rows = await db.execute(
+            "SELECT total_tokens, latency_ms, completion_tokens FROM call_metrics "
+            "WHERE model_name = ? ORDER BY id DESC LIMIT ?",
+            (model_name, last_n),
+        )
+        rows = await rows.fetchall()
+    total = completion = 0
+    samples = 0
+    throughput_sum = 0.0
+    throughput_n = 0
+    completion_sum = 0.0
+    completion_n = 0
+    for r_total, r_latency, r_comp in rows:
+        samples += 1
+        try:
+            t = float(r_total or 0)
+            lat = float(r_latency or 0)
+            if t > 0 and lat > 0:
+                throughput_sum += t / (lat / 1000.0)
+                throughput_n += 1
+        except (TypeError, ValueError):
+            pass
+        try:
+            c = float(r_comp or 0)
+            if c > 0:
+                completion_sum += c
+                completion_n += 1
+        except (TypeError, ValueError):
+            pass
+    return {
+        "sample_count": samples,
+        "throughput": (throughput_sum / throughput_n) if throughput_n else None,      # tok/s
+        "avg_completion": (completion_sum / completion_n) if completion_n else None,  # 输出 token 均值
+    }
 
 
 async def get_decisions(pool_name: str | None = None, limit: int = 100) -> list[dict]:

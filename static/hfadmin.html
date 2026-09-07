@@ -677,7 +677,7 @@ select { max-width: 100%; }
         <div class="fg"><label>最大并发数（0=不限）</label><input name="max_concurrency" type="number" value="0"></div>
       </div>
       <div class="f2">
-        <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"></div>
+        <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"><label style="display:inline-flex;align-items:center;gap:5px;margin-top:6px;cursor:pointer;font-size:12px;color:var(--muted)"><input type="checkbox" name="smart_estimate" id="f-smart-estimate" style="width:11px;height:11px;flex:none;margin:0" onchange="onSmartToggle()"> 智能估算超时（按 token 量动态计算，忽略手动秒数）</label><div id="smart-live" class="hidden" style="font-size:12px;color:var(--muted);margin-top:5px;line-height:1.6"></div></div>
         <div class="fg" id="daily-fields"><label>每日刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
       </div>
       <div id="once-fields" class="hidden">
@@ -1056,6 +1056,7 @@ function modelRowHTML(m, i) {
       ${modBadge(m)}
       ${typeBadge(m)}
       ${m.reasoning_map && Object.keys(m.reasoning_map).length ? '<span class="badge b-5h">思考映射</span>' : ''}
+      ${m.smart_estimate ? '<span class="badge b-5h">智能超时</span>' : ''}
       ${latTag(m.id)}
     </div>
     <div class="m-actions">
@@ -1241,7 +1242,7 @@ function showAdd() {
   document.getElementById('mform').reset();
   document.getElementById('f-model-id').disabled = false;
   populateProviderSelect('').then(() => { onBillingChange(); onProviderSelect(); });
-  onTokenTypeChange(); onModalityChange();
+  onTokenTypeChange(); onModalityChange(); onSmartToggle();
   document.getElementById('overlay-model').classList.add('show');
 }
 async function showAddUnder(pid) {
@@ -1251,7 +1252,7 @@ async function showAddUnder(pid) {
   document.getElementById('f-model-id').disabled = false;
   document.getElementById('f-model-id').placeholder = '例如: glm-4.7-flash（供应商将自动前缀）';
   await populateProviderSelect(pid);
-  onBillingChange(); onProviderSelect(); onTokenTypeChange(); onModalityChange();
+  onBillingChange(); onProviderSelect(); onTokenTypeChange(); onModalityChange(); onSmartToggle(); onSmartToggle();
   document.getElementById('overlay-model').classList.add('show');
 }
 async function populateProviderSelect(selected) {
@@ -1269,6 +1270,33 @@ function onModalityChange() {
   if (!f || !el) return;
   const v = (f.modality && f.modality.value) || 'text';
   el.classList.toggle('hidden', v === 'embedding' || v === 'rerank');
+}
+function onSmartToggle() {
+  const f = document.getElementById('mform');
+  const smart = document.getElementById('f-smart-estimate');
+  const live = document.getElementById('smart-live');
+  if (!f || !smart || !live) return;
+  const t = f.timeout_seconds;
+  t.disabled = smart.checked;
+  if (!smart.checked) { live.classList.add('hidden'); live.innerHTML = ''; return; }
+  live.classList.remove('hidden');
+  live.textContent = '校准数据加载中…';
+  if (!editingId) {
+    live.innerHTML = '<span style="color:#b58900">新模型暂无校准样本：先按保守 30 tok/s 估计，积累 10 个样本后自动校准</span>';
+    return;
+  }
+  api('/admin/model/' + encodeURIComponent(editingId).replace(/%2F/g, '/') + '/metrics').then(d => {
+    if (!d) { live.textContent = ''; return; }
+    if (!d.sample_count) {
+      live.innerHTML = '<span style="color:#b58900">预热中：暂无校准样本，先按保守 30 tok/s 估计；积累 10 个样本后自动启用 EMA 校准</span>';
+      return;
+    }
+    const tp = d.throughput ? Math.round(d.throughput) : null;
+    const small = tp ? Math.max(1, Math.round(2000 / tp)) : null;
+    const large = tp ? Math.max(1, Math.round(50000 / tp)) : null;
+    live.innerHTML = '实测吞吐 <b>' + (tp || '?') + ' tok/s</b> · 样本 <b>' + d.sample_count + '</b> · 平均输出 <b>' + (d.avg_completion ? Math.round(d.avg_completion) + ' tok' : '?') + '</b><br>预测耗时：小请求(2k tok)≈' + (small ?? '?') + 's / 大请求(50k tok)≈' + (large ?? '?') + 's'
+      + (d.sample_count < 10 ? ' · <span style="color:#b58900">样本不足 10，暂回退固定超时</span>' : '');
+  }).catch(() => { live.textContent = ''; });
 }
 async function editModel(id) {
   const data = await api('/admin/models');
@@ -1290,10 +1318,11 @@ async function editModel(id) {
   f.daily_token_limit.value = m.daily_token_limit || 0; f.rpm_limit.value = m.rpm_limit || 0;
   f.tpm_limit.value = m.tpm_limit || 0; f.context_window.value = m.context_window || 0;
   f.timeout_seconds.value = (m.timeout_seconds == null ? 120 : m.timeout_seconds);
+  const _se = document.getElementById('f-smart-estimate'); if (_se) _se.checked = !!m.smart_estimate;
   f.max_concurrency.value = m.max_concurrency ?? 10; f.refresh_time.value = m.refresh_time || '';
   f.max_tokens.value = m.max_tokens || 0; f.ttl_seconds.value = m.ttl_seconds || 0;
   f.expire_date.value = m.expire_date || '';
-  onTokenTypeChange();
+  onTokenTypeChange(); onSmartToggle();
   document.getElementById('f-model-id').disabled = true;
   await populateProviderSelect(m.provider_id || '');
   onBillingChange(); onProviderSelect(); onModalityChange();
@@ -1307,6 +1336,7 @@ async function submitModel(e) {
   body.timeout_seconds = parseInt(body.timeout_seconds) || 0;
   body.is_free = body.is_free === 'true';
   body.json_output = document.getElementById('f-json-output') ? document.getElementById('f-json-output').checked : false;
+  body.smart_estimate = document.getElementById('f-smart-estimate') ? document.getElementById('f-smart-estimate').checked : false;
   const _epn = (body.extra_param_name || '').trim(), _epv = (body.extra_param_value || '').trim();
   delete body.extra_param_name; delete body.extra_param_value;
   if (_epn) body.extra_params = { [_epn]: _epv };
@@ -2041,6 +2071,7 @@ async function loadDecisions() {
         <span class="log-pool">池 ${esc(d.pool_name)}</span>
         ${d.requested ? `<span class="rsn rsn-neutral">指定 ${esc(d.requested)}</span>` : ''}
         <span class="rsn rsn-neutral">估算 ${d.estimated_tokens} tok</span>
+          ${d.actual_tokens != null && d.actual_tokens !== '' ? `<span class="rsn rsn-ok">实际 ${d.actual_tokens} tok</span>` : ''}
         <span class="log-selected ${ok ? 'ok' : 'fail'}">${ok ? '✓ ' + esc(d.selected) : '✕ 无可用接口'}</span>
       </div>
       <div class="log-steps">${steps || '<span class="hint">无候选</span>'}</div>

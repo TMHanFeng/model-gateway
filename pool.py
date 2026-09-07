@@ -41,6 +41,11 @@ class ModelEntry:
     json_output: bool = False  # 支持格式输出（json）——请求带 response_format json 时只选 true 的模型
     extra_params: dict = field(default_factory=dict)  # 用户自定义参数（注入上游 payload，黑名单过滤）
     reasoning_map: dict = field(default_factory=dict)  # 统一思考档位 -> 上游请求体片段（reasoning.py 解析）
+    smart_estimate: bool = False  # 问题22：智能估算超时（true=按 token 量动态计算超时，忽略手动秒数）
+    # 问题22 运行时校准状态（call_metrics 冷启动聚合 + 成功调用增量更新）
+    throughput_ema: float | None = None   # 输出吞吐 tok/s
+    avg_completion_ema: float | None = None  # 输出 token 均值
+    sample_count: int = 0
     provider_id: str = ""
     proxy_url: str = ""
     expire_date: str = ""
@@ -146,7 +151,7 @@ class ModelPool:
         # 负载均衡（round-robin）：pool_name -> 下一次起始下标
         self.round_robin: dict[str, int] = {}
         # 配额预检缓存：model_id -> (expires_at, ok, reason, detail)
-        self._quota_cache: dict[str, tuple[float, bool, str, dict | None]] = {}
+        self._quota_cache: dict[tuple, tuple[float, bool, str, dict | None]] = {}  # 键=(model_id, 配额估算tok)
         self._load()
 
     def _load(self):
@@ -196,6 +201,7 @@ class ModelPool:
                 json_output=bool(m.get("json_output", False)),
                 extra_params=(m.get("extra_params") or {}),
                 reasoning_map=(m.get("reasoning_map") or {}),
+                smart_estimate=bool(m.get("smart_estimate", False)),
                 provider_id=pid,
                 proxy_url=proxy_url,
                 expire_date=m.get("expire_date", ""),
@@ -329,9 +335,10 @@ class ModelPool:
                 other += 1
         return cjk + (other + 3) // 4 + 1
 
-    def _estimate_tokens(self, req) -> int:
+    def _estimate_input_tokens(self, req) -> int:
+        """仅估算输入（提示词+图片折算），不含 max_tokens——问题22/23 的估算基线。"""
         total = 0
-        for m in req.messages:
+        for m in getattr(req, "messages", None) or []:
             content = m.content
             if isinstance(content, str):
                 total += self._estimate_text_tokens(content)
@@ -342,12 +349,28 @@ class ModelPool:
                             total += self._estimate_text_tokens(part.get("text", ""))
                         elif part.get("type") in ("image_url", "image"):
                             total += 300
+        return total
+
+    def _estimate_tokens(self, req) -> int:
+        """窗口预检用保守估算 = 输入 + max_tokens 全额（est_window，防超窗，保持现状）。"""
+        total = self._estimate_input_tokens(req)
         if req.max_tokens:
             total += req.max_tokens
         return total
 
+    def _estimate_effective(self, entry: ModelEntry, req) -> int:
+        """问题22：显示/预估用有效估算（est_effective）= 输入 + 该模型历史平均输出（EMA）。
+
+        样本不足 10 条（未校准）时退回保守窗口估算。决策日志与配额预检（问题23）均用此值，
+        消除客户端大 max_tokens（如 64k）导致的估算虚高。
+        """
+        est_input = self._estimate_input_tokens(req)
+        if entry.sample_count >= 10 and entry.avg_completion_ema:
+            return est_input + int(entry.avg_completion_ema)
+        return est_input + (getattr(req, "max_tokens", 0) or 0)
+
     def _has_images(self, req) -> bool:
-        for m in req.messages:
+        for m in getattr(req, "messages", None) or []:
             content = m.content
             if isinstance(content, list):
                 for part in content:
@@ -355,9 +378,9 @@ class ModelPool:
                         return True
         return False
 
-    async def _quota_check(self, entry: ModelEntry, now: float) -> tuple[bool, str, dict | None]:
+    async def _quota_check(self, entry: ModelEntry, now: float, estimated: int = 0) -> tuple[bool, str, dict | None]:
         """配额与限速预检（读 sqlite 的部分，由 _check_available 短缓存包装）。
-        返回 (ok, reason, detail)。"""
+        返回 (ok, reason, detail)。estimated = 本次请求的有效估算 token（问题23：计入预检防瞬时冲越）。"""
         if entry.token_type == "one_time":
             state = await db.get_one_time_state(entry.id)
             if state is None:
@@ -378,7 +401,7 @@ class ModelPool:
                 await db.expire_one_time(entry.id)
                 age = int(now - state["created_at"])
                 return False, "one_time_expired", {
-                    "reason_detail": f"TTL 已过",
+                    "reason_detail": "TTL 已过",
                     "age_sec": age,
                     "ttl_sec": entry.ttl_seconds,
                 }
@@ -387,6 +410,14 @@ class ModelPool:
                 return False, "one_time_expired", {
                     "reason_detail": "用量触顶",
                     "used": state["used_tokens"],
+                    "limit": entry.max_tokens,
+                }
+            # 问题23：used + 本次估算 触顶 → 仅拒绝本次请求，不标记过期（估算非真实用量）
+            if entry.max_tokens > 0 and estimated > 0 and state["used_tokens"] + estimated >= entry.max_tokens:
+                return False, "quota_exhausted", {
+                    "reason_detail": "本次请求估算将触顶（含估算）",
+                    "used": state["used_tokens"],
+                    "estimated": estimated,
                     "limit": entry.max_tokens,
                 }
         elif entry.token_type == "rolling_5h":
@@ -400,6 +431,16 @@ class ModelPool:
                         "limit": entry.daily_token_limit,
                         "window_remaining_sec": remaining,
                     }
+                # 问题23：used + 本次估算 触顶 → 拒绝，防单次请求冲越剩余额度
+                if entry.daily_token_limit > 0 and estimated > 0 and state["used_amount"] + estimated >= entry.daily_token_limit:
+                    remaining = int(ROLLING_5H_SECONDS - (now - state["window_start"]))
+                    return False, "quota_exhausted", {
+                        "reason_detail": "本次请求估算将触顶（含估算）",
+                        "used": state["used_amount"],
+                        "estimated": estimated,
+                        "limit": entry.daily_token_limit,
+                        "window_remaining_sec": remaining,
+                    }
             else:
                 entry.rolling5h_window_start = None
         elif entry.daily_token_limit > 0:
@@ -407,6 +448,14 @@ class ModelPool:
             if used >= entry.daily_token_limit:
                 return False, "quota_exhausted", {
                     "used": used,
+                    "limit": entry.daily_token_limit,
+                }
+            # 问题23：used + 本次估算 触顶 → 拒绝（修复"已用 151.6w/150w 仍放行单次冲线"）
+            if estimated > 0 and used + estimated >= entry.daily_token_limit:
+                return False, "quota_exhausted", {
+                    "reason_detail": "本次请求估算将触顶（含估算）",
+                    "used": used,
+                    "estimated": estimated,
                     "limit": entry.daily_token_limit,
                 }
 
@@ -424,25 +473,35 @@ class ModelPool:
 
     def _invalidate_quota_cache(self, model_id: str):
         """该模型发生计费/调用后调用：使配额预检缓存立即失效，保证下一次预检读到最新用量"""
-        self._quota_cache.pop(model_id, None)
+        for key in [k for k in self._quota_cache if k[0] == model_id]:
+            self._quota_cache.pop(key, None)
 
     async def _check_available(self, entry: ModelEntry, estimated_tokens: int = 0, has_images: bool = False,
-                               required_modality: str | None = None, required_json_output: bool = False) -> tuple[bool, str, dict | None]:
+                               required_modality: str | None = None, required_json_output: bool = False,
+                               est_input_tokens: int = 0) -> tuple[bool, str, dict | None]:
         """返回 (ok, reason, detail)。detail 用于调用记录展示具体数值（已用/上限、冷却剩余秒等）。
         required_modality：要求特定模态（如 "embedding"/"rerank"）时，不匹配的模型一律排除；
                         None 表示普通 chat/通用调用（此时 embedding/rerank 模型也应被排除）。
-        required_json_output：请求要求 json 输出时，仅 json_output=True 的模型可用。"""
+        required_json_output：请求要求 json 输出时，仅 json_output=True 的模型可用。
+        estimated_tokens：窗口保守估算（含 max_tokens，防超窗 + 上下文门槛）。
+        est_input_tokens：仅输入估算——问题23 配额预检用有效估算（输入+该模型历史平均输出），
+                          避免大 max_tokens 虚高误杀；样本不足时退回窗口估算。"""
         now = time.time()
         detail = None
 
+        # 问题23：配额口径用有效估算（校准后），且缓存键必须带上估算值——不同估算不可共用缓存
+        quota_est = estimated_tokens
+        if est_input_tokens > 0 and entry.sample_count >= 10 and entry.avg_completion_ema:
+            quota_est = est_input_tokens + int(entry.avg_completion_ema)
+
         # 配额/限速预检（问题19）：这部分需读 sqlite（每候选 1-4 次串行查询），
         # 结果短缓存 QUOTA_CACHE_TTL 秒；该模型每次调用计费后立即失效，自身计数保持新鲜
-        cached = self._quota_cache.get(entry.id)
+        cached = self._quota_cache.get((entry.id, quota_est))
         if cached and cached[0] > now:
             quota_ok, quota_reason, quota_detail = cached[1], cached[2], cached[3]
         else:
-            quota_ok, quota_reason, quota_detail = await self._quota_check(entry, now)
-            self._quota_cache[entry.id] = (now + QUOTA_CACHE_TTL, quota_ok, quota_reason, quota_detail)
+            quota_ok, quota_reason, quota_detail = await self._quota_check(entry, now, estimated=quota_est)
+            self._quota_cache[(entry.id, quota_est)] = (now + QUOTA_CACHE_TTL, quota_ok, quota_reason, quota_detail)
         if not quota_ok:
             return False, quota_reason, quota_detail
 
@@ -582,7 +641,8 @@ class ModelPool:
 
     async def _select_from_pool(self, pool_name: str, estimated_tokens: int = 0, exclude: set | None = None,
                                 has_images: bool = False, visiting: set | None = None,
-                                required_modality: str | None = None, required_json_output: bool = False):
+                                required_modality: str | None = None, required_json_output: bool = False,
+                                est_input_tokens: int = 0):
         exclude = exclude or set()
         visiting = visiting or set()
         if pool_name in visiting:
@@ -599,6 +659,7 @@ class ModelPool:
                 ok, reason, detail = await self._check_available(
                     entry, estimated_tokens, has_images,
                     required_modality=required_modality, required_json_output=required_json_output,
+                    est_input_tokens=est_input_tokens,
                 )
                 if ok:
                     steps = [{"model": override_id, "reason": "single_override_selected"}]
@@ -647,6 +708,7 @@ class ModelPool:
                 ok, reason, detail = await self._check_available(
                     entry, estimated_tokens, has_images,
                     required_modality=required_modality, required_json_output=required_json_output,
+                    est_input_tokens=est_input_tokens,
                 )
                 if ok:
                     steps.append({"model": entry.id, "reason": "selected"})
@@ -668,7 +730,8 @@ class ModelPool:
 
     async def select_model(self, pool_name: str, requested_model: str | None = None, estimated_tokens: int = 0,
                            exclude: set | None = None, has_images: bool = False,
-                           required_modality: str | None = None, required_json_output: bool = False):
+                           required_modality: str | None = None, required_json_output: bool = False,
+                           est_input_tokens: int = 0):
         exclude = exclude or set()
         steps = []
 
@@ -684,6 +747,7 @@ class ModelPool:
                 ok, reason, detail = await self._check_available(
                     entry, estimated_tokens, has_images,
                     required_modality=required_modality, required_json_output=required_json_output,
+                    est_input_tokens=est_input_tokens,
                 )
                 if ok:
                     steps.append({"model": entry.id, "reason": "selected"})
@@ -697,6 +761,7 @@ class ModelPool:
         return await self._select_from_pool(
             pool_name, estimated_tokens, exclude, has_images,
             required_modality=required_modality, required_json_output=required_json_output,
+            est_input_tokens=est_input_tokens,
         )
 
     def _record_latency(self, entry: ModelEntry, ms: float):
@@ -734,22 +799,87 @@ class ModelPool:
             return None
         return reasoning.resolve_fragment(entry.reasoning_map, effort)
 
+    def _update_metrics_ema(self, entry: ModelEntry, total_tokens, latency_ms, completion_tokens):
+        """问题22：增量更新吞吐/输出长度 EMA（α=1/min(n,20)），样本数累计。尽力而为不抛错。"""
+        try:
+            entry.sample_count += 1
+            a = 1.0 / min(entry.sample_count, 20)
+            lat = float(latency_ms) / 1000.0
+            t = float(total_tokens or 0)
+            if lat > 0 and t > 0:
+                x = t / lat
+                entry.throughput_ema = x if entry.throughput_ema is None else entry.throughput_ema * (1 - a) + x * a
+            c = float(completion_tokens or 0)
+            if c > 0:
+                entry.avg_completion_ema = c if entry.avg_completion_ema is None else entry.avg_completion_ema * (1 - a) + c * a
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
+    async def _hydrate_metrics(self, entry: ModelEntry):
+        """问题22：运行时首次用到该模型时，用 call_metrics 历史聚合预热 EMA（_load 是同步的，查不了库）。"""
+        if getattr(entry, "_metrics_hydrated", False):
+            return
+        entry._metrics_hydrated = True
+        try:
+            m = await db.get_model_metrics(entry.id)
+            if m.get("sample_count"):
+                entry.sample_count = m["sample_count"]
+                entry.throughput_ema = m.get("throughput")
+                entry.avg_completion_ema = m.get("avg_completion")
+        except Exception:
+            pass
+
+    def _dynamic_timeout(self, entry: ModelEntry, req) -> float | None:
+        """问题22：smart_estimate=true 且样本充足时，按 token 量动态计算非流式总超时（秒）。
+
+        timeout = connect(10) + (输入 + 平均输出 EMA) / 吞吐 EMA × 1.3
+        样本 <10 或无吞吐数据 → 返回 None（回退 provider 固定 timeout_seconds）。
+        流式不适用：每 chunk 间超时由 client 默认 120s 保底，不会误杀流式。
+        """
+        if not entry.smart_estimate or entry.sample_count < 10:
+            return None
+        if not entry.throughput_ema or entry.throughput_ema <= 0:
+            return None
+        est_total = self._estimate_input_tokens(req) + (entry.avg_completion_ema or 0)
+        if est_total <= 0:
+            return None
+        return round(10 + est_total / entry.throughput_ema * 1.3, 1)
+
     async def execute(self, entry: ModelEntry, req) -> tuple:
         provider = self._get_provider(entry)
         fragment = self._reasoning_fragment(entry, req)
+        if entry.smart_estimate:
+            await self._hydrate_metrics(entry)
+        dyn_timeout = self._dynamic_timeout(entry, req)
         t0 = time.perf_counter()
         async with entry.semaphore:
             try:
-                response = await provider.chat(req, entry.name, reasoning_fragment=fragment)
+                response = await provider.chat(req, entry.name, reasoning_fragment=fragment, timeout=dyn_timeout)
             except RateLimitError:
                 entry.cooldown_until = time.time() + 10
                 raise
-        self._record_latency(entry, (time.perf_counter() - t0) * 1000)
+        latency_ms = (time.perf_counter() - t0) * 1000
+        self._record_latency(entry, latency_ms)
 
         tokens_used = response.usage.total_tokens
         await db.log_request(entry.id, tokens_used)
         self._invalidate_quota_cache(entry.id)
         await db.add_model_call(entry.id, tokens_used)
+        # 问题22：写校准样本（成功调用）+ 增量更新 EMA；失败不影响主流程
+        try:
+            await db.add_call_metric(
+                entry.id,
+                self._estimate_effective(entry, req),
+                getattr(response.usage, "prompt_tokens", None),
+                getattr(response.usage, "completion_tokens", None),
+                tokens_used,
+                (req.max_tokens if req is not None else 0) or 0,
+                round(latency_ms, 1),
+            )
+            self._update_metrics_ema(entry, tokens_used, latency_ms,
+                                     getattr(response.usage, "completion_tokens", None))
+        except Exception:
+            logger.debug(f"[call_metrics] 非流式样本写入失败 model={entry.id}", exc_info=True)
 
         if entry.token_type == "one_time":
             charge = 1 if entry.billing_mode == "request" else tokens_used
@@ -766,44 +896,110 @@ class ModelPool:
 
         return response, tokens_used
 
-    async def execute_stream(self, entry: ModelEntry, req):
+    async def execute_stream(self, entry: ModelEntry, req, decision_id: int | None = None):
         provider = self._get_provider(entry)
         fragment = self._reasoning_fragment(entry, req)
         t0 = time.perf_counter()
         # 计费在 execute_stream_with_fallback 验证首个分片（真正建连）成功之后进行，
         # 避免"连接即失败"的流式请求被错误计入配额。
         raw = provider.chat_stream(req, entry.name, reasoning_fragment=fragment)
-        return self._wrap_stream(entry, raw, t0)
+        return self._wrap_stream(entry, raw, t0, req=req, decision_id=decision_id)
 
-    async def _wrap_stream(self, entry: ModelEntry, raw, t0: float):
+    async def _wrap_stream(self, entry: ModelEntry, raw, t0: float, req=None, decision_id: int | None = None):
         captured = 0
+        usage_detail = {"prompt_tokens": None, "completion_tokens": None}
+        billed = False          # 问题24：防重复计费——usage 到达即记一次；finally 仅补记未计过的流
+        estimated = 0           # 校准样本的 est_effective，兼作告警上下文，不参与计费口径
         try:
+            try:
+                estimated = self._estimate_effective(entry, req) if req is not None else 0
+            except Exception:
+                estimated = 0
             async for chunk in raw:
                 if isinstance(chunk, str) and chunk.startswith("data: ") and "[DONE]" not in chunk:
                     try:
                         obj = json.loads(chunk[6:].strip())
                         usage = obj.get("usage")
-                        if usage and usage.get("total_tokens"):
-                            captured = usage["total_tokens"]
+                        total = usage.get("total_tokens") if usage else 0
+                        if total and int(total) > 0:
+                            captured = int(total)
+                            usage_detail = {
+                                "prompt_tokens": usage.get("prompt_tokens"),
+                                "completion_tokens": usage.get("completion_tokens"),
+                            }
+                            if not billed:  # 问题24：同一请求只计费一次
+                                try:
+                                    billed = True
+                                    await self._settle_stream_tokens(entry, captured)
+                                    if decision_id:
+                                        await db.update_decision_actual_tokens(decision_id, captured)
+                                except Exception:
+                                    # 入账抛错时回退 billed，交由 finally 兜底重试，避免静默漏计
+                                    billed = False
+                                    logger.warning(
+                                        f"[流式计费失败] 已捕获 usage 但入账抛错，将由 finally 兜底 "
+                                        f"(模型={entry.id}, tokens={captured}, decision_id={decision_id})"
+                                    )
+                                    raise
                     except Exception:
                         pass
                 yield chunk
         finally:
             self._record_latency(entry, (time.perf_counter() - t0) * 1000)
-            await db.log_request(entry.id, captured)
-            self._invalidate_quota_cache(entry.id)
-            await db.add_model_call(entry.id, captured)
+            latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+            if captured > 0 and not billed:
+                # 问题24 兜底：usage 已捕获但尚未入账（如 usage 在最后一个 chunk 后才被解析）
+                try:
+                    await self._settle_stream_tokens(entry, captured)
+                    if decision_id:
+                        await db.update_decision_actual_tokens(decision_id, captured)
+                except Exception:
+                    logger.warning(
+                        f"[流式计费兜底失败] usage 已捕获但两次入账均抛错，需人工核查 "
+                        f"(模型={entry.id}, tokens={captured}, decision_id={decision_id})"
+                    )
+                    raise
+            elif captured == 0:
+                # 问题24：上游全程未返回 usage——绝不静默丢，至少记调用次数并告警
+                logger.warning(f"[流式缺失usage] 流式请求未返回 usage，未计 token，需核查 (模型={entry.id}, 估算={estimated}tok)")
+                try:
+                    await db.log_request(entry.id, 0)
+                    self._invalidate_quota_cache(entry.id)
+                    await db.add_model_call(entry.id, 0)
+                    if decision_id:
+                        await db.update_decision_actual_tokens(decision_id, 0)
+                except Exception:
+                    logger.warning(f"[流式缺失usage] 补记调用次数失败 (模型={entry.id})")
             if captured > 0:
-                if entry.token_type == "one_time":
-                    await db.add_one_time_usage(entry.id, captured)
-                    state = await db.get_one_time_state(entry.id)
-                    if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
-                        await db.expire_one_time(entry.id)
-                elif entry.token_type == "rolling_5h":
-                    if entry.billing_mode == "token":
-                        await self._charge_rolling_5h(entry, captured)
-                elif entry.billing_mode == "token":
-                    await db.add_daily_usage(entry.id, captured)
+                # 问题22：写校准样本 + 增量更新 EMA；失败不影响主流程
+                try:
+                    await db.add_call_metric(entry.id, estimated or None, usage_detail.get("prompt_tokens"),
+                                             usage_detail.get("completion_tokens"), captured,
+                                             (req.max_tokens if req is not None else 0) or 0, latency_ms)
+                    self._update_metrics_ema(entry, captured, latency_ms, usage_detail.get("completion_tokens"))
+                except Exception:
+                    logger.debug(f"[call_metrics] 流式样本写入失败 model={entry.id}", exc_info=True)
+
+    async def _settle_stream_tokens(self, entry: ModelEntry, tokens: int):
+        """问题24：按流式真实 usage.total_tokens 入账，计费口径与非流式 execute() 一致。
+
+        计费单位一致：request 型按次记 1，token 型按真实 token 数。差异在于：流式路径的
+        request 型已在流建立时按次预扣 1 次（见 execute_stream_with_fallback），流式不重复计；
+        one_time 从不预扣，故必须在此入账。
+        """
+        await db.log_request(entry.id, tokens)
+        self._invalidate_quota_cache(entry.id)
+        await db.add_model_call(entry.id, tokens)
+        charge = 1 if entry.billing_mode == "request" else tokens
+        if entry.token_type == "one_time":
+            await db.add_one_time_usage(entry.id, charge)
+            state = await db.get_one_time_state(entry.id)
+            if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
+                await db.expire_one_time(entry.id)
+        elif entry.token_type == "rolling_5h" and entry.billing_mode == "token":
+            await self._charge_rolling_5h(entry, charge)
+        elif entry.billing_mode == "token":
+            await db.add_daily_usage(entry.id, charge)
 
 
     async def execute_embedding(self, entry: ModelEntry, req) -> tuple[dict, int]:
@@ -896,7 +1092,7 @@ class ModelPool:
 
         for _ in range(max_attempts):
             entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried,
-                                                   required_modality="embedding")
+                                                   required_modality="embedding", est_input_tokens=estimated)
             if steps:
                 actual_calls.extend(st for st in steps if st["reason"] != "already_tried")
             if entry is None:
@@ -909,7 +1105,9 @@ class ModelPool:
                     pass
                 else:
                     actual_calls.append({"model": entry.id, "reason": "selected"})
-                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
+                # embedding 估算本就是输入口径(无 messages/max_tokens),直接用 estimated,不能走 est_effective
+                await db.log_decision(pool_name, requested_model, entry.id, estimated,
+                                      actual_calls, caller, actual_tokens=tokens)
                 return response, tokens, actual_calls
             except RateLimitError:
                 logger.warning(
@@ -963,7 +1161,7 @@ class ModelPool:
 
         for _ in range(max_attempts):
             entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried,
-                                                   required_modality="rerank")
+                                                   required_modality="rerank", est_input_tokens=estimated)
             if steps:
                 actual_calls.extend(st for st in steps if st["reason"] != "already_tried")
             if entry is None:
@@ -976,7 +1174,7 @@ class ModelPool:
                     pass
                 else:
                     actual_calls.append({"model": entry.id, "reason": "selected"})
-                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
+                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller, actual_tokens=tokens)
                 return response, tokens, actual_calls
             except RateLimitError:
                 logger.warning(
@@ -1050,6 +1248,7 @@ class ModelPool:
         actual_calls: list[dict] = []
         override_id = self.single_override.get(pool_name)
         fb_name = self.pools.get(pool_name, {}).get("fallback_pool")
+        est_input = self._estimate_input_tokens(req)
         # When the locked single model fails (or the main pool is exhausted), escalate to the fallback pool.
         use_fallback = False
         last_overflow = None            # 最近一次"上下文超限 400"（用于整池失败时透传原文）
@@ -1060,10 +1259,12 @@ class ModelPool:
                 if not fb_name:
                     break
                 entry, steps = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images,
-                                                       required_json_output=required_json_output)
+                                                       required_json_output=required_json_output,
+                                                       est_input_tokens=est_input)
             else:
                 entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images,
-                                                       required_json_output=required_json_output)
+                                                       required_json_output=required_json_output,
+                                                       est_input_tokens=est_input)
 
             if steps:
                 actual_calls.extend(s for s in steps if s["reason"] != "already_tried")
@@ -1085,7 +1286,8 @@ class ModelPool:
                         actual_calls[-1]["reason"] = "fallback_selected"
                 else:
                     actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
-                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
+                await db.log_decision(pool_name, requested_model, entry.id, self._estimate_effective(entry, req),
+                                      actual_calls, caller, actual_tokens=tokens)
                 return response, tokens, actual_calls
             except RateLimitError:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
@@ -1186,6 +1388,7 @@ class ModelPool:
         actual_calls: list[dict] = []
         override_id = self.single_override.get(pool_name)
         fb_name = self.pools.get(pool_name, {}).get("fallback_pool")
+        est_input = self._estimate_input_tokens(req)
         use_fallback = False
         last_overflow = None            # 最近一次"上下文超限 400"（用于整池失败时透传原文）
         last_failure_overflow = False
@@ -1195,10 +1398,12 @@ class ModelPool:
                 if not fb_name:
                     break
                 entry, steps = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images,
-                                                       required_json_output=required_json_output)
+                                                       required_json_output=required_json_output,
+                                                       est_input_tokens=est_input)
             else:
                 entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images,
-                                                       required_json_output=required_json_output)
+                                                       required_json_output=required_json_output,
+                                                       est_input_tokens=est_input)
 
             if steps:
                 actual_calls.extend(s for s in steps if s["reason"] != "already_tried")
@@ -1211,7 +1416,18 @@ class ModelPool:
             tried.add(entry.id)
 
             try:
-                stream = await self.execute_stream(entry, req)
+                last_reason = actual_calls[-1]["reason"] if actual_calls else ""
+                if last_reason in ("selected", "single_override_selected") and actual_calls[-1]["model"] == entry.id:
+                    if use_fallback:
+                        actual_calls[-1]["reason"] = "fallback_selected"
+                else:
+                    actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
+                # 先记录路由决策（actual_tokens 暂为 0，usage 到达后由 _wrap_stream 补写真实值；问题24）
+                decision_id = await db.log_decision(pool_name, requested_model, entry.id,
+                                                    self._estimate_effective(entry, req), actual_calls, caller,
+                                                    actual_tokens=0)
+
+                stream = await self.execute_stream(entry, req, decision_id=decision_id)
                 # 预取首个分片：真正发起上游连接并检查 HTTP 状态。
                 # 连接失败 / 429 / HTTP 错误会在此处抛出，从而触发下面的回退逻辑；
                 # 否则流式请求会"假成功"（日志显示选中但实际无响应、不兜底）。
@@ -1242,7 +1458,6 @@ class ModelPool:
                         actual_calls[-1]["reason"] = "fallback_selected"
                 else:
                     actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
-                await db.log_decision(pool_name, requested_model, entry.id, estimated, actual_calls, caller)
                 return _replay(), entry, actual_calls
             except RateLimitError:
                 entry.cooldown_until = time.time() + 10

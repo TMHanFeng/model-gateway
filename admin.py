@@ -5,6 +5,7 @@ import logging
 import subprocess
 import threading
 from pool import load_config, save_config
+import database as db
 from scheduler import restart_scheduler
 from providers.openai_provider import OpenAIProvider
 from providers.anthropic_provider import AnthropicProvider
@@ -158,6 +159,7 @@ async def add_model(request: Request, _=Depends(verify_admin)):
         "json_output": bool(body.get("json_output", False)),
         "extra_params": body.get("extra_params") or {},
         "reasoning_map": body.get("reasoning_map") or {},
+        "smart_estimate": bool(body.get("smart_estimate", False)),
     }
     if pid:
         entry["provider_id"] = pid
@@ -204,6 +206,35 @@ async def add_model(request: Request, _=Depends(verify_admin)):
             probe_status = "skipped"  # 探测失败不影响模型本身的使用（默认思考行为）
 
     return {"ok": True, "model": entry, "probe": probe_status}
+
+
+@router.get("/model/{model_id:path}/metrics")
+async def get_model_metrics_api(model_id: str, _=Depends(verify_admin)):
+    """问题22：返回该模型实测校准数据（吞吐 tok/s、平均输出 token、样本数），供前端 live 区展示。"""
+    from pool import ModelPool  # 复用运行中实例的 EMA（含未落盘的增量）
+    config = load_config()
+    entry = next((m for m in config.get("models", []) if m.get("id") == model_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    try:
+        agg = await db.get_model_metrics(model_id)
+    except Exception:
+        agg = {"sample_count": 0, "throughput": None, "avg_completion": None}
+    live = None
+    try:
+        from main import pool as _pool
+        e = _pool.registry.get(model_id)
+        if e is not None:
+            live = {"throughput": e.throughput_ema, "avg_completion": e.avg_completion_ema,
+                    "sample_count": e.sample_count, "smart_estimate": e.smart_estimate}
+    except Exception:
+        pass
+    return {
+        "smart_estimate": bool(entry.get("smart_estimate", False)),
+        "sample_count": (live or {}).get("sample_count") or agg.get("sample_count") or 0,
+        "throughput": (live or {}).get("throughput") or agg.get("throughput"),
+        "avg_completion": (live or {}).get("avg_completion") or agg.get("avg_completion"),
+    }
 
 
 @router.put("/models/reorder")
@@ -264,6 +295,8 @@ async def update_model(model_id: str, request: Request, _=Depends(verify_admin))
             continue
         if key == "is_free":
             value = bool(value)
+        if key == "smart_estimate":
+            value = bool(value)
         if key == "timeout_seconds":
             value = None if value in (None, "") else int(value)
         models[idx][key] = value
@@ -277,6 +310,7 @@ async def update_model(model_id: str, request: Request, _=Depends(verify_admin))
     # embedding/rerank 模型不参与思考控制：显式剥离映射，避免残留
     if models[idx].get("modality") in ("embedding", "rerank"):
         models[idx].pop("reasoning_map", None)
+        models[idx].pop("smart_estimate", None)
 
     config["models"] = models
     save_config(config)

@@ -493,6 +493,8 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
+**`v2.10.4`** — **问题22/23/24 本地重做（以本地主线为基，含全部思考控制功能）**：①问题24 流式计费静默漏记修复移植——流式计费从 finally 移到"usage 到达即记"（billed 防重+finally 兜底+缺失 usage 告警记次数），decision_log 新增 actual_tokens 列（幂等迁移）并新增 `_settle_stream_tokens` 统一计费口径（request 型按次/token 型按真实用量），前端"估算/实际"同屏 ②问题22 Token 智能估算——新增 call_metrics 校准表，估算拆 est_window（窗口预检保守）/est_effective（输入+平均输出 EMA）两路，smart_estimate 模型非流式动态超时（吞吐 EMA×1.3 缓冲，样本<10 回退固定值），`GET /admin/model/{id}/metrics` + 双面板智能超时开关与内联 live 区 ③问题23 配额预检计入本次有效估算——daily/rolling_5h/one_time 三段均 `used+估算>=limit → 拒绝`（修复"151.6w/150w 仍放行单次冲线"），one_time 估算触顶不误标过期，配额缓存键带上估算值
+
 **`v2.10.3`** — **请求级 `reasoning_effort: "auto"`**：客户端可显式传 auto 表示"本次请求不注入思考参数、用模型默认行为"（优先级高于服务端 default_reasoning_effort，含 auto/low 等任何默认档），作为默认档 low 的单次豁免；422 提示文案同步列出 auto
 
 **`v2.10.2`** — **默认思考档位 low**：请求不传 `reasoning_effort` 时不再放任模型默认（多数思考模型默认开思考且深度自选），改为注入默认档 `low`（按各模型 reasoning_map 映射；未配置映射的模型不受影响）。config.json 顶层新增可选 `default_reasoning_effort`（六档任一，缺省 low；设 `auto`/`""` 恢复旧的"模型默认"行为；非法值回落 low），/admin/reload 热生效
