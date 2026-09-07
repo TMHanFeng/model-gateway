@@ -489,8 +489,10 @@ class ModelPool:
         now = time.time()
         detail = None
 
-        # 问题23：配额口径用有效估算（校准后），且缓存键必须带上估算值——不同估算不可共用缓存
-        quota_est = estimated_tokens
+        # 问题23：配额口径用有效估算（校准后），且缓存键必须带上估算值——不同估算不可共用缓存。
+        # 未校准(样本<10)时不计入估算：窗口估算含 max_tokens 全额虚高，会误杀小限额模型形成死锁
+        # （永远无法成功调用→永远无法积累校准样本）。与问题23文档"依赖#22校准"的顺序一致。
+        quota_est = 0
         if est_input_tokens > 0 and entry.sample_count >= 10 and entry.avg_completion_ema:
             quota_est = est_input_tokens + int(entry.avg_completion_ema)
 
