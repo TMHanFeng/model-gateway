@@ -178,7 +178,7 @@ class AnthropicProvider:
         anthropic_tools = self._convert_tools(req.tools)
         if anthropic_tools:
             payload["tools"] = anthropic_tools
-        if req.tool_choice is not None:
+        if req.tools and req.tool_choice is not None:
             tc = req.tool_choice
             if isinstance(tc, str):
                 if tc == "any":
@@ -214,11 +214,10 @@ class AnthropicProvider:
         return payload
 
     def _headers(self) -> dict:
-        return {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        }
+        h = {"anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+        if self.api_key:  # 问题21-B：无鉴权需求时不发送 x-api-key
+            h["x-api-key"] = self.api_key
+        return h
 
     async def chat(self, req: ChatCompletionRequest, model_name: str,
                    reasoning_fragment: dict | None = None, timeout: float | None = None) -> ChatCompletionResponse:

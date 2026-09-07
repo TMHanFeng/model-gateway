@@ -677,7 +677,7 @@ select { max-width: 100%; }
         <div class="fg"><label>最大并发数（0=不限）</label><input name="max_concurrency" type="number" value="0"></div>
       </div>
       <div class="f2">
-        <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"><label style="display:inline-flex;align-items:center;gap:5px;margin-top:6px;cursor:pointer;font-size:12px;color:var(--muted)"><input type="checkbox" name="smart_estimate" id="f-smart-estimate" style="width:11px;height:11px;flex:none;margin:0" onchange="onSmartToggle()"> 智能估算超时（按 token 量动态计算，忽略手动秒数）</label><div id="smart-live" class="hidden" style="font-size:12px;color:var(--muted);margin-top:5px;line-height:1.6"></div></div>
+        <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"><label style="display:inline-flex;align-items:center;gap:5px;margin-top:6px;cursor:pointer;font-size:12px;color:var(--muted)"><input type="checkbox" name="smart_estimate" id="f-smart-estimate" style="width:11px;height:11px;flex:none;margin:0" onchange="onSmartToggle()"> 智能估算超时（按 token 量动态计算，忽略手动秒数）</label><label style="display:inline-flex;align-items:center;gap:5px;margin-top:4px;cursor:pointer;font-size:12px;color:var(--muted)"><input type="checkbox" name="no_stream_options" id="f-nso" style="width:11px;height:11px;flex:none;margin:0"> 不发 stream_options（本地 vllm 等不认时勾选，该流将无 usage 统计）</label><div id="smart-live" class="hidden" style="font-size:12px;color:var(--muted);margin-top:5px;line-height:1.6"></div></div>
         <div class="fg" id="daily-fields"><label>每日刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
       </div>
       <div id="once-fields" class="hidden">
@@ -1319,6 +1319,7 @@ async function editModel(id) {
   f.tpm_limit.value = m.tpm_limit || 0; f.context_window.value = m.context_window || 0;
   f.timeout_seconds.value = (m.timeout_seconds == null ? 120 : m.timeout_seconds);
   const _se = document.getElementById('f-smart-estimate'); if (_se) _se.checked = !!m.smart_estimate;
+  const _nso = document.getElementById('f-nso'); if (_nso) _nso.checked = !!m.no_stream_options;
   f.max_concurrency.value = m.max_concurrency ?? 10; f.refresh_time.value = m.refresh_time || '';
   f.max_tokens.value = m.max_tokens || 0; f.ttl_seconds.value = m.ttl_seconds || 0;
   f.expire_date.value = m.expire_date || '';
@@ -1337,6 +1338,7 @@ async function submitModel(e) {
   body.is_free = body.is_free === 'true';
   body.json_output = document.getElementById('f-json-output') ? document.getElementById('f-json-output').checked : false;
   body.smart_estimate = document.getElementById('f-smart-estimate') ? document.getElementById('f-smart-estimate').checked : false;
+  body.no_stream_options = document.getElementById('f-nso') ? document.getElementById('f-nso').checked : false;
   const _epn = (body.extra_param_name || '').trim(), _epv = (body.extra_param_value || '').trim();
   delete body.extra_param_name; delete body.extra_param_value;
   if (_epn) body.extra_params = { [_epn]: _epv };

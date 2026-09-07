@@ -31,7 +31,7 @@ class OpenAIProvider:
         await self.client.aclose()
 
     def _build_payload(self, req: ChatCompletionRequest, model_name: str, stream: bool = False,
-                       reasoning_fragment: dict | None = None) -> dict:
+                       reasoning_fragment: dict | None = None, no_stream_options: bool = False) -> dict:
         messages = []
         for m in req.messages:
             d = m.model_dump(exclude_none=True)
@@ -56,13 +56,14 @@ class OpenAIProvider:
             payload["frequency_penalty"] = req.frequency_penalty
         if req.tools:
             payload["tools"] = req.tools
-        if req.tool_choice is not None:
+        if req.tools and req.tool_choice is not None:
             if req.tool_choice == "none":
                 payload.pop("tools", None)
             payload["tool_choice"] = req.tool_choice
         if stream:
             payload["stream"] = True
-            payload["stream_options"] = {"include_usage": True}
+            if not no_stream_options:
+                payload["stream_options"] = {"include_usage": True}
         # 用户自定义参数：黑名单后的键透传（防止覆盖核心字段）
         extra = getattr(req, "extra_params", None) or {}
         if extra:
@@ -76,10 +77,10 @@ class OpenAIProvider:
         return payload
 
     def _headers(self) -> dict:
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        h = {"Content-Type": "application/json"}
+        if self.api_key:  # 问题21-B：本地模型无需鉴权时不发送 Authorization，避免严格校验 400
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
 
     async def embeddings(self, req, model_name: str, extra_params: dict | None = None) -> dict:
         """OpenAI 兼容 /embeddings：完全透传上游，仅替换 model。返回上游原始 dict。"""
@@ -249,8 +250,10 @@ class OpenAIProvider:
         return "data: " + json.dumps(obj, ensure_ascii=False)
 
     async def chat_stream(self, req: ChatCompletionRequest, model_name: str,
-                          reasoning_fragment: dict | None = None) -> AsyncGenerator[str, None]:
-        payload = self._build_payload(req, model_name, stream=True, reasoning_fragment=reasoning_fragment)
+                          reasoning_fragment: dict | None = None,
+                          no_stream_options: bool = False) -> AsyncGenerator[str, None]:
+        payload = self._build_payload(req, model_name, stream=True, reasoning_fragment=reasoning_fragment,
+                                      no_stream_options=no_stream_options)
         splitter = reasoning.ThinkTagSplitter()
         done_sent = False
         async with self.client.stream(

@@ -160,6 +160,7 @@ async def add_model(request: Request, _=Depends(verify_admin)):
         "extra_params": body.get("extra_params") or {},
         "reasoning_map": body.get("reasoning_map") or {},
         "smart_estimate": bool(body.get("smart_estimate", False)),
+        "no_stream_options": bool(body.get("no_stream_options", False)),
     }
     if pid:
         entry["provider_id"] = pid
@@ -296,6 +297,8 @@ async def update_model(model_id: str, request: Request, _=Depends(verify_admin))
         if key == "is_free":
             value = bool(value)
         if key == "smart_estimate":
+            value = bool(value)
+        if key == "no_stream_options":
             value = bool(value)
         if key == "timeout_seconds":
             value = None if value in (None, "") else int(value)

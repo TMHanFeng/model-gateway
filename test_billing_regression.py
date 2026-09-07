@@ -91,6 +91,8 @@ TEST_MODELS = [
      "is_free": True, "token_type": "rolling_5h", "daily_token_limit": 1000000000},
     {"id": "zzbt/echo-smart", "name": "mock-echo-smart", "provider_id": "zzmock", "modality": "text",
      "is_free": True, "daily_token_limit": 1000000000, "smart_estimate": True},
+    {"id": "zzbt/echo-nso", "name": "mock-echo-nso", "provider_id": "zzmock", "modality": "text",
+     "is_free": True, "daily_token_limit": 1000000000, "no_stream_options": True},
 ]
 TEST_IDS = [m["id"] for m in TEST_MODELS]
 
@@ -106,7 +108,7 @@ def deep_clean():
     c["providers"] = [p for p in c.get("providers", []) if p["id"] != "zzmock"]
     c["models"] = [m for m in c.get("models", []) if not str(m.get("id", "")).startswith("zzbt/")]
     c.get("pools", {}).pop("zzall", None)
-    for pn in ("zzreq", "zzonce", "zzsmart"):
+    for pn in ("zzreq", "zzonce", "zzsmart", "zznso"):
         c.get("pools", {}).pop(pn, None)
     json.dump(c, open(os.path.join(REPO, "config.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     q = " OR ".join([f"model_name='{i}'" for i in TEST_IDS])
@@ -157,6 +159,7 @@ def main():
     c["pools"]["zzreq"] = {"model_ids": ["zzbt/echo-req"], "strategy": "sequential"}
     c["pools"]["zzonce"] = {"model_ids": ["zzbt/echo-once"], "strategy": "sequential"}
     c["pools"]["zzsmart"] = {"model_ids": ["zzbt/echo-smart"], "strategy": "sequential"}
+    c["pools"]["zznso"] = {"model_ids": ["zzbt/echo-nso"], "strategy": "sequential"}
     json.dump(c, open(os.path.join(REPO, "config.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
     # 启动隔离实例
@@ -295,6 +298,16 @@ def main():
         j = r.json()
         arr = j.get("decisions") if isinstance(j, dict) else j
         check("T9c 决策API含actual_tokens", r.status_code == 200 and arr and all("actual_tokens" in x for x in arr[:3]), r.status_code)
+
+        # ===== T10 no_stream_options 开关(问题21-B) =====
+        captured_bodies.clear()
+        r = chat("zznso", stream=True, max_tokens=500)
+        b = captured_bodies[-1]
+        check("T10a nso模型流式不含stream_options", r.status_code == 200 and "stream_options" not in b, b.get("stream_options", "(无)"))
+        captured_bodies.clear()
+        r = chat("zzall", stream=True, max_tokens=500)
+        b = captured_bodies[-1]
+        check("T10b 普通模型流式保留stream_options", r.status_code == 200 and b.get("stream_options") == {"include_usage": True}, b.get("stream_options"))
 
     finally:
         try:

@@ -42,6 +42,7 @@ class ModelEntry:
     extra_params: dict = field(default_factory=dict)  # 用户自定义参数（注入上游 payload，黑名单过滤）
     reasoning_map: dict = field(default_factory=dict)  # 统一思考档位 -> 上游请求体片段（reasoning.py 解析）
     smart_estimate: bool = False  # 问题22：智能估算超时（true=按 token 量动态计算超时，忽略手动秒数）
+    no_stream_options: bool = False  # 问题21-B：本地 vllm 等不认 stream_options 时关闭注入（该流将无 usage 统计）
     # 问题22 运行时校准状态（call_metrics 冷启动聚合 + 成功调用增量更新）
     throughput_ema: float | None = None   # 输出吞吐 tok/s
     avg_completion_ema: float | None = None  # 输出 token 均值
@@ -202,6 +203,7 @@ class ModelPool:
                 extra_params=(m.get("extra_params") or {}),
                 reasoning_map=(m.get("reasoning_map") or {}),
                 smart_estimate=bool(m.get("smart_estimate", False)),
+                no_stream_options=bool(m.get("no_stream_options", False)),
                 provider_id=pid,
                 proxy_url=proxy_url,
                 expire_date=m.get("expire_date", ""),
@@ -915,7 +917,8 @@ class ModelPool:
         t0 = time.perf_counter()
         # 计费在 execute_stream_with_fallback 验证首个分片（真正建连）成功之后进行，
         # 避免"连接即失败"的流式请求被错误计入配额。
-        raw = provider.chat_stream(req, entry.name, reasoning_fragment=fragment)
+        raw = provider.chat_stream(req, entry.name, reasoning_fragment=fragment,
+                                   no_stream_options=entry.no_stream_options)
         return self._wrap_stream(entry, raw, t0, req=req, decision_ctx=decision_ctx)
 
     async def _wrap_stream(self, entry: ModelEntry, raw, t0: float, req=None, decision_ctx: dict | None = None):
