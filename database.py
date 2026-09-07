@@ -1,4 +1,5 @@
 import aiosqlite
+from contextlib import asynccontextmanager
 import asyncio
 import time
 import json
@@ -43,6 +44,39 @@ def _logical_today(now: float, refresh_time: str = "") -> str:
 # connections). WAL + NORMAL synchronous keep writes fast and readers unblocked.
 _conn: aiosqlite.Connection | None = None
 _lock = asyncio.Lock()
+
+
+_bulk = 0  # >0 时各写函数的 commit 被抑制，由 bulk() 上下文统一提交（v2.10.8 写合并）
+
+
+async def _commit(conn):
+    if _bulk == 0:
+        await conn.commit()
+
+
+@asynccontextmanager
+async def bulk():
+    """把多个既有写函数合并为单一事务：各自内部的 commit 被抑制，退出时统一提交。
+
+    异常时整体回滚（原子性比原分步提交更强）。嵌套安全。
+    """
+    global _bulk
+    _bulk += 1
+    conn = None
+    try:
+        conn = await _get_conn()
+        yield conn
+        if _bulk == 1:
+            await conn.commit()
+    except Exception:
+        if _bulk == 1:
+            try:
+                await conn.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        _bulk -= 1
 
 
 async def _get_conn() -> aiosqlite.Connection:
@@ -237,7 +271,7 @@ async def get_daily_usage(model_name: str) -> int:
                 "UPDATE token_usage SET used_tokens = 0, last_reset_date = ? WHERE model_name = ?",
                 (logical, model_name),
             )
-            await db.commit()
+            await _commit(db)
             return 0
         return row[0]
 
@@ -264,7 +298,7 @@ async def add_daily_usage(model_name: str, tokens: int):
                    last_reset_date = ?""",
             (model_name, tokens, logical, model_name, logical, tokens, tokens, logical),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def reset_daily_usage(model_name: str):
@@ -285,7 +319,7 @@ async def reset_daily_usage(model_name: str):
             "UPDATE token_usage SET used_tokens = 0, last_reset_date = ? WHERE model_name = ?",
             (logical, model_name),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def sync_model_refresh_time(model_name: str, refresh_time: str):
@@ -296,7 +330,7 @@ async def sync_model_refresh_time(model_name: str, refresh_time: str):
             "UPDATE token_usage SET refresh_time = ? WHERE model_name = ?",
             (refresh_time, model_name),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def reset_all_daily():
@@ -305,7 +339,7 @@ async def reset_all_daily():
         await db.execute(
             "UPDATE token_usage SET used_tokens = 0, last_reset_date = date('now')"
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def log_request(model_name: str, tokens: int):
@@ -319,7 +353,7 @@ async def log_request(model_name: str, tokens: int):
         await db.execute(
             "DELETE FROM request_log WHERE timestamp < ?", (now - 60,)
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def get_rpm(model_name: str) -> int:
@@ -362,7 +396,7 @@ async def add_model_call(model_name: str, tokens: int):
                    total_tokens = total_tokens + excluded.total_tokens""",
             (model_name, _bj_today(), tokens),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def get_model_daily_stats(model_name: str, date_str: str | None = None) -> dict:
@@ -390,7 +424,7 @@ async def init_one_time(model_name: str):
                VALUES (?, 0, ?, 0)""",
             (model_name, time.time()),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def get_one_time_state(model_name: str) -> dict | None:
@@ -413,7 +447,7 @@ async def add_one_time_usage(model_name: str, tokens: int):
             "UPDATE one_time_state SET used_tokens = used_tokens + ? WHERE model_name = ?",
             (tokens, model_name),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def expire_one_time(model_name: str):
@@ -423,7 +457,7 @@ async def expire_one_time(model_name: str):
             "UPDATE one_time_state SET expired = 1 WHERE model_name = ?",
             (model_name,),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def init_5h_state(model_name: str):
@@ -434,7 +468,7 @@ async def init_5h_state(model_name: str):
                VALUES (?, 0, ?)""",
             (model_name, time.time()),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def get_5h_state(model_name: str) -> dict | None:
@@ -457,7 +491,7 @@ async def add_5h_usage(model_name: str, amount: int):
             "UPDATE rolling5h_state SET used_amount = used_amount + ? WHERE model_name = ?",
             (amount, model_name),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def reset_5h_window(model_name: str):
@@ -469,7 +503,7 @@ async def reset_5h_window(model_name: str):
                ON CONFLICT(model_name) DO UPDATE SET used_amount = 0, window_start = excluded.window_start""",
             (model_name, time.time()),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def log_decision(pool_name: str, requested: str | None, selected: str | None, estimated: int, steps: list, caller: str = "", actual_tokens: int | None = None) -> int:
@@ -484,7 +518,7 @@ async def log_decision(pool_name: str, requested: str | None, selected: str | No
         await db.execute(
             "DELETE FROM decision_log WHERE id NOT IN (SELECT id FROM decision_log ORDER BY id DESC LIMIT 500)"
         )
-        await db.commit()
+        await _commit(db)
     return decision_id
 
 
@@ -496,7 +530,7 @@ async def update_decision_actual_tokens(decision_id: int, actual_tokens: int | N
             "UPDATE decision_log SET actual_tokens = ? WHERE id = ?",
             (actual_tokens, decision_id),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def add_call_metric(model_name: str, estimated_tokens: int | None, prompt_tokens: int | None,
@@ -515,7 +549,7 @@ async def add_call_metric(model_name: str, estimated_tokens: int | None, prompt_
             "(SELECT id FROM call_metrics WHERE model_name = ? ORDER BY id DESC LIMIT 500)",
             (model_name, model_name),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def get_model_metrics(model_name: str, last_n: int = 50) -> dict:
@@ -595,7 +629,7 @@ async def create_api_key(name: str, secret: str, ktype: str, allowed_pools: list
             (name, secret, ktype, json.dumps(allowed_pools, ensure_ascii=False),
              token_type, billing_mode, limit_amount, expire_seconds, time.time()),
         )
-        await db.commit()
+        await _commit(db)
         return cursor.lastrowid
 
 
@@ -694,7 +728,7 @@ async def rotate_key_secret(key_id: int, old_secret: str, new_secret: str, grace
                WHERE id = ? AND secret = ?""",
             (new_secret, time.time(), time.time() + grace_seconds, key_id, old_secret),
         )
-        await db.commit()
+        await _commit(db)
         return cursor.rowcount == 1
 
 
@@ -706,7 +740,7 @@ async def log_key_rotation(key_id: int, old_prefix: str, new_prefix: str, note: 
             "INSERT INTO key_rotation_log (key_id, old_prefix, new_prefix, ts, note) VALUES (?, ?, ?, ?, ?)",
             (key_id, old_prefix, new_prefix, time.time(), note),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def get_key_rotations(key_id: int, limit: int = 20) -> list[dict]:
@@ -741,7 +775,7 @@ async def update_api_key(key_id: int, fields: dict):
         await db.execute(
             f"UPDATE api_keys SET {', '.join(sets)} WHERE id = ?", vals
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def delete_api_key(key_id: int):
@@ -751,7 +785,7 @@ async def delete_api_key(key_id: int):
         await db.execute("DELETE FROM api_key_usage WHERE key_id = ?", (key_id,))
         await db.execute("DELETE FROM api_key_hourly_usage WHERE key_id = ?", (key_id,))
         await db.execute("DELETE FROM key_rotation_log WHERE key_id = ?", (key_id,))
-        await db.commit()
+        await _commit(db)
 
 
 # ── API Key 用量（daily / rolling_5h / one_time 语义，与模型一致）──────
@@ -776,7 +810,7 @@ async def init_key_usage(key_id: int):
                VALUES (?, 0, ?)""",
             (key_id, ""),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def add_key_usage(key_id: int, amount: int):
@@ -786,7 +820,7 @@ async def add_key_usage(key_id: int, amount: int):
             "UPDATE api_key_usage SET used_amount = used_amount + ? WHERE key_id = ?",
             (amount, key_id),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def reset_key_usage(key_id: int):
@@ -803,7 +837,7 @@ async def reset_key_usage(key_id: int):
                    created_at = excluded.created_at, expired = 0, last_reset_date = excluded.last_reset_date""",
             (key_id, time.time(), time.time(), today),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def expire_key_usage(key_id: int):
@@ -812,7 +846,7 @@ async def expire_key_usage(key_id: int):
         await db.execute(
             "UPDATE api_key_usage SET expired = 1 WHERE key_id = ?", (key_id,)
         )
-        await db.commit()
+        await _commit(db)
 
 
 # ── 用户（预留：未来普通用户账号体系）──────────────────────────────────
@@ -824,7 +858,7 @@ async def create_user(username: str, password_hash: str, role: str = "user") -> 
             "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
             (username, password_hash, role, time.time()),
         )
-        await db.commit()
+        await _commit(db)
         return cursor.lastrowid
 
 
@@ -840,7 +874,7 @@ async def delete_user(user_id: int):
     async with _lock:
         db = await _get_conn()
         await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
-        await db.commit()
+        await _commit(db)
 
 
 # ── API Key 用量按小时记录（1h 粒度，可查询任意日期）──────────────────
@@ -854,7 +888,7 @@ async def add_hourly_usage(key_id: int, hour_key: str, amount: int):
                ON CONFLICT(key_id, hour_key) DO UPDATE SET used_amount = used_amount + excluded.used_amount""",
             (key_id, hour_key, amount),
         )
-        await db.commit()
+        await _commit(db)
 
 
 async def get_hourly_usage(key_id: int, date_str: str) -> dict[str, int]:

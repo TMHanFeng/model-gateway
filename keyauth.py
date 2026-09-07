@@ -140,24 +140,25 @@ async def charge_key_usage(key: dict, amount: int):
         await db.init_key_usage(key_id)
         state = await db.get_key_usage(key_id)
 
-    if key.get("token_type") == "daily":
-        if state.get("last_reset_date") != _today():
-            await db.reset_key_usage(key_id)
-        await db.add_key_usage(key_id, amount)
-    elif key.get("token_type") == "rolling_5h":
-        ws = state.get("window_start")
-        if ws is None or (now - ws) >= ROLLING_5H_SECONDS:
-            await db.reset_key_usage(key_id)
-        await db.add_key_usage(key_id, amount)
-    elif key.get("token_type") == "one_time":
-        if not state.get("expired"):
+    async with db.bulk():
+        if key.get("token_type") == "daily":
+            if state.get("last_reset_date") != _today():
+                await db.reset_key_usage(key_id)
             await db.add_key_usage(key_id, amount)
-            s = await db.get_key_usage(key_id)
-            if int(key.get("limit_amount", 0)) > 0 and s.get("used_amount", 0) >= int(key.get("limit_amount", 0)):
-                await db.expire_key_usage(key_id)
+        elif key.get("token_type") == "rolling_5h":
+            ws = state.get("window_start")
+            if ws is None or (now - ws) >= ROLLING_5H_SECONDS:
+                await db.reset_key_usage(key_id)
+            await db.add_key_usage(key_id, amount)
+        elif key.get("token_type") == "one_time":
+            if not state.get("expired"):
+                await db.add_key_usage(key_id, amount)
+                s = await db.get_key_usage(key_id)
+                if int(key.get("limit_amount", 0)) > 0 and s.get("used_amount", 0) >= int(key.get("limit_amount", 0)):
+                    await db.expire_key_usage(key_id)
 
-    # 1h 粒度用量记录（供历史查询）
-    await db.add_hourly_usage(key_id, _hour_key(), amount)
+        # 1h 粒度用量记录（供历史查询）
+        await db.add_hourly_usage(key_id, _hour_key(), amount)
 
 
 async def key_usage_summary(key: dict) -> dict:
