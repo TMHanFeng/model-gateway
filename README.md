@@ -493,6 +493,10 @@ SQLite（`gateway.db`）持久化以下表：
 
 ### 最新
 
+**`v2.10.9`** — **中转提速（问题21-A）+ 本地模型 400 修复（问题21-B），计费回归套件 33 断言全绿**：①`test_billing_regression.py` 计费回归套件（隔离实例+mock 上游，固化问题24 全部计费不变量与并发场景，任何改动先跑套件再上线）②流式热路径：`<think>` 切分器 done 快速路径 + 仅 usage 行解析，每 chunk JSON 处理 3 次→0~1 次 ③输入估算按请求缓存 ④流式决策日志后置（结束时一次写入含 actual_tokens，INSERT 移出 TTFB）⑤`db.bulk()` 事务上下文，非流式 5 次串行 commit 合并为 1、keyauth 两写合一 ⑥决策明细新增 route_ms/upstream_ms 耗时分解 ⑦模型级 `no_stream_options` 开关、空 api_key 不发鉴权头、无 tools 不下发 tool_choice ⑧修复 v2.10.4 引入的 one_time 未校准死锁
+
+**`v2.10.5`** — **冷却时间策略统一**：应用户要求全部缩短——chat 非流式/流式"其他异常"15s→5s（429 保持 10s、5xx/网络保持 5s、上下文超限 400 保持不冷却）；embedding/rerank"其他错误"从一刀切 15s→5s；最坏不可用窗口 15s×N→5s×N
+
 **`v2.10.4`** — **问题22/23/24 本地重做（以本地主线为基，含全部思考控制功能）**：①问题24 流式计费静默漏记修复移植——流式计费从 finally 移到"usage 到达即记"（billed 防重+finally 兜底+缺失 usage 告警记次数），decision_log 新增 actual_tokens 列（幂等迁移）并新增 `_settle_stream_tokens` 统一计费口径（request 型按次/token 型按真实用量），前端"估算/实际"同屏 ②问题22 Token 智能估算——新增 call_metrics 校准表，估算拆 est_window（窗口预检保守）/est_effective（输入+平均输出 EMA）两路，smart_estimate 模型非流式动态超时（吞吐 EMA×1.3 缓冲，样本<10 回退固定值），`GET /admin/model/{id}/metrics` + 双面板智能超时开关与内联 live 区 ③问题23 配额预检计入本次有效估算——daily/rolling_5h/one_time 三段均 `used+估算>=limit → 拒绝`（修复"151.6w/150w 仍放行单次冲线"），one_time 估算触顶不误标过期，配额缓存键带上估算值
 
 **`v2.10.3`** — **请求级 `reasoning_effort: "auto"`**：客户端可显式传 auto 表示"本次请求不注入思考参数、用模型默认行为"（优先级高于服务端 default_reasoning_effort，含 auto/low 等任何默认档），作为默认档 low 的单次豁免；422 提示文案同步列出 auto
