@@ -152,7 +152,7 @@ class ModelPool:
         # 负载均衡（round-robin）：pool_name -> 下一次起始下标
         self.round_robin: dict[str, int] = {}
         # 配额预检缓存：model_id -> (expires_at, ok, reason, detail)
-        self._quota_cache: dict[tuple, tuple[float, bool, str, dict | None]] = {}  # 键=(model_id, 配额估算tok)
+        self._quota_cache: dict[str, tuple[float, bool, str, dict | None]] = {}
         self._load()
 
     def _load(self):
@@ -373,8 +373,8 @@ class ModelPool:
     def _estimate_effective(self, entry: ModelEntry, req) -> int:
         """问题22：显示/预估用有效估算（est_effective）= 输入 + 该模型历史平均输出（EMA）。
 
-        样本不足 10 条（未校准）时退回保守窗口估算。决策日志与配额预检（问题23）均用此值，
-        消除客户端大 max_tokens（如 64k）导致的估算虚高。
+        样本不足 10 条（未校准）时退回保守窗口估算。仅用于决策日志展示（问题23 配额预检已于
+        v2.10.10 回退为 used >= limit 旧口径），消除客户端大 max_tokens（如 64k）导致的估算虚高。
         """
         est_input = self._estimate_input_tokens(req)
         if entry.sample_count >= 10 and entry.avg_completion_ema:
@@ -390,9 +390,10 @@ class ModelPool:
                         return True
         return False
 
-    async def _quota_check(self, entry: ModelEntry, now: float, estimated: int = 0) -> tuple[bool, str, dict | None]:
+    async def _quota_check(self, entry: ModelEntry, now: float) -> tuple[bool, str, dict | None]:
         """配额与限速预检（读 sqlite 的部分，由 _check_available 短缓存包装）。
-        返回 (ok, reason, detail)。estimated = 本次请求的有效估算 token（问题23：计入预检防瞬时冲越）。"""
+        返回 (ok, reason, detail)。口径：仅比较已用 used >= limit（问题23 已于 v2.10.10 回退：
+        估算计入预检会增加复杂度且未校准时有误杀风险，研判后恢复旧口径）。"""
         if entry.token_type == "one_time":
             state = await db.get_one_time_state(entry.id)
             if state is None:
@@ -424,14 +425,6 @@ class ModelPool:
                     "used": state["used_tokens"],
                     "limit": entry.max_tokens,
                 }
-            # 问题23：used + 本次估算 触顶 → 仅拒绝本次请求，不标记过期（估算非真实用量）
-            if entry.max_tokens > 0 and estimated > 0 and state["used_tokens"] + estimated >= entry.max_tokens:
-                return False, "quota_exhausted", {
-                    "reason_detail": "本次请求估算将触顶（含估算）",
-                    "used": state["used_tokens"],
-                    "estimated": estimated,
-                    "limit": entry.max_tokens,
-                }
         elif entry.token_type == "rolling_5h":
             state = await db.get_5h_state(entry.id)
             if state is not None and (now - state["window_start"]) < ROLLING_5H_SECONDS:
@@ -440,16 +433,6 @@ class ModelPool:
                     remaining = int(ROLLING_5H_SECONDS - (now - state["window_start"]))
                     return False, "quota_exhausted", {
                         "used": state["used_amount"],
-                        "limit": entry.daily_token_limit,
-                        "window_remaining_sec": remaining,
-                    }
-                # 问题23：used + 本次估算 触顶 → 拒绝，防单次请求冲越剩余额度
-                if entry.daily_token_limit > 0 and estimated > 0 and state["used_amount"] + estimated >= entry.daily_token_limit:
-                    remaining = int(ROLLING_5H_SECONDS - (now - state["window_start"]))
-                    return False, "quota_exhausted", {
-                        "reason_detail": "本次请求估算将触顶（含估算）",
-                        "used": state["used_amount"],
-                        "estimated": estimated,
                         "limit": entry.daily_token_limit,
                         "window_remaining_sec": remaining,
                     }
@@ -462,14 +445,7 @@ class ModelPool:
                     "used": used,
                     "limit": entry.daily_token_limit,
                 }
-            # 问题23：used + 本次估算 触顶 → 拒绝（修复"已用 151.6w/150w 仍放行单次冲线"）
-            if estimated > 0 and used + estimated >= entry.daily_token_limit:
-                return False, "quota_exhausted", {
-                    "reason_detail": "本次请求估算将触顶（含估算）",
-                    "used": used,
-                    "estimated": estimated,
-                    "limit": entry.daily_token_limit,
-                }
+
 
         if entry.rpm_limit > 0:
             rpm = await db.get_rpm(entry.id)
@@ -485,37 +461,28 @@ class ModelPool:
 
     def _invalidate_quota_cache(self, model_id: str):
         """该模型发生计费/调用后调用：使配额预检缓存立即失效，保证下一次预检读到最新用量"""
-        for key in [k for k in self._quota_cache if k[0] == model_id]:
-            self._quota_cache.pop(key, None)
+        self._quota_cache.pop(model_id, None)
 
     async def _check_available(self, entry: ModelEntry, estimated_tokens: int = 0, has_images: bool = False,
-                               required_modality: str | None = None, required_json_output: bool = False,
-                               est_input_tokens: int = 0) -> tuple[bool, str, dict | None]:
+                               required_modality: str | None = None, required_json_output: bool = False) -> tuple[bool, str, dict | None]:
         """返回 (ok, reason, detail)。detail 用于调用记录展示具体数值（已用/上限、冷却剩余秒等）。
         required_modality：要求特定模态（如 "embedding"/"rerank"）时，不匹配的模型一律排除；
                         None 表示普通 chat/通用调用（此时 embedding/rerank 模型也应被排除）。
         required_json_output：请求要求 json 输出时，仅 json_output=True 的模型可用。
         estimated_tokens：窗口保守估算（含 max_tokens，防超窗 + 上下文门槛）。
-        est_input_tokens：仅输入估算——问题23 配额预检用有效估算（输入+该模型历史平均输出），
-                          避免大 max_tokens 虚高误杀；样本不足时退回窗口估算。"""
+        estimated_tokens：窗口保守估算（含 max_tokens），仅用于上下文窗口门槛（问题23 已于 v2.10.10
+                        回退：配额预检恢复 used >= limit 旧口径，不再计入本次估算）。"""
         now = time.time()
         detail = None
 
-        # 问题23：配额口径用有效估算（校准后），且缓存键必须带上估算值——不同估算不可共用缓存。
-        # 未校准(样本<10)时不计入估算：窗口估算含 max_tokens 全额虚高，会误杀小限额模型形成死锁
-        # （永远无法成功调用→永远无法积累校准样本）。与问题23文档"依赖#22校准"的顺序一致。
-        quota_est = 0
-        if est_input_tokens > 0 and entry.sample_count >= 10 and entry.avg_completion_ema:
-            quota_est = est_input_tokens + int(entry.avg_completion_ema)
-
         # 配额/限速预检（问题19）：这部分需读 sqlite（每候选 1-4 次串行查询），
         # 结果短缓存 QUOTA_CACHE_TTL 秒；该模型每次调用计费后立即失效，自身计数保持新鲜
-        cached = self._quota_cache.get((entry.id, quota_est))
+        cached = self._quota_cache.get(entry.id)
         if cached and cached[0] > now:
             quota_ok, quota_reason, quota_detail = cached[1], cached[2], cached[3]
         else:
-            quota_ok, quota_reason, quota_detail = await self._quota_check(entry, now, estimated=quota_est)
-            self._quota_cache[(entry.id, quota_est)] = (now + QUOTA_CACHE_TTL, quota_ok, quota_reason, quota_detail)
+            quota_ok, quota_reason, quota_detail = await self._quota_check(entry, now)
+            self._quota_cache[entry.id] = (now + QUOTA_CACHE_TTL, quota_ok, quota_reason, quota_detail)
         if not quota_ok:
             return False, quota_reason, quota_detail
 
@@ -655,8 +622,7 @@ class ModelPool:
 
     async def _select_from_pool(self, pool_name: str, estimated_tokens: int = 0, exclude: set | None = None,
                                 has_images: bool = False, visiting: set | None = None,
-                                required_modality: str | None = None, required_json_output: bool = False,
-                                est_input_tokens: int = 0):
+                                required_modality: str | None = None, required_json_output: bool = False):
         exclude = exclude or set()
         visiting = visiting or set()
         if pool_name in visiting:
@@ -672,8 +638,7 @@ class ModelPool:
             if entry:
                 ok, reason, detail = await self._check_available(
                     entry, estimated_tokens, has_images,
-                    required_modality=required_modality, required_json_output=required_json_output,
-                    est_input_tokens=est_input_tokens,
+                    required_modality=required_modality, required_json_output=required_json_output
                 )
                 if ok:
                     steps = [{"model": override_id, "reason": "single_override_selected"}]
@@ -721,8 +686,7 @@ class ModelPool:
                     continue
                 ok, reason, detail = await self._check_available(
                     entry, estimated_tokens, has_images,
-                    required_modality=required_modality, required_json_output=required_json_output,
-                    est_input_tokens=est_input_tokens,
+                    required_modality=required_modality, required_json_output=required_json_output
                 )
                 if ok:
                     steps.append({"model": entry.id, "reason": "selected"})
@@ -744,8 +708,7 @@ class ModelPool:
 
     async def select_model(self, pool_name: str, requested_model: str | None = None, estimated_tokens: int = 0,
                            exclude: set | None = None, has_images: bool = False,
-                           required_modality: str | None = None, required_json_output: bool = False,
-                           est_input_tokens: int = 0):
+                           required_modality: str | None = None, required_json_output: bool = False):
         exclude = exclude or set()
         steps = []
 
@@ -760,8 +723,7 @@ class ModelPool:
                     continue
                 ok, reason, detail = await self._check_available(
                     entry, estimated_tokens, has_images,
-                    required_modality=required_modality, required_json_output=required_json_output,
-                    est_input_tokens=est_input_tokens,
+                    required_modality=required_modality, required_json_output=required_json_output
                 )
                 if ok:
                     steps.append({"model": entry.id, "reason": "selected"})
@@ -774,8 +736,7 @@ class ModelPool:
 
         return await self._select_from_pool(
             pool_name, estimated_tokens, exclude, has_images,
-            required_modality=required_modality, required_json_output=required_json_output,
-            est_input_tokens=est_input_tokens,
+            required_modality=required_modality, required_json_output=required_json_output
         )
 
     def _record_latency(self, entry: ModelEntry, ms: float):
@@ -1112,7 +1073,7 @@ class ModelPool:
 
         for _ in range(max_attempts):
             entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried,
-                                                   required_modality="embedding", est_input_tokens=estimated)
+                                                   required_modality="embedding")
             if steps:
                 actual_calls.extend(st for st in steps if st["reason"] != "already_tried")
             if entry is None:
@@ -1181,7 +1142,7 @@ class ModelPool:
 
         for _ in range(max_attempts):
             entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried,
-                                                   required_modality="rerank", est_input_tokens=estimated)
+                                                   required_modality="rerank")
             if steps:
                 actual_calls.extend(st for st in steps if st["reason"] != "already_tried")
             if entry is None:
@@ -1268,7 +1229,6 @@ class ModelPool:
         actual_calls: list[dict] = []
         override_id = self.single_override.get(pool_name)
         fb_name = self.pools.get(pool_name, {}).get("fallback_pool")
-        est_input = self._estimate_input_tokens(req)
         # When the locked single model fails (or the main pool is exhausted), escalate to the fallback pool.
         use_fallback = False
         last_overflow = None            # 最近一次"上下文超限 400"（用于整池失败时透传原文）
@@ -1280,12 +1240,10 @@ class ModelPool:
                 if not fb_name:
                     break
                 entry, steps = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images,
-                                                       required_json_output=required_json_output,
-                                                       est_input_tokens=est_input)
+                                                       required_json_output=required_json_output)
             else:
                 entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images,
-                                                       required_json_output=required_json_output,
-                                                       est_input_tokens=est_input)
+                                                       required_json_output=required_json_output)
             route_ms = round((time.perf_counter() - _t_sel) * 1000, 1)
 
             if steps:
@@ -1413,7 +1371,6 @@ class ModelPool:
         actual_calls: list[dict] = []
         override_id = self.single_override.get(pool_name)
         fb_name = self.pools.get(pool_name, {}).get("fallback_pool")
-        est_input = self._estimate_input_tokens(req)
         use_fallback = False
         last_overflow = None            # 最近一次"上下文超限 400"（用于整池失败时透传原文）
         last_failure_overflow = False
@@ -1423,13 +1380,10 @@ class ModelPool:
                 if not fb_name:
                     break
                 entry, steps = await self.select_model(fb_name, None, estimated, exclude=tried, has_images=has_images,
-                                                       required_json_output=required_json_output,
-                                                       est_input_tokens=est_input)
+                                                       required_json_output=required_json_output)
             else:
                 entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images,
-                                                       required_json_output=required_json_output,
-                                                       est_input_tokens=est_input)
-
+                                                       required_json_output=required_json_output)
             if steps:
                 actual_calls.extend(s for s in steps if s["reason"] != "already_tried")
 
