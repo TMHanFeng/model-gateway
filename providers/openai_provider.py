@@ -220,8 +220,11 @@ class OpenAIProvider:
     def _split_think_line(line: str, splitter) -> str:
         """把一条 OpenAI SSE data 行里 delta.content 的 <think> 内联段转成 reasoning_content。
 
-        非 JSON 行 / 无 choices / 无 content 增量时原样返回。
+        非 JSON 行 / 无 choices / 无 content 增量时原样返回；
+        思考段结束后(splitter.done)零解析直接透传——流式热路径的主要提速点。
         """
+        if splitter.done:
+            return line
         try:
             obj = json.loads(line[6:])
         except Exception:

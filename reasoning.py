@@ -106,14 +106,21 @@ class ThinkTagSplitter:
     def __init__(self):
         self._state = "head"  # head=尚未判定开头 | think=思考中 | body=正文
         self._buf = ""
+        self.done = False     # 正文态后置 True：后续增量无需再做任何解析（提速快速路径）
 
     def feed(self, piece: str) -> tuple[str, str]:
         """喂入一段 content 增量，返回 (reasoning片段, 正文片段)。"""
+        if self.done:
+            return "", piece
         rc = ""
         content = ""
         self._buf += piece
         while self._buf:
-            if self._state == "head":
+            if self._state == "body":
+                self.done = True
+                content += self._buf
+                self._buf = ""
+            elif self._state == "head":
                 if self._buf.startswith(self._OPEN):
                     self._buf = self._buf[len(self._OPEN):]
                     self._state = "think"
@@ -145,6 +152,7 @@ class ThinkTagSplitter:
                 self._buf = self._buf[len(self._buf) - keep:]
                 break  # 等更多数据找闭合标签
             else:  # body
+                self.done = True
                 content += self._buf
                 self._buf = ""
         return rc, content

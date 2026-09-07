@@ -336,7 +336,13 @@ class ModelPool:
         return cjk + (other + 3) // 4 + 1
 
     def _estimate_input_tokens(self, req) -> int:
-        """仅估算输入（提示词+图片折算），不含 max_tokens——问题22/23 的估算基线。"""
+        """仅估算输入（提示词+图片折算），不含 max_tokens——问题22/23 的估算基线。
+
+        按请求实例缓存：同一请求在 fallback/动态超时/决策日志等多处复用，避免大请求重复全文扫描。
+        """
+        cached = getattr(req, "_est_input_cache", None)
+        if cached is not None:
+            return cached
         total = 0
         for m in getattr(req, "messages", None) or []:
             content = m.content
@@ -349,6 +355,10 @@ class ModelPool:
                             total += self._estimate_text_tokens(part.get("text", ""))
                         elif part.get("type") in ("image_url", "image"):
                             total += 300
+        try:
+            object.__setattr__(req, "_est_input_cache", total)
+        except Exception:
+            pass
         return total
 
     def _estimate_tokens(self, req) -> int:
@@ -919,32 +929,34 @@ class ModelPool:
                 estimated = 0
             async for chunk in raw:
                 if isinstance(chunk, str) and chunk.startswith("data: ") and "[DONE]" not in chunk:
-                    try:
-                        obj = json.loads(chunk[6:].strip())
-                        usage = obj.get("usage")
-                        total = usage.get("total_tokens") if usage else 0
-                        if total and int(total) > 0:
-                            captured = int(total)
-                            usage_detail = {
-                                "prompt_tokens": usage.get("prompt_tokens"),
-                                "completion_tokens": usage.get("completion_tokens"),
-                            }
-                            if not billed:  # 问题24：同一请求只计费一次
-                                try:
-                                    billed = True
-                                    await self._settle_stream_tokens(entry, captured)
-                                    if decision_id:
-                                        await db.update_decision_actual_tokens(decision_id, captured)
-                                except Exception:
-                                    # 入账抛错时回退 billed，交由 finally 兜底重试，避免静默漏计
-                                    billed = False
-                                    logger.warning(
-                                        f"[流式计费失败] 已捕获 usage 但入账抛错，将由 finally 兜底 "
-                                        f"(模型={entry.id}, tokens={captured}, decision_id={decision_id})"
-                                    )
-                                    raise
-                    except Exception:
-                        pass
+                    # 仅 usage 行需要解析(每 stream 仅一次)：其余行子串预筛后直接透传，零解析
+                    if '"usage"' in chunk:
+                        try:
+                            obj = json.loads(chunk[6:].strip())
+                            usage = obj.get("usage")
+                            total = usage.get("total_tokens") if usage else 0
+                            if total and int(total) > 0:
+                                captured = int(total)
+                                usage_detail = {
+                                    "prompt_tokens": usage.get("prompt_tokens"),
+                                    "completion_tokens": usage.get("completion_tokens"),
+                                }
+                                if not billed:  # 问题24：同一请求只计费一次
+                                    try:
+                                        billed = True
+                                        await self._settle_stream_tokens(entry, captured)
+                                        if decision_id:
+                                            await db.update_decision_actual_tokens(decision_id, captured)
+                                    except Exception:
+                                        # 入账抛错时回退 billed，交由 finally 兜底重试，避免静默漏计
+                                        billed = False
+                                        logger.warning(
+                                            f"[流式计费失败] 已捕获 usage 但入账抛错，将由 finally 兜底 "
+                                            f"(模型={entry.id}, tokens={captured}, decision_id={decision_id})"
+                                        )
+                                        raise
+                        except Exception:
+                            pass
                 yield chunk
         finally:
             self._record_latency(entry, (time.perf_counter() - t0) * 1000)
@@ -1257,6 +1269,7 @@ class ModelPool:
         last_failure_overflow = False   # 最后一次上游失败是否为上下文超限
 
         for _ in range(max_attempts):
+            _t_sel = time.perf_counter()
             if use_fallback:
                 if not fb_name:
                     break
@@ -1267,6 +1280,7 @@ class ModelPool:
                 entry, steps = await self.select_model(pool_name, requested_model, estimated, exclude=tried, has_images=has_images,
                                                        required_json_output=required_json_output,
                                                        est_input_tokens=est_input)
+            route_ms = round((time.perf_counter() - _t_sel) * 1000, 1)
 
             if steps:
                 actual_calls.extend(s for s in steps if s["reason"] != "already_tried")
@@ -1282,12 +1296,15 @@ class ModelPool:
             t0 = time.perf_counter()
             try:
                 response, tokens = await self.execute(entry, req)
+                upstream_ms = round((time.perf_counter() - t0) * 1000, 1)
                 last_reason = actual_calls[-1]["reason"] if actual_calls else ""
                 if last_reason in ("selected", "single_override_selected") and actual_calls[-1]["model"] == entry.id:
                     if use_fallback:
                         actual_calls[-1]["reason"] = "fallback_selected"
                 else:
                     actual_calls.append({"model": entry.id, "reason": "fallback_selected" if use_fallback else "selected"})
+                if actual_calls and actual_calls[-1]["model"] == entry.id:
+                    actual_calls[-1]["detail"] = {"route_ms": route_ms, "upstream_ms": upstream_ms}
                 await db.log_decision(pool_name, requested_model, entry.id, self._estimate_effective(entry, req),
                                       actual_calls, caller, actual_tokens=tokens)
                 return response, tokens, actual_calls
