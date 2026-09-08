@@ -442,19 +442,18 @@ class ModelPool:
             else:
                 entry.rolling5h_window_start = None
         elif entry.token_type == "gift" and entry.daily_token_limit > 0:
-            # 余额返还制（v2.11.19，按火山奖励计划实测口径收紧）：
-            # 预检改按"今日已采 = 今日自然日消耗 ≥ 本地上限"拒绝，与本地上限解耦于余额账本；
-            # 本地上限应设为火山"每日采集额度"的 80% 左右（如 5M 采集额度 → 本地 4M）留安全边际。
-            # 连续余额账本会与火山实际发放/抵扣口径漂移（flash 实测网关 3.14M vs 火山实余 0.87M），
-            # 故账本仅保留作统计展示，不再作为预检依据；但 get_gift_balance 仍需先行调用，
-            # 以维持账本惰性初始化与逐日补账（add_gift_usage 与统计展示依赖该行存在）。
+            # 余额返还制预检（v2.11.26）：上限 = min(今日总额池[昨日剩余+今日已补], 用户设置上限)，
+            # 今日自然日消耗达到上限即拒绝。账本余额按固定 500 万/日返还规则逐日结算（get_gift_balance），
+            # 用户设置上限语义 = 今天最多用多少（建议 ≤ 火山每日采集额度 5M 的 80% 防意外）。
             await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time)
+            pool = await db.get_gift_window_start(entry.id)
+            limit = min(pool, entry.daily_token_limit)
             used = int((await db.get_model_daily_stats(entry.id)).get("total_tokens", 0) or 0)
-            if used >= entry.daily_token_limit:
+            if used >= limit:
                 return False, "quota_exhausted", {
                     "used": used,
-                    "limit": entry.daily_token_limit,
-                    "reason_detail": "今日已采达本地上限（采集额度80%安全边际）",
+                    "limit": limit,
+                    "reason_detail": "今日可用量已耗尽（池与用户上限取小）",
                 }
         elif entry.daily_token_limit > 0:
             used = await db.get_daily_usage(entry.id)
