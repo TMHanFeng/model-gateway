@@ -1000,6 +1000,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
       </div>
     </div>`;
   }).join('') || '<div class="hint">暂无模型池，点击右上角新增。</div>';
+  setInnerIfChanged(document.getElementById('pool-list'), poolHtml);
 
   bindDrag();
   bindPoolDrag();
@@ -2313,7 +2314,6 @@ function renderPoolCheckboxes(checkedArr) {
     const checked = (checkedArr || []).includes(p) ? ' checked' : '';
     return `<label class="pool-check"><input type="checkbox" value="${esc(p)}" data-pool="${esc(p)}"${checked}><span>${esc(p)}</span></label>`;
   }).join('') || '<div class="hint">暂无模型池</div>';
-  setInnerIfChanged(document.getElementById('pool-list'), poolHtml);
 }
 async function showAddKey() {
   editingKeyId = null;
