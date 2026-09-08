@@ -2400,7 +2400,7 @@
   ]
  },
  "openai|http://192.168.5.106:30000/v1|Ling-3.0-tiny": {
-  "ts": "2026-09-04 15:13:32",
+  "ts": "2026-09-07 17:55:01",
   "protocol": "openai",
   "name": "Ling-3.0-tiny",
   "calls": [
@@ -2408,9 +2408,9 @@
     "fragment": null,
     "status": 200,
     "error": "",
-    "reasoning_len": 797,
-    "content_len": 3,
-    "completion_tokens": 479
+    "reasoning_len": 315,
+    "content_len": 31,
+    "completion_tokens": 226
    },
    {
     "fragment": {
@@ -2418,9 +2418,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 1066,
-    "content_len": 3,
-    "completion_tokens": 644
+    "reasoning_len": 370,
+    "content_len": 25,
+    "completion_tokens": 262
    },
    {
     "fragment": {
@@ -2428,9 +2428,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 857,
-    "content_len": 3,
-    "completion_tokens": 515
+    "reasoning_len": 190,
+    "content_len": 20,
+    "completion_tokens": 135
    },
    {
     "fragment": {
@@ -2438,9 +2438,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 330,
-    "content_len": 3,
-    "completion_tokens": 206
+    "reasoning_len": 219,
+    "content_len": 42,
+    "completion_tokens": 166
    },
    {
     "fragment": {
@@ -2448,9 +2448,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 132,
-    "content_len": 40,
-    "completion_tokens": 103
+    "reasoning_len": 327,
+    "content_len": 30,
+    "completion_tokens": 242
    },
    {
     "fragment": {
@@ -2458,9 +2458,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 451,
-    "content_len": 32,
-    "completion_tokens": 272
+    "reasoning_len": 323,
+    "content_len": 37,
+    "completion_tokens": 224
    },
    {
     "fragment": {
@@ -2468,9 +2468,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 436,
-    "content_len": 5,
-    "completion_tokens": 271
+    "reasoning_len": 337,
+    "content_len": 33,
+    "completion_tokens": 240
    },
    {
     "fragment": {
@@ -2478,9 +2478,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 117,
-    "content_len": 20,
-    "completion_tokens": 82
+    "reasoning_len": 273,
+    "content_len": 34,
+    "completion_tokens": 193
    },
    {
     "fragment": {
@@ -2490,9 +2490,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 121,
-    "content_len": 13,
-    "completion_tokens": 78
+    "reasoning_len": 727,
+    "content_len": 59,
+    "completion_tokens": 500
    },
    {
     "fragment": {
@@ -2500,9 +2500,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 119,
-    "content_len": 48,
-    "completion_tokens": 105
+    "reasoning_len": 179,
+    "content_len": 23,
+    "completion_tokens": 131
    },
    {
     "fragment": {
@@ -2512,12 +2512,12 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 77,
-    "content_len": 37,
-    "completion_tokens": 65
+    "reasoning_len": 274,
+    "content_len": 22,
+    "completion_tokens": 197
    }
   ],
-  "baseline_reasoning": 797,
+  "baseline_reasoning": 315,
   "default_thinking": "开",
   "family": "reasoning_effort",
   "off_fragment": {
@@ -2527,11 +2527,11 @@
    "reasoning_effort": "high"
   },
   "level_lens": {
-   "minimal": 330,
-   "low": 132,
-   "medium": 451,
-   "high": 436,
-   "max": 117
+   "minimal": 219,
+   "low": 327,
+   "medium": 323,
+   "high": 337,
+   "max": 273
   },
   "levels_effective": true,
   "suggested": {
