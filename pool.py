@@ -1655,15 +1655,15 @@ class ModelPool:
                     hh, mm = 0, 0
                 grant_dt = now_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
                 after_grant = now_dt >= grant_dt
-                denom = wstart if after_grant else max(0, balance + today_usage)  # 当前可用总量（分母）
+                last_grant_amount = await db.get_gift_last_grant_amount(entry.id)
                 pending = min((today_usage if after_grant else yday_usage), entry.daily_token_limit)
                 s["gift_refund"] = True
-                s["gift_balance"] = max(0, balance)       # 当前可用余额
-                s["gift_available"] = denom               # 进度条分母：当前可用总量（随窗口/消耗变化）
-                s["gift_usage_today"] = today_usage       # 大数字：今日自然日真实消耗
-                s["gift_pending_grant"] = pending         # 右下角：预计补账额度
-                s["gift_after_grant"] = min(entry.daily_token_limit, max(0, balance) + pending)
-                s["gift_last_grant_amount"] = await db.get_gift_last_grant_amount(entry.id)  # 最近一次已到账额度
+                s["gift_balance"] = max(0, balance)       # 当前可用余额（= 分母/总额）
+                s["gift_available"] = max(0, balance)     # 进度条分母：14:00 补账后跳增（剩余+补账）
+                s["gift_usage_today"] = today_usage       # 大数字：今日自然日真实消耗（不被上限钳制）
+                s["gift_pending_grant"] = pending         # 右下角：预计补账额度（下次到账）
+                s["gift_last_grant_amount"] = last_grant_amount  # 今日 14:00 已到账额度
+                s["gift_yesterday_leftover"] = max(0, balance + today_usage - (last_grant_amount if after_grant else 0))  # 上一天剩余（昨日 24:00）
                 s["gift_yesterday_usage"] = yday_usage
                 s["daily_used_tokens"] = today_usage
                 s["daily_token_limit"] = entry.daily_token_limit
