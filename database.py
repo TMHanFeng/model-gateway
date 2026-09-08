@@ -174,14 +174,19 @@ async def init_db():
             )
         """)
         # 余额返还制（token_type=gift 显式选择）：连续余额账本，无"清零重置"；
-        # refresh_time 时刻补入 min(上一自然日用量, cap)，预检 balance <= 0 即额度耗尽
+        # refresh_time 时刻补入 min(上一自然日用量, cap)，预检 balance <= 0 即额度耗尽。
+        # window_start_balance = 本窗口起始可用量（每次补账后刷新），统计进度条分母随窗口变化
         await db.execute("""
             CREATE TABLE IF NOT EXISTS gift_state (
                 model_name TEXT PRIMARY KEY,
                 balance INTEGER DEFAULT 0,
-                last_grant_date TEXT DEFAULT ''
+                last_grant_date TEXT DEFAULT '',
+                window_start_balance INTEGER DEFAULT 0
             )
         """)
+        cols = [r[1] for r in await (await db.execute("PRAGMA table_info(gift_state)")).fetchall()]
+        if cols and "window_start_balance" not in cols:
+            await db.execute("ALTER TABLE gift_state ADD COLUMN window_start_balance INTEGER DEFAULT 0")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS api_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -359,20 +364,27 @@ async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "") ->
     """读取赠还余额；首见惰性初始化为 cap，并按 model_daily_stats 历史逐日补齐错过的赠还。
 
     补账口径：逻辑日 D（_logical_today，锚定 refresh_time）补入 min(自然日 D-1 用量, cap)，
-    与"14:00 补昨日消耗"的活动语义一致；网关停机跨天后首次访问自愈，不丢账。"""
+    与"14:00 补昨日消耗"的活动语义一致；网关停机跨天后首次访问自愈，不丢账。
+    每次补账后 window_start_balance = 补后余额（本窗口可用量，统计进度条分母）。"""
     async with _lock:
         db = await _get_conn()
         cursor = await db.execute(
-            "SELECT balance, last_grant_date FROM gift_state WHERE model_name = ?", (model_name,))
+            "SELECT balance, last_grant_date, window_start_balance FROM gift_state WHERE model_name = ?",
+            (model_name,))
         row = await cursor.fetchone()
         if not row:
             balance = max(0, int(cap or 0))
             await db.execute(
-                "INSERT INTO gift_state (model_name, balance, last_grant_date) VALUES (?, ?, '')",
-                (model_name, balance))
+                "INSERT INTO gift_state (model_name, balance, last_grant_date, window_start_balance) VALUES (?, ?, '', ?)",
+                (model_name, balance, balance))
             await _commit(db)
             return balance
-        balance, last = int(row[0] or 0), row[1] or ""
+        balance, last, wstart = int(row[0] or 0), row[1] or "", int(row[2] or 0)
+        if wstart <= 0:  # 存量行采纳：以 max(cap, 当前余额) 为本窗口基线（已用从现在起真实累计）
+            wstart = max(int(cap or 0), balance, 1)
+            await db.execute("UPDATE gift_state SET window_start_balance = ? WHERE model_name = ?",
+                             (wstart, model_name))
+            await _commit(db)
         logical = _logical_today(time.time(), refresh_time)
         if last == logical:
             return balance
@@ -401,10 +413,21 @@ async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "") ->
             r = await cursor.fetchone()
             balance = min(cap, balance + min(int(r[0] or 0) if r else 0, cap))
             steps += 1
-        await db.execute("UPDATE gift_state SET balance = ?, last_grant_date = ? WHERE model_name = ?",
-                         (balance, logical, model_name))
+        # 补账后开启新窗口：窗口起始可用量 = 补后余额（本窗口可用总量，进度条分母）
+        await db.execute("UPDATE gift_state SET balance = ?, last_grant_date = ?, window_start_balance = ? WHERE model_name = ?",
+                         (balance, logical, balance, model_name))
         await _commit(db)
         return balance
+
+
+async def get_gift_window_start(model_name: str) -> int:
+    """本窗口起始可用量（统计进度条分母）。"""
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT window_start_balance FROM gift_state WHERE model_name = ?", (model_name,))
+        row = await cursor.fetchone()
+        return int(row[0] or 0) if row else 0
 
 
 async def add_gift_usage(model_name: str, tokens: int):
@@ -421,10 +444,10 @@ async def set_gift_balance(model_name: str, balance: int):
     async with _lock:
         db = await _get_conn()
         await db.execute(
-            """INSERT INTO gift_state (model_name, balance, last_grant_date)
-               VALUES (?, ?, '')
-               ON CONFLICT(model_name) DO UPDATE SET balance = excluded.balance""",
-            (model_name, balance))
+            """INSERT INTO gift_state (model_name, balance, last_grant_date, window_start_balance)
+               VALUES (?, ?, '', ?)
+               ON CONFLICT(model_name) DO UPDATE SET balance = excluded.balance, window_start_balance = excluded.balance""",
+            (model_name, balance, balance))
         await _commit(db)
 
 

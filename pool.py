@@ -1633,22 +1633,41 @@ class ModelPool:
                 s["refresh_time"] = ""
                 s["window_remaining_sec"] = remaining
             elif entry.token_type == "gift" and entry.daily_token_limit > 0:
-                # 余额返还制：大数字口径为"已用"（上限−余额），余额/预计补账供小字与 ⓘ 悬停展示
+                # 余额返还制统计口径（用户确认）：
+                # 使用量 = 今日自然日消耗（真实值，不随补账窗口变化、不被上限钳制）；
+                # 分母（当前可用量）分两段——补账时刻前 = 上一日剩余（0 点余额 = 余额+今日已耗），
+                # 补账时刻后 = 剩余 + 补账（即补账后余额，window_start_balance）；
+                # 预计补账 = min(最近一个自然日消耗, 上限)——14:00 前指今日将到账的（按昨日），
+                # 14:00 后指明日将到账的（按今日已耗）。
                 balance = await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time)
+                wstart = await db.get_gift_window_start(entry.id)
+                from datetime import datetime, timedelta
+                from zoneinfo import ZoneInfo as _ZI
+                now_dt = datetime.now(_ZI("Asia/Shanghai"))
+                today_stat = await db.get_model_daily_stats(entry.id)
+                today_usage = int(today_stat.get("total_tokens", 0) or 0)
+                yday = (now_dt.date() - timedelta(days=1)).isoformat()
+                ystat = await db.get_model_daily_stats(entry.id, yday)
+                yday_usage = int(ystat.get("total_tokens", 0) or 0)
+                try:
+                    hh, mm = (int(x) for x in (entry.refresh_time or "00:00").split(":"))
+                except ValueError:
+                    hh, mm = 0, 0
+                grant_dt = now_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                after_grant = now_dt >= grant_dt
+                denom = wstart if after_grant else max(0, balance + today_usage)  # 当前可用总量（分母）
+                pending = min((today_usage if after_grant else yday_usage), entry.daily_token_limit)
                 s["gift_refund"] = True
-                s["gift_balance"] = max(0, balance)
-                s["daily_used_tokens"] = min(entry.daily_token_limit, max(0, entry.daily_token_limit - balance))
+                s["gift_balance"] = max(0, balance)       # 当前可用余额
+                s["gift_available"] = denom               # 进度条分母：当前可用总量（随窗口/消耗变化）
+                s["gift_usage_today"] = today_usage       # 大数字：今日自然日真实消耗
+                s["gift_pending_grant"] = pending         # 右下角：预计补账额度
+                s["gift_after_grant"] = min(entry.daily_token_limit, max(0, balance) + pending)
+                s["gift_yesterday_usage"] = yday_usage
+                s["daily_used_tokens"] = today_usage
                 s["daily_token_limit"] = entry.daily_token_limit
                 s["daily_remaining"] = max(0, balance)
                 s["refresh_time"] = entry.refresh_time
-                # 预计补账 = min(昨日北京自然日消耗, 上限)；14:00（refresh_time）到账，补后余额 = min(上限, 余额+补账)
-                from datetime import datetime, timedelta
-                from zoneinfo import ZoneInfo as _ZI
-                yday = (datetime.now(_ZI("Asia/Shanghai")).date() - timedelta(days=1)).isoformat()
-                ystat = await db.get_model_daily_stats(entry.id, yday)
-                pending = min(int(ystat.get("total_tokens", 0) or 0), entry.daily_token_limit)
-                s["gift_pending_grant"] = pending
-                s["gift_after_grant"] = min(entry.daily_token_limit, max(0, balance) + pending)
             else:
                 used = await db.get_daily_usage(entry.id)
                 s["daily_used_tokens"] = used

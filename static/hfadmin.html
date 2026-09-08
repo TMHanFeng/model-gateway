@@ -2065,7 +2065,11 @@ async function loadStats() {
     let limitText = limit ? limit.toLocaleString() : '∞';
     if (statDim === 'requests') { used = m.today_requests ?? 0; unit = '次'; numsTitle = '当日调用次数'; limitText = '—'; }
     else if (statDim === 'tokens') { used = m.today_tokens ?? 0; unit = 'tokens'; numsTitle = '当日 Token 用量（自然日）'; limitText = '—'; }
-    else if (isBilling && isGift) numsTitle = '已用（上限 − 当前余额；到账时刻按昨日消耗补回）';
+    else if (isBilling && isGift) {
+      limit = m.gift_available || limit;          // 分母=当前可用量（14:00 前=上一日剩余；补账后=剩余+补账）
+      used = m.gift_usage_today ?? wUsed;         // 使用量=今日自然日消耗（真实，不随窗口变化）
+      numsTitle = '使用量=今日自然日消耗；分母=当前可用量（补账后增大）';
+    }
     if (isBilling && windowModel && !isGift) numsTitle = `当前窗口用量（自 ${m.refresh_time} 起）`;
     const pct = isBilling && limit > 0 ? Math.min(100, used / limit * 100) : 0;
     const cls = !isBilling ? '' : (m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : ''));
@@ -2079,11 +2083,11 @@ async function loadStats() {
     const freeBadge = m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>';
     let refresh = m.token_type === 'one_time' ? '不刷新'
       : m.token_type === 'rolling_5h' ? '5h窗口 · 剩 ' + fmtDur(m.window_remaining_sec)
-      : isGift ? ((m.refresh_time ? '补账 ' + m.refresh_time : '按日补账') + ' · 余额 ' + (m.gift_balance ?? Math.max(0, limit - wUsed)).toLocaleString()
-        + ' <span class="i-tip" title="余额上限：' + limit.toLocaleString() + '（用户设置）&#10;当前余额：' + (m.gift_balance ?? 0).toLocaleString()
-        + '&#10;预计补账：' + (m.gift_pending_grant ?? 0).toLocaleString() + '（按昨日自然日消耗，' + (m.refresh_time || '到账时刻') + ' 到账）'
-        + '&#10;补账后余额：' + (m.gift_after_grant ?? 0).toLocaleString() + '（不超过上限）'
-        + '&#10;今日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' tok">ⓘ</span>')
+      : isGift ? ('预计补 ' + (m.gift_pending_grant ?? 0).toLocaleString()
+        + ' <span class="i-tip" title="使用量：今日自然日消耗（不随补账变化）&#10;当前可用量：' + (m.gift_available ?? m.gift_balance ?? 0).toLocaleString() + '（补账后 = 剩余 + 补账，不超过上限）'
+        + '&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
+        + '&#10;预计补账：' + (m.gift_pending_grant ?? 0).toLocaleString() + '（' + (m.refresh_time || '到账时刻') + ' 到账）'
+        + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok">ⓘ</span>')
       : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
     if (windowModel && !isGift && isBilling && (m.today_tokens || 0) > 0) {
       refresh += ` · 自然日 ${(m.today_tokens || 0).toLocaleString()} tok`;
