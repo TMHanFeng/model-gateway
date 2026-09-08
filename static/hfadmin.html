@@ -1081,12 +1081,12 @@ async function loadModels() {
 
   const models = mdata.models;
   const providers = provdata.providers; // 顺序即 reorder 持久化后的顺序，渲染必须以此为准
-  const animProv = onceFlag('models-prov'), animRow = onceFlag('models-row');
+  const animRow = onceFlag('models-row');
   let html = '';
   providers.forEach((p, i) => {
     const pmodels = models.filter(m => m.provider_id === p.id);
     html += `
-    <div class="card provider-card${animProv ? ' card-anim' : ''}" draggable="true" data-provider-drag="${esc(p.id)}" style="${animProv ? `animation-delay:${Math.min(i * 50, 400)}ms;` : ''}cursor:grab" title="拖拽排序供应商">
+    <div class="card provider-card" draggable="true" data-provider-drag="${esc(p.id)}" style="cursor:grab" title="拖拽排序供应商">
       <div class="card-head provider-head">
         <div>
           <div class="card-title"><span class="drag-handle">⠿</span> ${esc(p.name)} ${provBadge(p.protocol)}</div>
@@ -1104,7 +1104,7 @@ async function loadModels() {
   const standalone = models.filter(m => !m.provider_id);
   if (standalone.length) {
     html += `
-    <div class="card provider-card${animProv ? ' card-anim' : ''}">
+    <div class="card provider-card">
       <div class="card-head provider-head">
         <div><div class="card-title">独立模型（内联连接）</div><div class="card-sub">未挂载到任何供应商</div></div>
       </div>
@@ -1663,7 +1663,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
   const name = hint.dataset.thHint;
   if (input && name) updateThHint(name, input.value);
 });
-  const animItem = onceFlag('pool-item'), animCard = onceFlag('pool-card');
+  const animItem = onceFlag('pool-item');
   const poolHtml = entries.map(([name, pool], pi) => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
@@ -1689,7 +1689,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
     const isDraggable = !isAuto;
     const dedicatedTag = isDedicated ? `<span class="badge b-5h">👤 专属池 · Key#${esc(pool.owner_key_id)}</span>` : '';
     return `
-    <div class="card${animCard ? ' card-anim' : ''}" data-pool-card="${esc(name)}" ${isDraggable ? 'draggable="true"' : ''} style="${animCard ? `animation-delay:${pi * 50}ms;` : ''}">
+    <div class="card" data-pool-card="${esc(name)}" ${isDraggable ? 'draggable="true"' : ''}>
       <div class="card-head">
         <div>
           <div class="card-title">
@@ -2512,9 +2512,8 @@ async function loadKeys() {
   const data = await api('/admin/keys');
   const el = document.getElementById('key-list');
   if (!data) return;
-  const animKey = onceFlag('keys');
   const keyHtml = data.keys.map((k, i) => `
-    <div class="card${animKey ? ' card-anim' : ''}" style="${animKey ? `animation-delay:${i * 45}ms;` : ''}">
+    <div class="card">
       <div class="card-head">
         <div>
           <div class="card-title">${esc(k.name)} <span class="mono" style="color:var(--muted);font-size:12px">#${k.id}</span></div>
