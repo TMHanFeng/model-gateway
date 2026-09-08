@@ -583,6 +583,15 @@ select { max-width: 100%; }
     pointer-events: none;
   }
   .model-row:hover::after { opacity: 1; }
+  /* 模型池内的模型长条卡：同款鼠标跟随蓝光 */
+  .pool-item { position: relative; overflow: hidden; }
+  .pool-item::after {
+    content: ''; position: absolute; inset: 0; border-radius: inherit;
+    background: radial-gradient(300px circle at var(--mx, 50%) var(--my, 50%), rgba(0, 113, 227, 0.11), transparent 65%);
+    opacity: 0; transition: opacity 240ms var(--ease-out);
+    pointer-events: none;
+  }
+  .pool-item:hover::after { opacity: 1; }
   /* 用量统计 / 调用记录卡片同款聚光灯 */
   .stat-card, .log-card { position: relative; overflow: hidden; }
   .stat-card::after {
@@ -2854,7 +2863,7 @@ loadModels();
     queued = true;
     requestAnimationFrame(function () {
       queued = false;
-      var t = last.target && last.target.closest && (last.target.closest('.model-row') || last.target.closest('.stat-card') || last.target.closest('.log-card') || last.target.closest('.card'));
+      var t = last.target && last.target.closest && (last.target.closest('.pool-item') || last.target.closest('.model-row') || last.target.closest('.stat-card') || last.target.closest('.log-card') || last.target.closest('.card'));
       if (!t) return;
       var r = t.getBoundingClientRect();
       t.style.setProperty('--mx', (last.clientX - r.left) + 'px');
