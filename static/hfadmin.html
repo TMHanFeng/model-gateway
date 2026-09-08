@@ -941,16 +941,17 @@ function switchTab(name, el) {
       pane.classList.remove('active');
     }
   });
-  clearInterval(statsTimer);
+  clearInterval(statsTimer); clearInterval(logsTimer);
   if (name === 'models') loadModels();
   if (name === 'pools') loadPools();
   if (name === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 5000); }
-  if (name === 'logs') { populateLogFilter(); loadDecisions(); }
+  if (name === 'logs') { populateLogFilter(); loadDecisions(); logsTimer = setInterval(loadDecisions, 5000); }
   if (name === 'keys') loadKeys();
 }
 document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab, t)));
 document.head.insertAdjacentHTML('beforeend', '<style>@keyframes paneIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}</style>');
 let statsTimer = null;
+let logsTimer = null;
 // 触屏设备（手机/平板）不支持 HTML5 拖拽：启用「点一下上移一格」的替代排序交互
 const isTouchDevice = window.matchMedia && window.matchMedia('(hover: none), (pointer: coarse)').matches;
 
@@ -2269,24 +2270,16 @@ async function populateLogFilter() {
   sel.innerHTML = '<option value="">全部池</option>' + Object.keys(data.pools).map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
   sel.value = cur;
 }
-async function loadDecisions() {
-  const poolFilter = document.getElementById('log-pool-filter').value;
-  const url = '/admin/decisions?limit=100' + (poolFilter ? '&pool=' + encodeURIComponent(poolFilter) : '');
-  const data = await api(url);
-  const el = document.getElementById('log-list');
-  if (!data) return;
-  if (!data.decisions.length) { el.innerHTML = '<div class="hint">暂无调用记录。发起一次对话后这里会显示选模过程与切换依据。</div>'; return; }
-  el.innerHTML = data.decisions.map((d, i) => {
-    const t = new Date(d.ts * 1000).toLocaleString('zh-CN', { hour12: false });
-    const ok = !!d.selected;
-    const steps = (d.steps || []).map(s => `
+function decisionInner(d) {
+  const t = new Date(d.ts * 1000).toLocaleString('zh-CN', { hour12: false });
+  const ok = !!d.selected;
+  const steps = (d.steps || []).map(s => `
       <div class="log-step">
         <span class="s-model">${esc(s.model)}</span>
         <span class="s-arrow">→</span>
         ${reasonChip(s.reason, s.detail)}
       </div>`).join('');
-    return `
-    <div class="log-card" style="animation:cardIn 280ms var(--ease-out) ${i * 35}ms backwards">
+  return `
       <div class="log-head">
         <span class="log-time">${t}</span>
         ${d.caller ? `<span class="log-pool" style="color:var(--teal)">👤 ${esc(d.caller)}</span>` : ''}
@@ -2296,9 +2289,48 @@ async function loadDecisions() {
           ${d.actual_tokens != null && d.actual_tokens !== '' ? `<span class="rsn rsn-ok">实际 ${d.actual_tokens} tok</span>` : ''}
         <span class="log-selected ${ok ? 'ok' : 'fail'}">${ok ? '✓ ' + esc(d.selected) : '✕ 无可用接口'}</span>
       </div>
-      <div class="log-steps">${steps || '<span class="hint">无候选</span>'}</div>
-    </div>`;
-  }).join('');
+      <div class="log-steps">${steps || '<span class="hint">无候选</span>'}</div>`;
+}
+
+
+
+async function loadDecisions() {
+  const poolFilter = document.getElementById('log-pool-filter').value;
+  const url = '/admin/decisions?limit=100' + (poolFilter ? '&pool=' + encodeURIComponent(poolFilter) : '');
+  const data = await api(url);
+  const el = document.getElementById('log-list');
+  if (!data) return;
+  if (!data.decisions.length) { el.innerHTML = '<div class="hint">暂无调用记录。发起一次对话后这里会显示选模过程与切换依据。</div>'; return; }
+  // 增量刷新：按决策 id 复用既有卡片（不闪屏）；新记录顶部插入并播一次入场动画；
+  // actual_tokens 回填等变化时就地更新；掉出列表的旧卡片移除
+  const prev = {};
+  [...el.querySelectorAll('.log-card')].forEach(n => { if (n.dataset.decisionId) prev[n.dataset.decisionId] = n; });
+  const fresh = [];
+  const seen = new Set();
+  data.decisions.forEach(d => {
+    const key = String(d.id);
+    seen.add(key);
+    const inner = decisionInner(d);
+    const node = prev[key];
+    if (!node) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = `<div class="log-card" data-decision-id="${key}" style="animation:cardIn 280ms var(--ease-out) backwards">${inner}</div>`;
+      fresh.push(tmp.firstElementChild);
+      return;
+    }
+    if (node.dataset.sig !== String(d.actual_tokens ?? '')) {
+      node.dataset.sig = String(d.actual_tokens ?? '');
+      node.innerHTML = inner;
+    }
+    delete prev[key];
+  });
+  Object.values(prev).forEach(n => n.remove());
+  if (fresh.length) {
+    const frag = document.createDocumentFragment();
+    fresh.forEach(c => frag.appendChild(c));
+    const first = el.querySelector('.log-card');
+    if (first) el.insertBefore(frag, first); else el.appendChild(frag);
+  }
 }
 
 /* ═══════════ API 密钥 ═══════════ */
