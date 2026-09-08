@@ -686,7 +686,7 @@
   ]
  },
  "openai|https://ark.cn-beijing.volces.com/api/v3|ep-20260828135320-d2zhg": {
-  "ts": "2026-09-04 15:09:55",
+  "ts": "2026-09-08 10:05:30",
   "protocol": "openai",
   "name": "ep-20260828135320-d2zhg",
   "calls": [
@@ -694,9 +694,9 @@
     "fragment": null,
     "status": 200,
     "error": "",
-    "reasoning_len": 721,
-    "content_len": 29,
-    "completion_tokens": 498
+    "reasoning_len": 490,
+    "content_len": 34,
+    "completion_tokens": 346
    },
    {
     "fragment": {
@@ -705,8 +705,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 1021,
-    "completion_tokens": 641
+    "content_len": 121,
+    "completion_tokens": 82
    },
    {
     "fragment": {
@@ -714,9 +714,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 1001,
-    "content_len": 74,
-    "completion_tokens": 687
+    "reasoning_len": 261,
+    "content_len": 53,
+    "completion_tokens": 201
    },
    {
     "fragment": {
@@ -725,8 +725,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 826,
-    "completion_tokens": 496
+    "content_len": 48,
+    "completion_tokens": 35
    },
    {
     "fragment": {
@@ -734,9 +734,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 772,
-    "content_len": 41,
-    "completion_tokens": 471
+    "reasoning_len": 570,
+    "content_len": 38,
+    "completion_tokens": 397
    },
    {
     "fragment": {
@@ -744,9 +744,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 390,
-    "content_len": 45,
-    "completion_tokens": 278
+    "reasoning_len": 574,
+    "content_len": 50,
+    "completion_tokens": 397
    },
    {
     "fragment": {
@@ -754,9 +754,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 820,
-    "content_len": 43,
-    "completion_tokens": 566
+    "reasoning_len": 676,
+    "content_len": 51,
+    "completion_tokens": 487
    },
    {
     "fragment": {
@@ -764,9 +764,9 @@
     },
     "status": 200,
     "error": "",
-    "reasoning_len": 429,
-    "content_len": 49,
-    "completion_tokens": 296
+    "reasoning_len": 887,
+    "content_len": 41,
+    "completion_tokens": 599
    },
    {
     "fragment": {
@@ -777,11 +777,11 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 970,
-    "completion_tokens": 591
+    "content_len": 1257,
+    "completion_tokens": 790
    }
   ],
-  "baseline_reasoning": 721,
+  "baseline_reasoning": 490,
   "default_thinking": "开",
   "family": "reasoning_effort",
   "off_fragment": {
@@ -794,10 +794,10 @@
   },
   "level_lens": {
    "minimal": 0,
-   "low": 772,
-   "medium": 390,
-   "high": 820,
-   "max": 429
+   "low": 570,
+   "medium": 574,
+   "high": 676,
+   "max": 887
   },
   "levels_effective": true,
   "suggested": {
