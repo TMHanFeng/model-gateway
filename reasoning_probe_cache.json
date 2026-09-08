@@ -423,7 +423,7 @@
   ]
  },
  "openai|https://ark.cn-beijing.volces.com/api/v3|ep-20260902235535-jxpmv": {
-  "ts": "2026-09-04 15:10:24",
+  "ts": "2026-09-08 09:33:28",
   "protocol": "openai",
   "name": "ep-20260902235535-jxpmv",
   "calls": [
@@ -432,8 +432,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 228,
-    "completion_tokens": 173
+    "content_len": 39,
+    "completion_tokens": 31
    },
    {
     "fragment": {
@@ -442,15 +442,15 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 480,
-    "completion_tokens": 393
+    "content_len": 229,
+    "completion_tokens": 182
    },
    {
     "fragment": {
      "reasoning_effort": "high"
     },
     "status": 400,
-    "error": "{\"error\":{\"code\":\"InvalidParameter\",\"message\":\"Invalid combination of reasoning_effort and thinking type: high + disabled Request id: 0217885058329376f6053399c9",
+    "error": "{\"error\":{\"code\":\"InvalidParameter\",\"message\":\"Invalid combination of reasoning_effort and thinking type: high + disabled Request id: 0217888312124883df9cb2113c",
     "reasoning_len": 0,
     "content_len": 0,
     "completion_tokens": 0
@@ -464,8 +464,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 45,
-    "completion_tokens": 35
+    "content_len": 47,
+    "completion_tokens": 32
    },
    {
     "fragment": {
@@ -476,8 +476,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 52,
-    "completion_tokens": 35
+    "content_len": 82,
+    "completion_tokens": 59
    },
    {
     "fragment": {
@@ -488,8 +488,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 40,
-    "completion_tokens": 27
+    "content_len": 39,
+    "completion_tokens": 31
    },
    {
     "fragment": {
@@ -500,8 +500,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 102,
-    "completion_tokens": 78
+    "content_len": 115,
+    "completion_tokens": 86
    },
    {
     "fragment": {
@@ -512,8 +512,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 108,
-    "completion_tokens": 82
+    "content_len": 38,
+    "completion_tokens": 30
    },
    {
     "fragment": {
@@ -524,8 +524,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 36,
-    "completion_tokens": 24
+    "content_len": 51,
+    "completion_tokens": 35
    },
    {
     "fragment": {
@@ -536,8 +536,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 67,
-    "completion_tokens": 51
+    "content_len": 75,
+    "completion_tokens": 54
    },
    {
     "fragment": {
@@ -548,8 +548,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 39,
-    "completion_tokens": 31
+    "content_len": 52,
+    "completion_tokens": 34
    },
    {
     "fragment": {
@@ -568,6 +568,14 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
+    "content_len": 32,
+    "completion_tokens": 23
+   },
+   {
+    "fragment": null,
+    "status": 200,
+    "error": "",
+    "reasoning_len": 0,
     "content_len": 39,
     "completion_tokens": 31
    },
@@ -576,8 +584,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 38,
-    "completion_tokens": 26
+    "content_len": 43,
+    "completion_tokens": 29
    },
    {
     "fragment": null,
@@ -592,15 +600,7 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 39,
-    "completion_tokens": 31
-   },
-   {
-    "fragment": null,
-    "status": 200,
-    "error": "",
-    "reasoning_len": 0,
-    "content_len": 39,
+    "content_len": 38,
     "completion_tokens": 31
    },
    {
@@ -611,7 +611,7 @@
     "error": "",
     "reasoning_len": 0,
     "content_len": 54,
-    "completion_tokens": 37
+    "completion_tokens": 36
    },
    {
     "fragment": {
@@ -620,24 +620,16 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 33,
-    "completion_tokens": 24
+    "content_len": 38,
+    "completion_tokens": 30
    },
    {
     "fragment": null,
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 94,
-    "completion_tokens": 71
-   },
-   {
-    "fragment": null,
-    "status": 200,
-    "error": "",
-    "reasoning_len": 0,
-    "content_len": 45,
-    "completion_tokens": 28
+    "content_len": 46,
+    "completion_tokens": 35
    },
    {
     "fragment": null,
@@ -652,8 +644,8 @@
     "status": 200,
     "error": "",
     "reasoning_len": 0,
-    "content_len": 319,
-    "completion_tokens": 251
+    "content_len": 65,
+    "completion_tokens": 48
    },
    {
     "fragment": null,
@@ -662,6 +654,14 @@
     "reasoning_len": 0,
     "content_len": 38,
     "completion_tokens": 26
+   },
+   {
+    "fragment": null,
+    "status": 200,
+    "error": "",
+    "reasoning_len": 0,
+    "content_len": 39,
+    "completion_tokens": 31
    }
   ],
   "baseline_reasoning": 0,
