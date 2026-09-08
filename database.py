@@ -181,12 +181,15 @@ async def init_db():
                 model_name TEXT PRIMARY KEY,
                 balance INTEGER DEFAULT 0,
                 last_grant_date TEXT DEFAULT '',
-                window_start_balance INTEGER DEFAULT 0
+                window_start_balance INTEGER DEFAULT 0,
+                last_grant_amount INTEGER DEFAULT 0
             )
         """)
         cols = [r[1] for r in await (await db.execute("PRAGMA table_info(gift_state)")).fetchall()]
         if cols and "window_start_balance" not in cols:
             await db.execute("ALTER TABLE gift_state ADD COLUMN window_start_balance INTEGER DEFAULT 0")
+        if cols and "last_grant_amount" not in cols:
+            await db.execute("ALTER TABLE gift_state ADD COLUMN last_grant_amount INTEGER DEFAULT 0")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS api_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -369,13 +372,13 @@ async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "") ->
     async with _lock:
         db = await _get_conn()
         cursor = await db.execute(
-            "SELECT balance, last_grant_date, window_start_balance FROM gift_state WHERE model_name = ?",
+            "SELECT balance, last_grant_date, window_start_balance, last_grant_amount FROM gift_state WHERE model_name = ?",
             (model_name,))
         row = await cursor.fetchone()
         if not row:
             balance = max(0, int(cap or 0))
             await db.execute(
-                "INSERT INTO gift_state (model_name, balance, last_grant_date, window_start_balance) VALUES (?, ?, '', ?)",
+                "INSERT INTO gift_state (model_name, balance, last_grant_date, window_start_balance, last_grant_amount) VALUES (?, ?, '', ?, 0)",
                 (model_name, balance, balance))
             await _commit(db)
             return balance
@@ -404,6 +407,7 @@ async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "") ->
             await _commit(db)
             return balance
         steps = 0
+        pre = balance
         while day < target and steps < 400:  # 逐日补账；上限防脏数据拖垮预检
             day += timedelta(days=1)
             basis = (day - timedelta(days=1)).isoformat()
@@ -414,10 +418,21 @@ async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "") ->
             balance = min(cap, balance + min(int(r[0] or 0) if r else 0, cap))
             steps += 1
         # 补账后开启新窗口：窗口起始可用量 = 补后余额（本窗口可用总量，进度条分母）
-        await db.execute("UPDATE gift_state SET balance = ?, last_grant_date = ?, window_start_balance = ? WHERE model_name = ?",
-                         (balance, logical, balance, model_name))
+        last_grant_amount = max(0, balance - pre)  # 最近一次到账额度（供"已补 X"展示）
+        await db.execute("UPDATE gift_state SET balance = ?, last_grant_date = ?, window_start_balance = ?, last_grant_amount = ? WHERE model_name = ?",
+                         (balance, logical, balance, last_grant_amount, model_name))
         await _commit(db)
         return balance
+
+
+async def get_gift_last_grant_amount(model_name: str) -> int:
+    """最近一次到账的补账额度（供卡片"已补 X"展示）。"""
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT last_grant_amount FROM gift_state WHERE model_name = ?", (model_name,))
+        row = await cursor.fetchone()
+        return int(row[0] or 0) if row else 0
 
 
 async def get_gift_window_start(model_name: str) -> int:

@@ -1663,6 +1663,7 @@ class ModelPool:
                 s["gift_usage_today"] = today_usage       # 大数字：今日自然日真实消耗
                 s["gift_pending_grant"] = pending         # 右下角：预计补账额度
                 s["gift_after_grant"] = min(entry.daily_token_limit, max(0, balance) + pending)
+                s["gift_last_grant_amount"] = await db.get_gift_last_grant_amount(entry.id)  # 最近一次已到账额度
                 s["gift_yesterday_usage"] = yday_usage
                 s["daily_used_tokens"] = today_usage
                 s["daily_token_limit"] = entry.daily_token_limit
