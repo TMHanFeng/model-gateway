@@ -173,7 +173,7 @@ async def init_db():
                 window_start REAL NOT NULL
             )
         """)
-        # 余额返还制（火山/Ark 供应商自动识别）：连续余额账本，无"清零重置"；
+        # 余额返还制（token_type=gift 显式选择）：连续余额账本，无"清零重置"；
         # refresh_time 时刻补入 min(上一自然日用量, cap)，预检 balance <= 0 即额度耗尽
         await db.execute("""
             CREATE TABLE IF NOT EXISTS gift_state (
@@ -351,7 +351,7 @@ async def reset_all_daily():
         await _commit(db)
 
 
-# ── 余额返还制（火山/Ark 供应商自动识别）：余额账本 ─────────────────────
+# ── 余额返还制（token_type=gift 显式选择）：余额账本 ─────────────────────
 # 与 daily 清零制的区别：余额跨窗口连续，refresh_time 时刻补账而非重置授权。
 # 余额允许短暂为负（在途并发扣减），展示时钳 0；预检 balance <= 0 即额度耗尽。
 

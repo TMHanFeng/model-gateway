@@ -38,7 +38,7 @@ class ModelEntry:
     billing_mode: str = "token"
     is_free: bool = True
     modality: str = "text"
-    gift_refund: bool = False  # 余额返还制（火山/Ark 供应商自动识别）：配额走连续余额账本而非每日清零
+    gift_refund: bool = False  # 余额返还制（token_type=gift）：配额走连续余额账本而非每日清零
     json_output: bool = False  # 支持格式输出（json）——请求带 response_format json 时只选 true 的模型
     extra_params: dict = field(default_factory=dict)  # 用户自定义参数（注入上游 payload，黑名单过滤）
     reasoning_map: dict = field(default_factory=dict)  # 统一思考档位 -> 上游请求体片段（reasoning.py 解析）
