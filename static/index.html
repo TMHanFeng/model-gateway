@@ -1494,15 +1494,16 @@ async function loadStats() {
       numsTitle = '当日 Token 用量';
       limitText = '—';
     } else if (isBilling && m._gift) {
-      limit = m.gift_available || limit;          // 分母=当前可用量（14:00 前=上一日剩余；补账后=剩余+补账）
+      limit = (m.gift_available ?? 0);            // 分母=当前可用量（14:00 前=上一日剩余；补账后=剩余+补账；0=已耗尽，不回落用户上限）
       used = m.gift_usage_today ?? m._used;       // 使用量=今日自然日消耗（真实，不随窗口变化）
       limitText = limit.toLocaleString();       // 分母显示同步为当前可用量
-      numsTitle = '使用量=今日自然日消耗；分母=当前可用量（补账后增大）';
+      numsTitle = '使用量=今日自然日消耗；分母=当前可用量（0=已耗尽，补账后增大）';
     }
     if (isBilling && m._windowModel && !m._gift) numsTitle = `当前窗口用量（自 ${m.refresh_time} 起）`;
-    const pct = isBilling && limit > 0 ? Math.min(100, used / limit * 100) : 0;
+    let pct = isBilling && limit > 0 ? Math.min(100, used / limit * 100) : 0;
+    if (isBilling && m._gift && limit <= 0) pct = 100;   // 可用量耗尽：进度条满格
     const cls = !isBilling ? '' : (m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : ''));
-    const pctText = !isBilling ? '—' : (m.expired ? '已失效' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量'));
+    const pctText = !isBilling ? '—' : (m.expired ? '已失效' : (m._gift && limit <= 0 ? '已用尽' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量')));
     const billing = m.billing_mode === 'request' ? '按次计费' : '按 Token 计费';
     const typeBadge = m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>'
       : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>'
