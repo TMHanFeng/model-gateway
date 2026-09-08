@@ -551,6 +551,47 @@ select { max-width: 100%; }
   .model-row:hover { transform: translateY(-1px); box-shadow: 0 3px 12px rgba(0, 0, 0, 0.07); }
   .pool-item:hover { transform: translateY(-1px); }
 }
+
+/* ═══════════ 科技感点睛（纯装饰层，不遮挡任何交互与数据）═══════════ */
+#bg-dots { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* 卡片聚光灯：光标位置的低透明度光晕 + 渐变描边（Vercel/Linear 风格，鼠标跟随） */
+@media (hover: hover) and (pointer: fine) {
+  .card { position: relative; overflow: hidden; }
+  .card::after {
+    content: ''; position: absolute; inset: 0; border-radius: inherit;
+    background: radial-gradient(460px circle at var(--mx, 50%) var(--my, 50%), rgba(0, 113, 227, 0.075), transparent 62%);
+    opacity: 0; transition: opacity 280ms var(--ease-out);
+    pointer-events: none;
+  }
+  .card::before {
+    content: ''; position: absolute; inset: 0; border-radius: inherit; padding: 1px;
+    background: radial-gradient(340px circle at var(--mx, 50%) var(--my, 50%), rgba(0, 113, 227, 0.5), rgba(94, 92, 230, 0.2) 45%, transparent 72%);
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    opacity: 0; transition: opacity 280ms var(--ease-out);
+    pointer-events: none;
+  }
+  .card:hover::after, .card:hover::before { opacity: 1; }
+  .model-row { position: relative; overflow: hidden; }
+  .model-row::after {
+    content: ''; position: absolute; inset: 0; border-radius: inherit;
+    background: radial-gradient(300px circle at var(--mx, 50%) var(--my, 50%), rgba(0, 113, 227, 0.11), transparent 65%);
+    opacity: 0; transition: opacity 240ms var(--ease-out);
+    pointer-events: none;
+  }
+  .model-row:hover::after { opacity: 1; }
+}
+/* 品牌小细节：logo 渐变字 + 登录状态点呼吸 */
+.logo-mark { background: linear-gradient(135deg, #0071e3 10%, #5e5ce6 55%, #af52de 95%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.key-dot { animation: keyPulse 2.6s var(--ease-in-out) infinite; }
+@keyframes keyPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.35); } 50% { box-shadow: 0 0 0 5px rgba(52, 199, 89, 0); } }
+/* 细滚动条（浅色） */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.14); border-radius: 8px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background-color: rgba(0, 0, 0, 0.24); }
+::-webkit-scrollbar-track { background: transparent; }
 </style>
 </head>
 <body>
@@ -2680,6 +2721,82 @@ loadModels();
     btn.appendChild(r);
     setTimeout(function () { r.remove(); }, 560);
   }, true);
+})();
+
+/* ═══════════ 交互式点阵背景：光标附近的点微微亮起、放大并被轻推（磁性科技感）═══════════ */
+(function () {
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  var host = document.getElementById('bg-bubbles');
+  if (!host) return;
+  var canvas = document.createElement('canvas');
+  canvas.id = 'bg-dots';
+  host.insertBefore(canvas, host.firstChild);
+  var ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  var W = 0, H = 0, dots = [];
+  var SPACING = 26, RADIUS = 130, R2 = RADIUS * RADIUS;
+  var mx = -9999, my = -9999, tx = -9999, ty = -9999;
+  var blue = [];
+  for (var b = 0; b <= 20; b++) blue.push('rgba(0,113,227,' + (0.14 + 0.55 * b / 20).toFixed(3) + ')');
+  function resize() {
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    dots = [];
+    for (var y = SPACING; y < H; y += SPACING)
+      for (var x = SPACING; x < W; x += SPACING) dots.push({ x: x, y: y });
+  }
+  resize();
+  window.addEventListener('resize', resize);
+  var fine = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  if (fine) {
+    document.addEventListener('pointermove', function (e) { tx = e.clientX; ty = e.clientY; }, { passive: true });
+    document.documentElement.addEventListener('mouseleave', function () { tx = -9999; ty = -9999; });
+  }
+  var running = true;
+  document.addEventListener('visibilitychange', function () {
+    var was = running; running = !document.hidden;
+    if (running && !was) requestAnimationFrame(tick);
+  });
+  function tick() {
+    if (!running) return;
+    mx += (tx - mx) * 0.16; my += (ty - my) * 0.16;   // 缓动跟随：光标带一点"磁性"惯性
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(29, 41, 61, 0.12)';
+    for (var i = 0; i < dots.length; i++) ctx.fillRect(dots[i].x - 0.55, dots[i].y - 0.55, 1.1, 1.1);
+    for (var j = 0; j < dots.length; j++) {
+      var d = dots[j], dx = d.x - mx, dy = d.y - my, d2 = dx * dx + dy * dy;
+      if (d2 < R2) {
+        var t = 1 - Math.sqrt(d2) / RADIUS, e2 = t * t;
+        ctx.fillStyle = blue[Math.round(e2 * 20)];
+        ctx.beginPath();
+        ctx.arc(d.x + dx * 0.07 * e2, d.y + dy * 0.07 * e2, 0.55 + 0.65 * e2 + 0.6, 0, 6.2832);
+        ctx.fill();
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+
+/* ═══════════ 卡片聚光灯坐标：--mx/--my 跟随光标（rAF 节流，事件委托，不改任何业务逻辑）═══════════ */
+(function () {
+  if (!window.matchMedia || !window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  var last = null, queued = false;
+  document.addEventListener('pointermove', function (e) {
+    last = e;
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(function () {
+      queued = false;
+      var t = last.target && last.target.closest && (last.target.closest('.model-row') || last.target.closest('.card'));
+      if (!t) return;
+      var r = t.getBoundingClientRect();
+      t.style.setProperty('--mx', (last.clientX - r.left) + 'px');
+      t.style.setProperty('--my', (last.clientY - r.top) + 'px');
+    });
+  }, { passive: true });
 })();
 </script>
 </body>
