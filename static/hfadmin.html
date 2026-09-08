@@ -69,8 +69,8 @@ a:hover { text-decoration: underline; }
   animation-delay: var(--delay, 0s);
 }
 @keyframes bubbleDrift {
-  from { transform: translate3d(0, 0, 0) scale(1); }
-  to   { transform: translate3d(64px, 44px, 0) scale(1.14); }
+  from { transform: translate3d(-48px, -36px, 0) scale(1); }
+  to   { transform: translate3d(112px, 74px, 0) scale(1.16); }
 }
 #bg-bubbles .rise {
   position: absolute; bottom: -12vh; left: var(--x);
@@ -582,6 +582,32 @@ select { max-width: 100%; }
     pointer-events: none;
   }
   .model-row:hover::after { opacity: 1; }
+  /* 用量统计 / 调用记录卡片同款聚光灯 */
+  .stat-card, .log-card { position: relative; overflow: hidden; }
+  .stat-card::after {
+    content: ''; position: absolute; inset: 0; border-radius: inherit;
+    background: radial-gradient(380px circle at var(--mx, 50%) var(--my, 50%), rgba(0, 113, 227, 0.09), transparent 65%);
+    opacity: 0; transition: opacity 240ms var(--ease-out);
+    pointer-events: none;
+  }
+  .stat-card::before {
+    content: ''; position: absolute; inset: 0; border-radius: inherit; padding: 1px;
+    background: radial-gradient(280px circle at var(--mx, 50%) var(--my, 50%), rgba(0, 113, 227, 0.45), rgba(94, 92, 230, 0.15) 48%, transparent 75%);
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    opacity: 0; transition: opacity 240ms var(--ease-out);
+    pointer-events: none;
+  }
+  .stat-card:hover::after, .stat-card:hover::before { opacity: 1; }
+  .log-card::after {
+    content: ''; position: absolute; inset: 0; border-radius: inherit;
+    background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 50%), rgba(0, 113, 227, 0.06), transparent 65%);
+    opacity: 0; transition: opacity 240ms var(--ease-out);
+    pointer-events: none;
+  }
+  .log-card:hover::after { opacity: 1; }
 }
 /* 品牌小细节：logo 渐变字 + 登录状态点呼吸 */
 .logo-mark { background: linear-gradient(135deg, #0071e3 10%, #5e5ce6 55%, #af52de 95%); -webkit-background-clip: text; background-clip: text; color: transparent; }
@@ -1024,6 +1050,10 @@ function latTag(id) {
   return `<span class="mono ${cls}" style="font-size:11px">${s.latency_ms}ms · ${s.tps}t/s</span>`;
 }
 
+/* 首屏后不再重放入场动画：保存/编辑触发的整表重建保持视觉静止（消除"保存后闪屏"） */
+const _entranceDone = {};
+function onceFlag(key) { const v = !_entranceDone[key]; _entranceDone[key] = true; return v; }
+
 async function loadModels() {
   const [mdata, provdata] = await Promise.all([api('/admin/models'), api('/admin/providers')]);
   if (!mdata || !provdata) return;
@@ -1035,11 +1065,12 @@ async function loadModels() {
 
   const models = mdata.models;
   const providers = provdata.providers; // 顺序即 reorder 持久化后的顺序，渲染必须以此为准
+  const animProv = onceFlag('models-prov'), animRow = onceFlag('models-row');
   let html = '';
   providers.forEach((p, i) => {
     const pmodels = models.filter(m => m.provider_id === p.id);
     html += `
-    <div class="card provider-card" draggable="true" data-provider-drag="${esc(p.id)}" style="animation-delay:${Math.min(i * 50, 400)}ms;cursor:grab" title="拖拽排序供应商">
+    <div class="card provider-card" draggable="true" data-provider-drag="${esc(p.id)}" style="${animProv ? `animation-delay:${Math.min(i * 50, 400)}ms;` : 'animation:none;'}cursor:grab" title="拖拽排序供应商">
       <div class="card-head provider-head">
         <div>
           <div class="card-title"><span class="drag-handle">⠿</span> ${esc(p.name)} ${provBadge(p.protocol)}</div>
@@ -1051,17 +1082,17 @@ async function loadModels() {
           <button class="btn btn-amber btn-sm" onclick="showAddUnder('${esc(p.id).replace(/'/g, "\\'")}')">＋ 添加模型</button>
         </div>
       </div>
-      ${pmodels.map((m, i2) => modelRowHTML(m, i2)).join('') || '<div class="hint">该供应商下暂无模型。</div>'}
+      ${pmodels.map((m, i2) => modelRowHTML(m, i2, animRow)).join('') || '<div class="hint">该供应商下暂无模型。</div>'}
     </div>`;
   });
   const standalone = models.filter(m => !m.provider_id);
   if (standalone.length) {
     html += `
-    <div class="card provider-card">
+    <div class="card provider-card"${animProv ? '' : ' style="animation:none"'}>
       <div class="card-head provider-head">
         <div><div class="card-title">独立模型（内联连接）</div><div class="card-sub">未挂载到任何供应商</div></div>
       </div>
-      ${standalone.map((m, i) => modelRowHTML(m, i)).join('')}
+      ${standalone.map((m, i) => modelRowHTML(m, i, animRow)).join('')}
     </div>`;
   }
   if (!providers.length && !standalone.length) {
@@ -1125,9 +1156,9 @@ function bindModelDrag() {
   }
 }
 
-function modelRowHTML(m, i) {
+function modelRowHTML(m, i, animate = true) {
   return `
-  <div class="model-row" draggable="true" data-model-id="${esc(m.id)}" style="animation:cardIn 300ms var(--ease-out) ${Math.min(i * 40, 400)}ms backwards">
+  <div class="model-row" draggable="true" data-model-id="${esc(m.id)}"${animate ? ` style="animation:cardIn 300ms var(--ease-out) ${Math.min(i * 40, 400)}ms backwards"` : ''}>
     <div class="m-info">
       <span class="model-id">${esc(m.id)}</span>
       <span class="model-name">${esc(m.name)}</span>
@@ -1616,6 +1647,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
   const name = hint.dataset.thHint;
   if (input && name) updateThHint(name, input.value);
 });
+  const animItem = onceFlag('pool-item');
   document.getElementById('pool-list').innerHTML = entries.map(([name, pool], pi) => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
@@ -1641,7 +1673,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
     const isDraggable = !isAuto;
     const dedicatedTag = isDedicated ? `<span class="badge b-5h">👤 专属池 · Key#${esc(pool.owner_key_id)}</span>` : '';
     return `
-    <div class="card" data-pool-card="${esc(name)}" ${isDraggable ? 'draggable="true"' : ''} style="animation-delay:${pi * 50}ms">
+    <div class="card" data-pool-card="${esc(name)}" ${isDraggable ? 'draggable="true"' : ''} style="${onceFlag('pool-card') ? `animation-delay:${pi * 50}ms;` : 'animation:none;'}">
       <div class="card-head">
         <div>
           <div class="card-title">
@@ -1684,7 +1716,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
       ${pool.auto_order ? '<div class="auto-note">⚡ 自动择优已开启：先排除不可用接口（用量用尽 / RPM·TPM 触顶），再在可用接口中按调用延迟从低到高优先调用。下方显示顺序保持不变，关闭后按设定顺序调用。</div>' : ''}
       ${pool.load_balance ? '<div class="lb-note">🔄 负载均衡已开启：每次请求按池内模型顺序轮流分配（第一个→第二个→…循环往复），请求均匀分摊到每个模型/子池，避免某一个模型负载过高。关闭后按设定顺序调用。</div>' : ''}
       <div class="pool-items" data-pool="${esc(name)}">
-        ${ids.map((id, i) => poolItemHTML(name, id, i)).join('') || '<div class="hint">该池为空，从下方添加接口或子池。</div>'}
+        ${ids.map((id, i) => poolItemHTML(name, id, i, animItem)).join('') || '<div class="hint">该池为空，从下方添加接口或子池。</div>'}
       </div>
       <div class="add-model-row">
         <select id="addsel-${esc(name)}">
@@ -1704,10 +1736,10 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
   refreshSingleModeUI();
 }
 
-function poolItemHTML(name, id, i) {
+function poolItemHTML(name, id, i, animate = true) {
   const isPoolRef = id.startsWith('pool:');
   return `
-  <div class="pool-item" draggable="true" data-id="${esc(id)}" style="animation:cardIn 280ms var(--ease-out) ${i * 35}ms backwards">
+  <div class="pool-item" draggable="true" data-id="${esc(id)}"${animate ? ` style="animation:cardIn 280ms var(--ease-out) ${i * 35}ms backwards"` : ''}>
     <span class="drag" title="拖拽排序">⠿</span>
     <span class="pi-id">${esc(id)}</span>
     <span class="pi-tags">
@@ -2459,7 +2491,7 @@ async function loadKeys() {
   const el = document.getElementById('key-list');
   if (!data) return;
   el.innerHTML = data.keys.map((k, i) => `
-    <div class="card" style="animation-delay:${i * 45}ms">
+    <div class="card" style="${onceFlag('keys') ? `animation-delay:${i * 45}ms;` : 'animation:none;'}">
       <div class="card-head">
         <div>
           <div class="card-title">${esc(k.name)} <span class="mono" style="color:var(--muted);font-size:12px">#${k.id}</span></div>
@@ -2790,7 +2822,7 @@ loadModels();
     queued = true;
     requestAnimationFrame(function () {
       queued = false;
-      var t = last.target && last.target.closest && (last.target.closest('.model-row') || last.target.closest('.card'));
+      var t = last.target && last.target.closest && (last.target.closest('.model-row') || last.target.closest('.stat-card') || last.target.closest('.log-card') || last.target.closest('.card'));
       if (!t) return;
       var r = t.getBoundingClientRect();
       t.style.setProperty('--mx', (last.clientX - r.left) + 'px');
