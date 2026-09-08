@@ -94,7 +94,7 @@ TEST_MODELS = [
     {"id": "zzbt/echo-nso", "name": "mock-echo-nso", "provider_id": "zzmock", "modality": "text",
      "is_free": True, "daily_token_limit": 1000000000, "no_stream_options": True},
     {"id": "zzbt/echo-gift", "name": "mock-echo-gift", "provider_id": "zzark", "modality": "text",
-     "is_free": True, "token_type": "daily", "daily_token_limit": 266},
+     "is_free": True, "token_type": "gift", "daily_token_limit": 266},
 ]
 TEST_IDS = [m["id"] for m in TEST_MODELS]
 
@@ -160,8 +160,8 @@ def main():
     c = json.load(open(os.path.join(REPO, "config.json"), encoding="utf-8"))
     c["providers"].append({"id": "zzmock", "name": "zzmock", "protocol": "openai",
                            "base_url": f"http://127.0.0.1:{MOCK_PORT}/v1", "api_key": "x"})
-    # 供应商名含"火山"+"ark"（不区分大小写）→ 其 daily 模型自动识别为余额返还制
-    c["providers"].append({"id": "zzark", "name": "zz-火山引擎-ark模拟", "protocol": "openai",
+    # 余额返还制 v2.11.3+:显式 token_type="gift" 选择,不再做供应商名文字识别
+    c["providers"].append({"id": "zzark", "name": "zz-普通供应商", "protocol": "openai",
                            "base_url": f"http://127.0.0.1:{MOCK_PORT}/v1", "api_key": "x"})
     c["models"].extend(TEST_MODELS)
     c["pools"]["zzall"] = {"model_ids": TEST_IDS, "strategy": "sequential"}
@@ -322,7 +322,7 @@ def main():
         # ===== T11 余额返还制（火山/Ark 供应商自动识别）=====
         r = httpx.get(f"{BASE}/admin/models", headers=ADMIN, timeout=15)
         mj = {x["id"]: x for x in r.json()["models"]}
-        check("T11a ark供应商自动识别gift_refund",
+        check("T11a 显式token_type=gift生效/普通daily不受影响",
               mj.get("zzbt/echo-gift", {}).get("gift_refund") is True
               and mj.get("zzbt/echo-token", {}).get("gift_refund") is False,
               {k: mj.get(k, {}).get("gift_refund") for k in ("zzbt/echo-gift", "zzbt/echo-token")})

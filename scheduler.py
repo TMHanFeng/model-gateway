@@ -4,7 +4,7 @@ from pathlib import Path
 from shutil import copyfile
 import logging
 import database as db
-from pool import load_config, is_gift_refund
+from pool import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +83,11 @@ def backup_config():
 
 def _add_jobs():
     config = load_config()
-    providers = config.get("providers", [])
     for m in config.get("models", []):
-        if m.get("token_type", "daily") != "daily":
+        if m.get("token_type", "daily") not in ("daily", "gift"):
             continue
         model_id = m["id"]
-        if is_gift_refund(m, providers) and int(m.get("daily_token_limit", 0) or 0) > 0:
+        if m.get("token_type") == "gift" and int(m.get("daily_token_limit", 0) or 0) > 0:
             # 余额返还制：refresh_time = 到账补账时刻（非清零重置）
             refresh_time = m.get("refresh_time", "")
             if not refresh_time:

@@ -338,6 +338,7 @@ body {
 .toast-item.err { border-left-color: var(--red); }
 @keyframes slidein { from { opacity: 0; transform: translateX(30px); } }
 
+.i-tip { cursor: help; opacity: .65; font-style: normal; border-bottom: 1px dotted currentColor; }
 .hint { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; }
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .hidden { display: none; }
@@ -1637,6 +1638,10 @@ function onBillingChange() {
   const form = document.getElementById('mform');
   const mode = form.billing_mode.value;
   const ttype = form.token_type.value;
+  if (ttype === 'gift') {
+    document.getElementById('limit-label').textContent = mode === 'request' ? '余额上限（次，0=不限）' : '余额上限（平台每日赠送封顶，0=不限）';
+    return;
+  }
   if (ttype === 'rolling_5h') {
     document.getElementById('limit-label').textContent = mode === 'request' ? '5h 窗口请求次数限额（0=不限）' : '5h 窗口 Token 限额（0=不限）';
   } else {
@@ -1647,9 +1652,9 @@ function onBillingChange() {
 function onTokenTypeChange() {
   const ttype = document.getElementById('mform').token_type.value;
   document.getElementById('once-fields').style.display = ttype === 'one_time' ? '' : 'none';
-  // 条件显隐（问题16）：刷新时间仅 daily 需要；每日/5h 限额字段对 one_time 无意义
+  // 条件显隐（问题16）：刷新时间/限额字段 daily 与 gift（余额返还制）都需要；one_time 隐藏
   const _df = document.getElementById('daily-fields');
-  if (_df) _df.style.display = ttype === 'daily' ? '' : 'none';
+  if (_df) _df.style.display = (ttype === 'daily' || ttype === 'gift') ? '' : 'none';
   const _lf = document.getElementById('limit-fields');
   if (_lf) _lf.style.display = ttype === 'one_time' ? 'none' : '';
   updateGiftHint();

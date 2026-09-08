@@ -334,6 +334,7 @@ select { max-width: 100%; }
 
 .f2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .f3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.i-tip { cursor: help; opacity: .65; font-style: normal; border-bottom: 1px dotted currentColor; }
 .hint { font-size: 12.5px; color: var(--muted); }
 .hidden { display: none !important; }
 
@@ -673,19 +674,19 @@ select { max-width: 100%; }
       <div class="fg"><label>模型 ID（唯一标识，编辑时不可修改）</label><input name="id" id="f-model-id" required placeholder="openai/gpt-4o"></div>
       <div class="f2">
         <div class="fg"><label>模型名称</label><input name="name" id="f-model-name" required placeholder="gpt-4o"></div>
-        <div class="fg"><label>所属供应商（选此项则继承连接信息）</label><select name="provider_id" id="f-provider-id" onchange="onProviderSelect()"><option value="">— 独立模型（内联填写）—</option></select> <span class="badge b-5h hidden" id="gift-badge" title="该供应商命中火山/Ark 余额返还制：到账时刻按昨日消耗补回额度（上限=余额上限），无清零重置">余额返还制</span></div>
+        <div class="fg"><label>所属供应商（选此项则继承连接信息）</label><select name="provider_id" id="f-provider-id" onchange="onProviderSelect()"><option value="">— 独立模型（内联填写）—</option></select> <span class="badge b-5h hidden" id="gift-badge" title="余额返还制：到账时刻按昨日消耗补回额度（余额上限封顶），无清零重置">余额返还制</span></div>
       </div>
       <div id="inline-conn">
         <div class="f2">
           <div class="fg"><label>提供商协议</label><select name="provider"><option value="openai">openai（兼容格式）</option><option value="anthropic">anthropic</option></select></div>
-          <div class="fg"><label>Base URL</label><input name="base_url" id="f-base-url" required placeholder="https://api.openai.com/v1" oninput="updateGiftHint()"></div>
+          <div class="fg"><label>Base URL</label><input name="base_url" id="f-base-url" required placeholder="https://api.openai.com/v1"></div>
         </div>
         <div class="fg"><label>API Key</label><input name="api_key" id="f-api-key" required placeholder="sk-..."></div>
       </div>
       <div id="inherit-note" class="hint hidden" style="margin-bottom:13px">✨ 将继承所选供应商的协议 / Base URL / API Key。</div>
       <div class="form-sec">计费与额度</div>
       <div class="f3">
-        <div class="fg"><label>令牌类型</label><select name="token_type" id="f-token-type" onchange="onTokenTypeChange()"><option value="daily">daily（每日刷新）</option><option value="rolling_5h">rolling_5h（5h 限额）</option><option value="one_time">one_time（一次性）</option></select></div>
+        <div class="fg"><label>令牌类型</label><select name="token_type" id="f-token-type" onchange="onTokenTypeChange()"><option value="daily">daily（每日刷新）</option><option value="rolling_5h">rolling_5h（5h 限额）</option><option value="one_time">one_time（一次性）</option><option value="gift">gift（余额返还制）</option></select></div>
         <div class="fg"><label>计费模式</label><select name="billing_mode" onchange="onBillingChange()"><option value="token">按 Token 计费</option><option value="request">按请求次数计费</option></select></div>
         <div class="fg"><label>收费标注</label><select name="is_free"><option value="true">免费模型（绿）</option><option value="false">付费模型（红）</option></select></div>
       </div>
@@ -702,7 +703,7 @@ select { max-width: 100%; }
       </div>
       <div class="f2">
         <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"></div>
-        <div class="fg" id="daily-fields"><label>每日刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
+        <div class="fg" id="daily-fields"><label id="refresh-label">每日刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
       </div>
       <div id="once-fields" class="hidden">
         <div class="f3">
@@ -963,6 +964,7 @@ function provBadge(p) { return p === 'anthropic' ? '<span class="badge b-anthrop
 function typeBadge(m) {
   if (m.token_type === 'one_time') return '<span class="badge b-once">一次性</span>';
   if (m.token_type === 'rolling_5h') return '<span class="badge b-5h">5h限额</span>';
+  if (m.token_type === 'gift') return '<span class="badge b-5h" title="余额返还制：到账时刻按昨日消耗补回额度（上限封顶）">余额返还制</span>';
   return '<span class="badge b-ghost">每日</span>';
 }
 function freeBadge(m) { return m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>'; }
@@ -1083,7 +1085,6 @@ function modelRowHTML(m, i) {
       <span class="model-id">${esc(m.id)}</span>
       <span class="model-name">${esc(m.name)}</span>
       ${provBadge(m.provider || 'openai')}
-      ${m.gift_refund ? '<span class="badge b-5h" title="余额返还制：到账时刻按昨日消耗补回额度（上限=每日Token上限），无清零重置">余额返还制</span>' : ''}
       ${freeBadge(m)}
       ${modBadge(m)}
       ${m.json_output && m.modality !== 'embedding' && m.modality !== 'rerank' ? '<span class="badge b-json" title="支持 response_format JSON 格式输出">JSON</span>' : ''}
@@ -1248,6 +1249,10 @@ function onBillingChange() {
   const form = document.getElementById('mform');
   const mode = form.billing_mode.value;
   const ttype = form.token_type.value;
+  if (ttype === 'gift') {
+    document.getElementById('limit-label').textContent = mode === 'request' ? '余额上限（次，0=不限）' : '余额上限（平台每日赠送封顶，0=不限）';
+    return;
+  }
   document.getElementById('limit-label').textContent = ttype === 'rolling_5h'
     ? (mode === 'request' ? '5h 窗口请求次数限额（0=不限）' : '5h 窗口 Token 限额（0=不限）')
     : (mode === 'request' ? '每日请求次数上限（0=不限）' : '每日 Token 上限（0=不限）');
@@ -1255,13 +1260,23 @@ function onBillingChange() {
 function onTokenTypeChange() {
   const ttype = document.getElementById('mform').token_type.value;
   document.getElementById('once-fields').classList.toggle('hidden', ttype !== 'one_time');
-  // 条件显隐（问题16）：刷新时间仅 daily 需要；每日/5h 限额字段对 one_time 无意义
+  // 条件显隐（问题16）：刷新时间/限额字段 daily 与 gift（余额返还制）都需要；one_time 隐藏
   const _df = document.getElementById('daily-fields');
-  if (_df) _df.classList.toggle('hidden', ttype !== 'daily');
+  if (_df) _df.classList.toggle('hidden', ttype !== 'daily' && ttype !== 'gift');
   const _lf = document.getElementById('limit-fields');
   if (_lf) _lf.classList.toggle('hidden', ttype === 'one_time');
   updateGiftHint();
   onBillingChange();
+}
+function updateGiftHint() {
+  const ttype = (document.getElementById('f-token-type') || {}).value || 'daily';
+  const gift = ttype === 'gift';
+  const badge = document.getElementById('gift-badge');
+  if (badge) badge.classList.toggle('hidden', !gift);
+  const lbl = document.getElementById('limit-label');
+  if (lbl) lbl.textContent = gift ? '余额上限（平台每日赠送封顶，0=不限）' : '每日 Token 上限（0=不限）';
+  const rl = document.getElementById('refresh-label');
+  if (rl) rl.textContent = gift ? '到账补账时刻（HH:MM，北京时间）' : '每日刷新时间（HH:MM，北京时间）';
 }
 function onProviderSelect() {
   const pid = document.getElementById('f-provider-id').value;
@@ -1269,23 +1284,6 @@ function onProviderSelect() {
   document.getElementById('inherit-note').classList.toggle('hidden', !pid);
   document.getElementById('f-base-url').required = !pid;
   document.getElementById('f-api-key').required = !pid;
-  updateGiftHint();
-}
-function providerIsGiftSource(pid, baseUrl) {
-  const prov = (cachedProviders || []).find(p => p.id === pid);
-  const hay = ((prov && prov.id || '') + ' ' + (prov && prov.name || '') + ' ' + (baseUrl || '')).toLowerCase();
-  return hay.includes('火山') || hay.includes('ark');
-}
-function updateGiftHint() {
-  const badge = document.getElementById('gift-badge');
-  if (!badge) return;
-  const ttype = (document.getElementById('f-token-type') || {}).value || 'daily';
-  const pid = document.getElementById('f-provider-id').value;
-  const baseEl = document.getElementById('f-base-url');
-  const on = ttype === 'daily' && providerIsGiftSource(pid, baseEl ? baseEl.value : '');
-  badge.classList.toggle('hidden', !on);
-  const lbl = document.getElementById('limit-label');
-  if (lbl) lbl.textContent = on ? '余额上限（到账时刻按昨日消耗补回，0=不限）' : '每日 Token 上限（0=不限）';
 }
 function showAdd() {
   editingId = null;
@@ -2083,7 +2081,10 @@ async function loadStats() {
     const freeBadge = m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>';
     let refresh = m.token_type === 'one_time' ? '不刷新'
       : m.token_type === 'rolling_5h' ? '5h窗口 · 剩 ' + fmtDur(m.window_remaining_sec)
-      : isGift ? ((m.refresh_time ? '补账 ' + m.refresh_time : '按日补账') + ' · 余额 ' + (m.gift_balance ?? Math.max(0, limit - wUsed)).toLocaleString())
+      : isGift ? ((m.refresh_time ? '补账 ' + m.refresh_time : '按日补账') + ' · 余额 ' + (m.gift_balance ?? Math.max(0, limit - wUsed)).toLocaleString()
+        + ' <span class="i-tip" title="余额上限：' + limit.toLocaleString() + '（用户设置）&#10;当前余额：' + (m.gift_balance ?? 0).toLocaleString()
+        + '&#10;预计补账：' + (m.gift_pending_grant ?? 0).toLocaleString() + '（按昨日自然日消耗，' + (m.refresh_time || '到账时刻') + ' 到账）'
+        + '&#10;补账后余额：' + (m.gift_after_grant ?? 0).toLocaleString() + '（不超过上限）">ⓘ</span>')
       : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
     if (windowModel && isBilling && (m.today_tokens || 0) > 0) {
       refresh += ` · 自然日 ${(m.today_tokens || 0).toLocaleString()} tok`;

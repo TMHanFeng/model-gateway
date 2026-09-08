@@ -4,7 +4,7 @@ from pathlib import Path
 import logging
 import subprocess
 import threading
-from pool import load_config, save_config, is_gift_refund
+from pool import load_config, save_config
 import database as db
 from scheduler import restart_scheduler
 from providers.openai_provider import OpenAIProvider
@@ -79,11 +79,10 @@ async def admin_page():
 @router.get("/models")
 async def get_models(_=Depends(verify_admin)):
     config = load_config()
-    providers = config.get("providers", [])
     models = []
     for m in config.get("models", []):
         m2 = dict(m)
-        m2["gift_refund"] = is_gift_refund(m, providers)
+        m2["gift_refund"] = (m.get("token_type") == "gift")
         models.append(m2)
     return {"models": models}
 

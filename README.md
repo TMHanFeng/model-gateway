@@ -278,14 +278,14 @@ Anthropic 适配器自动完成：
 - 到达 `max_tokens` 或超过 `ttl_seconds` 后永久失效
 - 任何刷新都不重置
 
-### 7️⃣ 余额返还制（火山/Ark 供应商自动识别）
+### 7️⃣ 余额返还制（`token_type: "gift"`，v2.11.3+ 显式选择）
 
-针对"每天到账时刻赠送昨日消耗量（有日上限）"类活动（火山方舟 Ark 等）的配额模式。**无需任何显式开关**：模型的供应商 id/名称（或内联 Base URL）含「火山」或「ark」（不区分大小写）且 `token_type` 为 daily 时自动启用，面板会在供应商旁显示「余额返还制」徽章。
+针对"每天到账时刻赠送昨日消耗量（有日上限）"类活动（火山方舟 Ark 等）的配额模式。在模型编辑的**令牌类型**下拉中选择 `gift（余额返还制）` 即启用（v2.11.3 起为显式选择，不再做供应商名文字识别）；列表与统计页以「余额返还制」徽章取代「每日」显示。
 
 - **连续余额账本**：每笔调用扣减余额；到 `refresh_time` 时刻补入 `min(昨日自然日用量, daily_token_limit)`——不再是"清零重置为满额"，消耗不均匀时也不会虚高
 - 每天花 ≤ 上限 → 余额恒满；某天花超 → 超出部分永久扣除（与平台真实语义一致）
 - 余额耗尽即预检拒绝（走兜底/下一候选），不会打到平台扣真实额度；网关停机错过到账时刻会按 `model_daily_stats` 历史惰性补账，不丢账
-- `daily_token_limit` 复用为余额上限、`refresh_time` 复用为到账补账时刻；统计页对这类模型显示「余额」而非「已用」
+- `daily_token_limit` 复用为余额上限、`refresh_time` 复用为到账补账时刻；统计页大数字为**已用**（上限−余额，与 daily 同口径），余额/预计补账（min(昨日消耗, 上限)）/补账后预估在卡片小字与 ⓘ 悬停中展示
 - 状态存于 `gift_state` 表（首次自动初始化为满额；如需对齐当前真实剩余可手工修改该表）
 
 ### 8️⃣ 计费模式
@@ -333,7 +333,7 @@ Anthropic 适配器自动完成：
       "tpm_limit": 100000,              // 每分钟 Token 上限（0=不限）
       "context_window": 128000,         // 上下文窗口（0=不校验）
       "max_concurrency": 0,             // 最大并发（0=不限，默认 0）
-      "token_type": "daily",            // daily / rolling_5h / one_time
+      "token_type": "daily",            // daily / rolling_5h / one_time / gift（余额返还制）
       "billing_mode": "token",          // token（按 Token）/ request（按请求次数）
       "is_free": true,                  // 免费标注（绿）；付费模型显式设为 false（红）
       "modality": "vision",             // text / vision / embedding / rerank
