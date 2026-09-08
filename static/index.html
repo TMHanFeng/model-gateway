@@ -702,6 +702,12 @@ function provBadge(p) { return p === 'anthropic' ? '<span class="badge b-anthrop
 
 let providerLookup = {};
 
+function setInnerIfChanged(el, html) {  // 内容未变则零 DOM 写入：切页/轮询零开销、零闪烁
+  if (el.__lastHtml === html) return false;
+  el.__lastHtml = html;
+  el.innerHTML = html;
+  return true;
+}
 async function loadModels() {
   const [mdata, provdata] = await Promise.all([api('/admin/models'), api('/admin/providers')]);
   if (!mdata || !provdata) return;
@@ -725,7 +731,7 @@ async function loadModels() {
   if (!providers.length && !standalone.length) {
     html = '<div class="hint">暂无模型。点击右上角「添加供应商」后在其下添加模型，或「添加独立模型」。</div>';
   }
-  document.getElementById('model-list').innerHTML = html;
+  setInnerIfChanged(document.getElementById('model-list'), html);
   bindProviderDrag();
   bindModelDrag();
 }
@@ -903,7 +909,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
   const name = hint.dataset.thHint;
   if (input && name) updateThHint(name, input.value);
 });
-  document.getElementById('pool-list').innerHTML = entries.map(([name, pool]) => {
+  const poolHtml = entries.map(([name, pool]) => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
     const availPools = Object.keys(pdata.pools).filter(p => p !== name && p !== '兜底池' && !ids.includes('pool:' + p));
@@ -2273,7 +2279,7 @@ async function loadKeys() {
   const data = await api('/admin/keys');
   const el = document.getElementById('key-list');
   if (!data) return;
-  el.innerHTML = data.keys.map(k => `
+  const keyHtml = data.keys.map(k => `
     <div class="card">
       <div class="card-head">
         <div>
@@ -2298,6 +2304,7 @@ async function loadKeys() {
         <div>创建时间 <b>${new Date(k.created_at * 1000).toLocaleString('zh-CN', { hour12: false })}</b></div>
       </div>
     </div>`).join('') || '<div class="hint">暂无 API 密钥，点击右上角创建。</div>';
+  setInnerIfChanged(el, keyHtml);
 }
 let editingKeyId = null;
 function renderPoolCheckboxes(checkedArr) {
@@ -2306,6 +2313,7 @@ function renderPoolCheckboxes(checkedArr) {
     const checked = (checkedArr || []).includes(p) ? ' checked' : '';
     return `<label class="pool-check"><input type="checkbox" value="${esc(p)}" data-pool="${esc(p)}"${checked}><span>${esc(p)}</span></label>`;
   }).join('') || '<div class="hint">暂无模型池</div>';
+  setInnerIfChanged(document.getElementById('pool-list'), poolHtml);
 }
 async function showAddKey() {
   editingKeyId = null;

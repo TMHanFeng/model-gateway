@@ -1053,6 +1053,12 @@ function latTag(id) {
 /* 首屏后不再重放入场动画：保存/编辑触发的整表重建保持视觉静止（消除"保存后闪屏"） */
 const _entranceDone = {};
 function onceFlag(key) { const v = !_entranceDone[key]; _entranceDone[key] = true; return v; }
+function setInnerIfChanged(el, html) {  // 内容未变则零 DOM 写入：切页/轮询零开销、零闪烁
+  if (el.__lastHtml === html) return false;
+  el.__lastHtml = html;
+  el.innerHTML = html;
+  return true;
+}
 
 async function loadModels() {
   const [mdata, provdata] = await Promise.all([api('/admin/models'), api('/admin/providers')]);
@@ -1098,7 +1104,7 @@ async function loadModels() {
   if (!providers.length && !standalone.length) {
     html = '<div class="hint">暂无模型。点击右上角「添加供应商」后在其下添加模型，或添加独立模型。</div>';
   }
-  document.getElementById('models-list').innerHTML = html;
+  setInnerIfChanged(document.getElementById('models-list'), html);
   bindProviderDrag();
   bindModelDrag();
 }
@@ -1648,7 +1654,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
   if (input && name) updateThHint(name, input.value);
 });
   const animItem = onceFlag('pool-item');
-  document.getElementById('pool-list').innerHTML = entries.map(([name, pool], pi) => {
+  const poolHtml = entries.map(([name, pool], pi) => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
     const availPools = Object.keys(pdata.pools).filter(p => p !== name && p !== '兜底池' && !ids.includes('pool:' + p));
@@ -1730,6 +1736,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
       </div>
     </div>`;
   }).join('') || '<div class="hint">当前模式下暂无模型池。</div>';
+  setInnerIfChanged(document.getElementById('pool-list'), poolHtml);
 
   bindDrag();
   bindPoolDrag();
@@ -2495,7 +2502,7 @@ async function loadKeys() {
   const data = await api('/admin/keys');
   const el = document.getElementById('key-list');
   if (!data) return;
-  el.innerHTML = data.keys.map((k, i) => `
+  const keyHtml = data.keys.map((k, i) => `
     <div class="card" style="${onceFlag('keys') ? `animation-delay:${i * 45}ms;` : 'animation:none;'}">
       <div class="card-head">
         <div>
@@ -2521,6 +2528,7 @@ async function loadKeys() {
         <div>创建时间 <b>${new Date(k.created_at * 1000).toLocaleString('zh-CN', { hour12: false })}</b></div>
       </div>
     </div>`).join('') || '<div class="hint">暂无 API 密钥，点击右上角创建。</div>';
+  setInnerIfChanged(el, keyHtml);
 }
 let keyPoolCache = [];
 async function loadKeyPools() {

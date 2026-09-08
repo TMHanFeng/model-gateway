@@ -73,7 +73,9 @@ def verify_admin(request: Request):
 @router.get("/", response_class=HTMLResponse)
 async def admin_page():
     html = FRONTEND_PATH.read_text(encoding="utf-8")
-    return html.replace("__GATEWAY_VERSION__", get_gateway_version())
+    # no-cache：面板迭代频繁，禁止浏览器拿旧 HTML（同 /hfadmin）
+    return HTMLResponse(content=html.replace("__GATEWAY_VERSION__", get_gateway_version()),
+                        headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/models")
