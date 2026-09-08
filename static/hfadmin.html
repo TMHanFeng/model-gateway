@@ -2069,15 +2069,10 @@ async function loadStats() {
     let limitText = limit ? limit.toLocaleString() : '∞';
     if (statDim === 'requests') { used = m.today_requests ?? 0; unit = '次'; numsTitle = '当日调用次数'; limitText = '—'; }
     else if (statDim === 'tokens') { used = m.today_tokens ?? 0; unit = 'tokens'; numsTitle = '当日 Token 用量（自然日）'; limitText = '—'; }
-    else if (isBilling && isGift && limit > 0) {
-      used = m.gift_balance ?? Math.max(0, limit - wUsed);
-      numsTitle = '当前余额（到账时刻按昨日消耗补回）';
-    }
+    else if (isBilling && isGift) numsTitle = '已用（上限 − 当前余额；到账时刻按昨日消耗补回）';
     if (isBilling && windowModel && !isGift) numsTitle = `当前窗口用量（自 ${m.refresh_time} 起）`;
     const pct = isBilling && limit > 0 ? Math.min(100, used / limit * 100) : 0;
-    const cls = !isBilling ? '' : (m.expired ? 'full' : isGift
-      ? (pct <= 25 ? 'full' : pct <= 45 ? 'warn' : '')
-      : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : ''));
+    const cls = !isBilling ? '' : (m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : ''));
     const pctText = !isBilling ? '—' : (m.expired ? '已失效' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量'));
     const billing = m.billing_mode === 'request' ? '按次计费' : '按 Token 计费';
     const typeBadge = m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>'
@@ -2088,7 +2083,7 @@ async function loadStats() {
     const freeBadge = m.is_free ? '<span class="badge b-free">免费</span>' : '<span class="badge b-paid">付费</span>';
     let refresh = m.token_type === 'one_time' ? '不刷新'
       : m.token_type === 'rolling_5h' ? '5h窗口 · 剩 ' + fmtDur(m.window_remaining_sec)
-      : isGift ? (m.refresh_time ? '补账 ' + m.refresh_time : '按日补账')
+      : isGift ? ((m.refresh_time ? '补账 ' + m.refresh_time : '按日补账') + ' · 余额 ' + (m.gift_balance ?? Math.max(0, limit - wUsed)).toLocaleString())
       : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
     if (windowModel && isBilling && (m.today_tokens || 0) > 0) {
       refresh += ` · 自然日 ${(m.today_tokens || 0).toLocaleString()} tok`;
