@@ -2331,9 +2331,8 @@ async function loadDecisions() {
     const node = prev[key];
     if (!node) {
       const tmp = document.createElement('div');
-      const anim = firstLoad
-        ? `cardIn 280ms var(--ease-out) ${Math.min(fresh.length * 18, 320)}ms backwards`
-        : `logIn 340ms var(--ease-out) backwards, logFlash 1.8s ease-out backwards`;
+      // 首屏渲染全部静止（animation:none 覆盖 .log-card 基础动画），只有增量到达的新记录才播插入动画
+      const anim = firstLoad ? 'none' : 'logIn 340ms var(--ease-out) backwards, logFlash 1.8s ease-out backwards';
       tmp.innerHTML = `<div class="log-card" data-decision-id="${key}" style="animation:${anim}">${inner}</div>`;
       fresh.push(tmp.firstElementChild);
       return;
@@ -2353,31 +2352,39 @@ async function loadDecisions() {
   }
 }
 
-/* ⓘ 即时气泡：原生 title 有约 1 秒系统延迟，改为全局浮层（悬停立即显示，触屏点按切换） */
+/* ⓘ 即时气泡：原生 title 有约 1 秒系统延迟，改为全局浮层（跟随鼠标显示在其右下角，触屏点按切换） */
 (function () {
   const pop = document.createElement('div');
   pop.className = 'tip-pop';
   document.body.appendChild(pop);
   let owner = null;
   const finePointer = window.matchMedia && window.matchMedia('(pointer: fine)').matches;
-  function show(t) {
+  function place(x, y) {
+    const pr = pop.getBoundingClientRect();
+    let left = x + 14, top = y + 16;                                    // 默认：鼠标右下角
+    if (left + pr.width > window.innerWidth - 8) left = x - pr.width - 14;   // 右侧放不下 → 翻到鼠标左侧
+    if (top + pr.height > window.innerHeight - 8) top = y - pr.height - 12;  // 下方放不下 → 翻到鼠标上方
+    pop.style.left = Math.max(8, left) + 'px';
+    pop.style.top = Math.max(8, top) + 'px';
+  }
+  function show(t, x, y) {
     const txt = t.dataset.tip || '';
     if (!txt) return;
-    pop.textContent = txt;
+    if (pop.textContent !== txt) pop.textContent = txt;
     pop.style.display = 'block';
-    const r = t.getBoundingClientRect(), pr = pop.getBoundingClientRect();
-    pop.style.left = Math.min(Math.max(8, r.right - pr.width), window.innerWidth - pr.width - 8) + 'px';
-    let top = r.top - pr.height - 8;
-    if (top < 8) top = r.bottom + 8;
-    pop.style.top = top + 'px';
+    place(x, y);
     owner = t;
   }
   function hide() { pop.style.display = 'none'; owner = null; }
-  document.addEventListener('mouseover', e => { const t = e.target.closest('.i-tip'); if (t && t !== owner) show(t); });
+  document.addEventListener('mouseover', e => { const t = e.target.closest('.i-tip'); if (t) show(t, e.clientX, e.clientY); });
+  document.addEventListener('mousemove', e => {
+    const t = e.target.closest('.i-tip');
+    if (t && t === owner) place(e.clientX, e.clientY);   // 悬停期间跟随鼠标
+  });
   document.addEventListener('mouseout', e => { if (e.target.closest('.i-tip')) hide(); });
   document.addEventListener('click', e => {
     const t = e.target.closest ? e.target.closest('.i-tip') : null;
-    if (t) { (!finePointer || t !== owner) ? show(t) : hide(); } else hide();
+    if (t) { (!finePointer || t !== owner) ? show(t, e.clientX, e.clientY) : hide(); } else if (owner) hide();
   });
 })();
 
