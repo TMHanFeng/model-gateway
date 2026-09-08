@@ -1500,33 +1500,90 @@ async function loadStats() {
     if (m._windowModel && !m._gift && isBilling && (m.today_tokens || 0) > 0) {
       refresh += ` · 自然日 ${(m.today_tokens || 0).toLocaleString()} tok`;
     }
-    return `
-      <div class="stat-card ${cls}" style="animation-delay:${i * 45}ms">
-        <div class="stat-top">
-          <div>
-            <div class="stat-id">${m.id}</div>
-            <div class="stat-name">${m.name} · ${billing}</div>
-          </div>
-          <div class="stat-badges">${freeBadge}${typeBadge}</div>
-        </div>
-        <div class="stat-nums" title="${numsTitle}">
-          <span class="stat-used">${used.toLocaleString()}</span>
-          <span class="stat-sep">/</span>
-          <span class="stat-limit">${limitText}</span>
-          <span class="stat-unit">${unit}</span>
-        </div>
-        <div class="stat-bar"><div class="stat-fill" data-pct="${pct}"></div></div>
-        <div class="stat-meta">
-          <span class="stat-pct">${pctText}</span>
-          <span class="stat-refresh">${refresh}</span>
-        </div>
-      </div>`;
-  }).join('') || '<div class="hint">暂无模型。</div>';
+    return { m, used, limit, unit, numsTitle, limitText, pct, cls, pctText, billing, typeBadge, freeBadge, refresh };
+  });
 
+  statRender(grid, items);
+}
+
+function setStatTxt(root, sel, txt) {
+  const n = root.querySelector(sel);
+  if (n && n.textContent !== txt) n.textContent = txt;
+}
+
+function statCardHTML(x, i) {
+  return `
+    <div class="stat-card ${x.cls}" data-model-id="${esc(x.m.id)}" style="animation-delay:${Math.min(i * 45, 400)}ms;order:${i}">
+      <div class="stat-top">
+        <div>
+          <div class="stat-id">${esc(x.m.id)}</div>
+          <div class="stat-name">${esc(x.m.name)} · ${x.billing}</div>
+        </div>
+        <div class="stat-badges">${x.freeBadge}${x.typeBadge}</div>
+      </div>
+      <div class="stat-nums" title="${x.numsTitle}">
+        <span class="stat-used">${x.used.toLocaleString()}</span>
+        <span class="stat-sep">/</span>
+        <span class="stat-limit">${x.limitText}</span>
+        <span class="stat-unit">${x.unit}</span>
+      </div>
+      <div class="stat-bar"><div class="stat-fill" data-pct="${x.pct}"></div></div>
+      <div class="stat-meta">
+        <span class="stat-pct">${x.pctText}</span>
+        <span class="stat-refresh">${x.refresh}</span>
+      </div>
+    </div>`;
+}
+
+function statRender(grid, items) {
+  // 增量刷新：复用既有卡片 DOM（不闪屏、不重放入场动画）；顺序用 CSS order 表达；进度条宽度走过渡动画
+  const prev = {};
+  [...grid.querySelectorAll('.stat-card')].forEach(el => { prev[el.dataset.modelId] = el; });
+  if (!items.length) { grid.innerHTML = '<div class="hint">暂无模型。</div>'; return; }
+  if (!Object.keys(prev).length) {
+    grid.innerHTML = items.map((x, i) => statCardHTML(x, i)).join('');
+  } else {
+    const ids = new Set(items.map(x => x.m.id));
+    Object.keys(prev).forEach(id => { if (!ids.has(id)) { prev[id].remove(); delete prev[id]; } });
+    items.forEach((x, i) => {
+      let el = prev[x.m.id];
+      if (!el) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = statCardHTML(x, i);
+        el = tmp.firstElementChild;
+        grid.appendChild(el);
+        return;
+      }
+      el.style.order = i;
+      el.className = 'stat-card ' + x.cls;
+      setStatTxt(el, '.stat-id', x.m.id);
+      setStatTxt(el, '.stat-name', x.m.name + ' · ' + x.billing);
+      const bd = el.querySelector('.stat-badges');
+      if (bd && bd.innerHTML !== x.freeBadge + x.typeBadge) bd.innerHTML = x.freeBadge + x.typeBadge;
+      setStatTxt(el, '.stat-used', x.used.toLocaleString());
+      setStatTxt(el, '.stat-limit', x.limitText);
+      setStatTxt(el, '.stat-unit', x.unit);
+      const nums = el.querySelector('.stat-nums');
+      if (nums && nums.getAttribute('title') !== x.numsTitle) nums.setAttribute('title', x.numsTitle);
+      const fill = el.querySelector('.stat-fill');
+      if (fill && fill.dataset.pct !== String(x.pct)) { fill.dataset.pct = x.pct; fill.style.width = x.pct + '%'; }
+      const pctEl = el.querySelector('.stat-pct');
+      if (pctEl && pctEl.textContent !== x.pctText) pctEl.textContent = x.pctText;
+      const rf = el.querySelector('.stat-refresh');
+      if (rf && rf.innerHTML !== x.refresh) rf.innerHTML = x.refresh;
+    });
+    return;
+  }
   requestAnimationFrame(() => requestAnimationFrame(() => {
     grid.querySelectorAll('.stat-fill').forEach(f => { f.style.width = f.dataset.pct + '%'; });
   }));
 }
+
+function setStatTxt(root, sel, txt) {
+  const n = root.querySelector(sel);
+  if (n && n.textContent !== txt) n.textContent = txt;
+}
+
 
 const REASON_BASE = {
   selected: ['选中调用', 'rsn-selected'],
