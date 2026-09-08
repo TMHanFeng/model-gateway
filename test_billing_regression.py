@@ -10,6 +10,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -173,6 +174,14 @@ def main():
     json.dump(c, open(os.path.join(REPO, "config.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
     # 启动隔离实例
+    # 端口预清理：8651 若被遗留实例占用，新进程会绑定失败，测试将静默打到旧代码
+    # （教训：v2.11.19 前 T11 曾因旧实例占口一直测到旧实现）
+    _ns = subprocess.run(["netstat", "-ano"], capture_output=True).stdout.decode("utf-8", "ignore")
+    for _ln in _ns.splitlines():
+        if ":8651" in _ln and "LISTENING" in _ln.upper():
+            _pid = _ln.split()[-1]
+            subprocess.run(["taskkill", "/PID", _pid, "/F"], capture_output=True)
+    time.sleep(1)
     env = dict(os.environ, MODEL_GATEWAY_PORT="8651")
     proc = subprocess.Popen([sys.executable, "main.py"], cwd=REPO, env=env,
                             stdout=open(os.path.join(REPO, "logs", "regression_8651.log"), "ab"),
@@ -347,12 +356,13 @@ def main():
         db_exec("UPDATE gift_state SET balance = 1, last_grant_date = ? WHERE model_name = 'zzbt/echo-gift'", (yday,))
         httpx.post(f"{BASE}/admin/reload", headers=ADMIN, timeout=30)  # 清 5s 配额预检缓存
         time.sleep(0.5)
+        # v2.11.19：预检改"今日已采（自然日消耗）≥ 本地上限"口径，余额账本仅作展示不再作为预检依据
         r = chat("zzgift", max_tokens=500)
-        # 惰性补账 min(133, 266) → 余额 1+133=134，再扣本次 133 → 1
-        check("T11e 昨日用量补账后调用成功且余额正确", r.status_code == 200 and gift_bal() == 1, (r.status_code, gift_bal()))
-        r = httpx.get(f"{BASE}/stats", headers=ADMIN, timeout=15)
+        check("T11e 今日已采达上限调用被拒(与余额账本无关)", r.status_code == 503, r.status_code)
+        r = httpx.get(f"{BASE}/stats", headers=ADMIN, timeout=15)  # 读路径触发惰性补账 min(133,266) → 1+133=134
+        check("T11e2 昨日用量补账后展示余额=134", gift_bal() == 134, gift_bal())
         row = next((x for x in r.json().get("models", []) if x.get("id") == "zzbt/echo-gift"), {})
-        check("T11f stats含gift_balance展示", row.get("gift_refund") is True and row.get("gift_balance") == 1, row.get("gift_balance"))
+        check("T11f stats含gift_balance展示", row.get("gift_refund") is True and row.get("gift_balance") == 134, row.get("gift_balance"))
 
     finally:
         try:

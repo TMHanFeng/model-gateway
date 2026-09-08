@@ -2151,11 +2151,14 @@ async function loadStats() {
     if (statDim === 'requests') { used = m.today_requests ?? 0; unit = '次'; numsTitle = '当日调用次数'; limitText = '—'; }
     else if (statDim === 'tokens') { used = m.today_tokens ?? 0; unit = 'tokens'; numsTitle = '当日 Token 用量（自然日）'; limitText = '—'; }
     else if (isBilling && isGift) {
-      // 分母=今日总额池（恒定，仅到账时刻跳增）：昨日剩余 +（今日 14:00 后）已补账额度；分子=今日自然日消耗
-      limit = (m.gift_yesterday_leftover ?? 0) + (giftPosted ? (m.gift_last_grant_amount ?? 0) : 0);
+      // 分母=今日可用总额（恒定，仅到账时刻跳增）：min(昨日剩余 + 今日已补, 用户设置上限)
+      // 用户上限语义 = 今天最多用多少（建议设为火山每日采集额度的 80% 防意外），两者取小
+      const _pool = (m.gift_yesterday_leftover ?? 0) + (giftPosted ? (m.gift_last_grant_amount ?? 0) : 0);
+      const _cap = m.daily_token_limit || Infinity;
+      limit = Math.min(_pool, _cap);
       used = m.gift_usage_today ?? wUsed;         // 使用量=今日自然日消耗（真实，不随窗口变化）
-      limitText = limit.toLocaleString();       // 分母显示同步为今日总额池
-      numsTitle = '使用量=今日自然日消耗；分母=昨日剩余+今日已补（到账时刻跳增）';
+      limitText = limit.toLocaleString();       // 分母显示同步为今日可用总额
+      numsTitle = '使用量=今日自然日消耗；分母=min(昨日剩余+今日已补, 用户设置上限)，两者取小';
     }
     if (isBilling && windowModel && !isGift) numsTitle = `当前窗口用量（自 ${m.refresh_time} 起）`;
     let pct = isBilling && limit > 0 ? Math.min(100, used / limit * 100) : 0;
