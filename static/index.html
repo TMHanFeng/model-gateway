@@ -203,6 +203,9 @@ body {
 
 /* ── 调用记录 ── */
 .log-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; animation: rise .25s ease both; }
+/* 调用记录动态插入：增量到达的新记录下滑入场 + 高亮闪光（首次加载不闪） */
+@keyframes logIn { from { opacity: 0; transform: translateY(-14px); } }
+@keyframes logFlash { 0% { background: var(--teal-dim); border-color: var(--teal); } }
 .log-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 .log-time { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .log-pool { font-family: var(--mono); font-size: 12px; color: var(--amber); background: var(--amber-dim); padding: 1px 8px; border-radius: 4px; }
@@ -339,6 +342,8 @@ body {
 @keyframes slidein { from { opacity: 0; transform: translateX(30px); } }
 
 .i-tip { cursor: help; opacity: .65; font-style: normal; border-bottom: 1px dotted currentColor; }
+/* ⓘ 即时气泡（全局浮层，悬停立即显示，无原生 title 的系统延迟；.stat-card overflow:hidden 也裁不到） */
+.tip-pop { position: fixed; z-index: 9999; display: none; max-width: 340px; padding: 10px 14px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line-hi); color: var(--text); font-size: 12px; line-height: 1.9; white-space: pre-line; box-shadow: 0 12px 32px rgba(0,0,0,.45); pointer-events: none; }
 .hint { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; }
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .hidden { display: none; }
@@ -1441,7 +1446,7 @@ async function loadStats() {
     return;
   }
   const grid = document.getElementById('stats-grid');
-  grid.innerHTML = data.models
+  const items = data.models
     .map(m => ({
       ...m,
       _used: m.daily_used_tokens ?? m.used_tokens ?? 0,
@@ -1496,10 +1501,10 @@ async function loadStats() {
       : m.token_type === 'rolling_5h' ? '5h窗口 · 剩 ' + fmtDur(m.window_remaining_sec)
       : m._gift ? (giftPosted
         ? ('已补 ' + (m.gift_last_grant_amount ?? 0).toLocaleString()
-          + ' <span class="i-tip" title="今日 ' + (m.refresh_time || '') + ' 已到账 ' + (m.gift_last_grant_amount ?? 0).toLocaleString() + '&#10;预计下次补账：' + (m.gift_pending_grant ?? 0).toLocaleString() + '（明日 ' + (m.refresh_time || '') + '，按今日消耗）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
+          + ' <span class="i-tip" data-tip="今日 ' + (m.refresh_time || '') + ' 已到账 ' + (m.gift_last_grant_amount ?? 0).toLocaleString() + '&#10;预计下次补账：' + (m.gift_pending_grant ?? 0).toLocaleString() + '（明日 ' + (m.refresh_time || '') + '，按今日消耗）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
           + '&#10;当前可用余额：' + (m.gift_balance ?? 0).toLocaleString() + '&#10;上一天剩余（昨日 24:00）：' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok">ⓘ</span>')
         : ('预计 ' + (m.refresh_time || '到账时刻') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString()
-          + ' <span class="i-tip" title="预计到账：' + (m.refresh_time || '') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString() + '（按昨日自然日消耗，不超过上限）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
+          + ' <span class="i-tip" data-tip="预计到账：' + (m.refresh_time || '') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString() + '（按昨日自然日消耗，不超过上限）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
           + '&#10;当前可用余额：' + (m.gift_balance ?? 0).toLocaleString() + '&#10;上一天剩余（昨日 24:00）：' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok">ⓘ</span>'))
       : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
     if (m._windowModel && !m._gift && isBilling && (m.today_tokens || 0) > 0) {
@@ -1709,6 +1714,7 @@ async function loadDecisions() {
   if (!data.decisions.length) { el.innerHTML = '<div class="hint">暂无调用记录。发起一次对话后这里会显示选模过程与切换依据。</div>'; return; }
   // 增量刷新：按决策 id 复用既有卡片（不闪屏）；新记录顶部插入并播一次入场动画；
   // actual_tokens 回填等变化时就地更新；掉出列表的旧卡片移除
+  const firstLoad = !el.querySelector('.log-card');
   const prev = {};
   [...el.querySelectorAll('.log-card')].forEach(n => { if (n.dataset.decisionId) prev[n.dataset.decisionId] = n; });
   const fresh = [];
@@ -1720,7 +1726,10 @@ async function loadDecisions() {
     const node = prev[key];
     if (!node) {
       const tmp = document.createElement('div');
-      tmp.innerHTML = `<div class="log-card" data-decision-id="${key}" style="animation:cardIn 280ms var(--ease-out) backwards">${inner}</div>`;
+      const anim = firstLoad
+        ? `cardIn 280ms var(--ease-out) ${Math.min(fresh.length * 18, 320)}ms backwards`
+        : `logIn 340ms var(--ease-out) backwards, logFlash 1.8s ease-out backwards`;
+      tmp.innerHTML = `<div class="log-card" data-decision-id="${key}" style="animation:${anim}">${inner}</div>`;
       fresh.push(tmp.firstElementChild);
       return;
     }
@@ -1738,6 +1747,34 @@ async function loadDecisions() {
     if (first) el.insertBefore(frag, first); else el.appendChild(frag);
   }
 }
+
+/* ⓘ 即时气泡：原生 title 有约 1 秒系统延迟，改为全局浮层（悬停立即显示，触屏点按切换） */
+(function () {
+  const pop = document.createElement('div');
+  pop.className = 'tip-pop';
+  document.body.appendChild(pop);
+  let owner = null;
+  const finePointer = window.matchMedia && window.matchMedia('(pointer: fine)').matches;
+  function show(t) {
+    const txt = t.dataset.tip || '';
+    if (!txt) return;
+    pop.textContent = txt;
+    pop.style.display = 'block';
+    const r = t.getBoundingClientRect(), pr = pop.getBoundingClientRect();
+    pop.style.left = Math.min(Math.max(8, r.right - pr.width), window.innerWidth - pr.width - 8) + 'px';
+    let top = r.top - pr.height - 8;
+    if (top < 8) top = r.bottom + 8;
+    pop.style.top = top + 'px';
+    owner = t;
+  }
+  function hide() { pop.style.display = 'none'; owner = null; }
+  document.addEventListener('mouseover', e => { const t = e.target.closest('.i-tip'); if (t && t !== owner) show(t); });
+  document.addEventListener('mouseout', e => { if (e.target.closest('.i-tip')) hide(); });
+  document.addEventListener('click', e => {
+    const t = e.target.closest ? e.target.closest('.i-tip') : null;
+    if (t) { (!finePointer || t !== owner) ? show(t) : hide(); } else hide();
+  });
+})();
 
 function onBillingChange() {
   const form = document.getElementById('mform');

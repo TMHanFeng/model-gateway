@@ -335,6 +335,8 @@ select { max-width: 100%; }
 .f2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .f3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
 .i-tip { cursor: help; opacity: .65; font-style: normal; border-bottom: 1px dotted currentColor; }
+/* ⓘ 即时气泡（全局浮层，悬停立即显示，无原生 title 的系统延迟） */
+.tip-pop { position: fixed; z-index: 9999; display: none; max-width: 340px; padding: 10px 14px; border-radius: 12px; background: rgba(255, 255, 255, 0.98); border: 1px solid var(--line-hi); color: var(--text); font-size: 12px; line-height: 1.9; white-space: pre-line; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16); pointer-events: none; }
 .hint { font-size: 12.5px; color: var(--muted); }
 .hidden { display: none !important; }
 
@@ -385,6 +387,9 @@ select { max-width: 100%; }
   padding: 15px 18px; margin-bottom: 12px;
   box-shadow: var(--shadow-card);
 }
+/* 调用记录动态插入：增量到达的新记录下滑入场 + 高亮闪光（首次加载不闪） */
+@keyframes logIn { from { opacity: 0; transform: translateY(-14px); } }
+@keyframes logFlash { 0% { background: var(--teal-dim); border-color: var(--teal); } }
 .log-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; margin-bottom: 10px; }
 .log-time { font-family: var(--mono); color: var(--muted); }
 .log-pool { background: rgba(120, 120, 128, 0.09); padding: 2px 10px; border-radius: 980px; color: var(--muted); }
@@ -2093,10 +2098,10 @@ async function loadStats() {
       : m.token_type === 'rolling_5h' ? '5h窗口 · 剩 ' + fmtDur(m.window_remaining_sec)
       : isGift ? (giftPosted
         ? ('已补 ' + (m.gift_last_grant_amount ?? 0).toLocaleString()
-          + ' <span class="i-tip" title="今日 ' + (m.refresh_time || '') + ' 已到账 ' + (m.gift_last_grant_amount ?? 0).toLocaleString() + '&#10;预计下次补账：' + (m.gift_pending_grant ?? 0).toLocaleString() + '（明日 ' + (m.refresh_time || '') + '，按今日消耗）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
+          + ' <span class="i-tip" data-tip="今日 ' + (m.refresh_time || '') + ' 已到账 ' + (m.gift_last_grant_amount ?? 0).toLocaleString() + '&#10;预计下次补账：' + (m.gift_pending_grant ?? 0).toLocaleString() + '（明日 ' + (m.refresh_time || '') + '，按今日消耗）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
           + '&#10;当前可用余额：' + (m.gift_balance ?? 0).toLocaleString() + '&#10;上一天剩余（昨日 24:00）：' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok">ⓘ</span>')
         : ('预计 ' + (m.refresh_time || '到账时刻') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString()
-          + ' <span class="i-tip" title="预计到账：' + (m.refresh_time || '') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString() + '（按昨日自然日消耗，不超过上限）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
+          + ' <span class="i-tip" data-tip="预计到账：' + (m.refresh_time || '') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString() + '（按昨日自然日消耗，不超过上限）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
           + '&#10;当前可用余额：' + (m.gift_balance ?? 0).toLocaleString() + '&#10;上一天剩余（昨日 24:00）：' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok">ⓘ</span>'))
       : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
     if (windowModel && !isGift && isBilling && (m.today_tokens || 0) > 0) {
@@ -2314,6 +2319,7 @@ async function loadDecisions() {
   // 增量刷新：按决策 id 复用既有卡片（不闪屏）；新记录顶部插入并播一次入场动画；
   // actual_tokens 回填等变化时就地更新；掉出列表的旧卡片移除
   el.querySelector('.spinner')?.remove();     // 首次增量渲染也清除初始转圈
+  const firstLoad = !el.querySelector('.log-card');
   const prev = {};
   [...el.querySelectorAll('.log-card')].forEach(n => { if (n.dataset.decisionId) prev[n.dataset.decisionId] = n; });
   const fresh = [];
@@ -2325,7 +2331,10 @@ async function loadDecisions() {
     const node = prev[key];
     if (!node) {
       const tmp = document.createElement('div');
-      tmp.innerHTML = `<div class="log-card" data-decision-id="${key}" style="animation:cardIn 280ms var(--ease-out) backwards">${inner}</div>`;
+      const anim = firstLoad
+        ? `cardIn 280ms var(--ease-out) ${Math.min(fresh.length * 18, 320)}ms backwards`
+        : `logIn 340ms var(--ease-out) backwards, logFlash 1.8s ease-out backwards`;
+      tmp.innerHTML = `<div class="log-card" data-decision-id="${key}" style="animation:${anim}">${inner}</div>`;
       fresh.push(tmp.firstElementChild);
       return;
     }
@@ -2343,6 +2352,34 @@ async function loadDecisions() {
     if (first) el.insertBefore(frag, first); else el.appendChild(frag);
   }
 }
+
+/* ⓘ 即时气泡：原生 title 有约 1 秒系统延迟，改为全局浮层（悬停立即显示，触屏点按切换） */
+(function () {
+  const pop = document.createElement('div');
+  pop.className = 'tip-pop';
+  document.body.appendChild(pop);
+  let owner = null;
+  const finePointer = window.matchMedia && window.matchMedia('(pointer: fine)').matches;
+  function show(t) {
+    const txt = t.dataset.tip || '';
+    if (!txt) return;
+    pop.textContent = txt;
+    pop.style.display = 'block';
+    const r = t.getBoundingClientRect(), pr = pop.getBoundingClientRect();
+    pop.style.left = Math.min(Math.max(8, r.right - pr.width), window.innerWidth - pr.width - 8) + 'px';
+    let top = r.top - pr.height - 8;
+    if (top < 8) top = r.bottom + 8;
+    pop.style.top = top + 'px';
+    owner = t;
+  }
+  function hide() { pop.style.display = 'none'; owner = null; }
+  document.addEventListener('mouseover', e => { const t = e.target.closest('.i-tip'); if (t && t !== owner) show(t); });
+  document.addEventListener('mouseout', e => { if (e.target.closest('.i-tip')) hide(); });
+  document.addEventListener('click', e => {
+    const t = e.target.closest ? e.target.closest('.i-tip') : null;
+    if (t) { (!finePointer || t !== owner) ? show(t) : hide(); } else hide();
+  });
+})();
 
 /* ═══════════ API 密钥 ═══════════ */
 function keyTypeBadge(t) { return t === 'admin' ? '<span class="badge b-paid">管理员</span>' : '<span class="badge b-openai">用户</span>'; }
