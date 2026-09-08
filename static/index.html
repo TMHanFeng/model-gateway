@@ -1435,7 +1435,11 @@ function fmtDur(sec){sec=Math.max(0,Math.floor(sec||0));var h=Math.floor(sec/360
 function setStatDim(d){statDim=d;['billing','requests','tokens'].forEach(x=>{document.getElementById('stat-dim-'+x).classList.toggle('btn-amber',x===d);document.getElementById('stat-dim-'+x).classList.toggle('btn-ghost',x!==d)});loadStats();}
 async function loadStats() {
   const data = await api('/stats');
-  if (!data) return;
+  if (!data) {
+    const g = document.getElementById('stats-grid');
+    if (g && !g.children.length) g.innerHTML = '<div class="hint">加载失败，等待自动重试…</div>';
+    return;
+  }
   const grid = document.getElementById('stats-grid');
   grid.innerHTML = data.models
     .map(m => ({
@@ -1537,6 +1541,7 @@ function statCardHTML(x, i) {
 }
 
 function statRender(grid, items) {
+  grid.querySelector('.spinner')?.remove();
   // 增量刷新：复用既有卡片 DOM（不闪屏、不重放入场动画）；顺序用 CSS order 表达；进度条宽度走过渡动画
   const prev = {};
   [...grid.querySelectorAll('.stat-card')].forEach(el => { prev[el.dataset.modelId] = el; });
@@ -1697,7 +1702,10 @@ async function loadDecisions() {
   const url = '/admin/decisions?limit=100' + (poolFilter ? '&pool=' + encodeURIComponent(poolFilter) : '');
   const data = await api(url);
   const el = document.getElementById('log-list');
-  if (!data) return;
+  if (!data) {
+    if (!el.children.length) el.innerHTML = '<div class="hint">加载失败，等待自动重试…</div>';
+    return;
+  }
   if (!data.decisions.length) { el.innerHTML = '<div class="hint">暂无调用记录。发起一次对话后这里会显示选模过程与切换依据。</div>'; return; }
   // 增量刷新：按决策 id 复用既有卡片（不闪屏）；新记录顶部插入并播一次入场动画；
   // actual_tokens 回填等变化时就地更新；掉出列表的旧卡片移除

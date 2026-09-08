@@ -2052,7 +2052,12 @@ function fmtDur(sec) {
 }
 async function loadStats() {
   const data = await api('/stats');
-  if (!data) return;
+  if (!data) {
+    document.querySelector('#stats-grid .spinner')?.remove();
+    const g = document.getElementById('stats-grid');
+    if (g && !g.children.length) g.innerHTML = '<div class="hint">加载失败，等待自动重试…</div>';
+    return;
+  }
   const grid = document.getElementById('stats-grid');
   const items = data.models.map(m => {
     const isBilling = statDim === 'billing';
@@ -2138,6 +2143,7 @@ function statCardHTML(x, i) {
 }
 
 function statRender(grid, items) {
+  grid.querySelector('.spinner')?.remove();   // 首次增量渲染也清除初始转圈
   // 增量刷新：复用既有卡片 DOM（不闪屏、不重放入场动画）；顺序用 CSS order 表达；进度条宽度走过渡动画
   const prev = {};
   [...grid.querySelectorAll('.stat-card')].forEach(el => { prev[el.dataset.modelId] = el; });
@@ -2299,10 +2305,15 @@ async function loadDecisions() {
   const url = '/admin/decisions?limit=100' + (poolFilter ? '&pool=' + encodeURIComponent(poolFilter) : '');
   const data = await api(url);
   const el = document.getElementById('log-list');
-  if (!data) return;
+  if (!data) {
+    el.querySelector('.spinner')?.remove();
+    if (!el.children.length) el.innerHTML = '<div class="hint">加载失败，等待自动重试…</div>';
+    return;
+  }
   if (!data.decisions.length) { el.innerHTML = '<div class="hint">暂无调用记录。发起一次对话后这里会显示选模过程与切换依据。</div>'; return; }
   // 增量刷新：按决策 id 复用既有卡片（不闪屏）；新记录顶部插入并播一次入场动画；
   // actual_tokens 回填等变化时就地更新；掉出列表的旧卡片移除
+  el.querySelector('.spinner')?.remove();     // 首次增量渲染也清除初始转圈
   const prev = {};
   [...el.querySelectorAll('.log-card')].forEach(n => { if (n.dataset.decisionId) prev[n.dataset.decisionId] = n; });
   const fresh = [];
