@@ -593,6 +593,7 @@ body {
         <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"></div>
       </div>
       <div class="fg" id="daily-fields"><label id="refresh-label">每日刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
+      <div class="fg" id="grant-cap-fields" style="display:none"><label id="grant-cap-label">每日返还上限（火山"每日采集额度"，超出不返还）</label><input name="gift_grant_cap" type="number" min="0" step="100000" placeholder="5000000"></div>
       <div id="once-fields">
         <div class="f2">
           <div class="fg"><label>时区</label><input value="Asia/Shanghai（北京时间，固定）" disabled></div>
@@ -1527,10 +1528,10 @@ async function loadStats() {
       : m._gift ? (giftPosted
         ? ('已补 ' + (m.gift_last_grant_amount ?? 0).toLocaleString()
           + ' <span class="i-tip" data-tip="今日 ' + (m.refresh_time || '') + ' 已到账 ' + (m.gift_last_grant_amount ?? 0).toLocaleString() + '&#10;预计下次补账：' + (m.gift_pending_grant ?? 0).toLocaleString() + '（明日 ' + (m.refresh_time || '') + '，按今日消耗）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
-          + '&#10;当前可用余额：' + (m.gift_balance ?? 0).toLocaleString() + '&#10;上一天剩余（昨日 24:00）：' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok&#10;今日已采：' + Math.min(m.today_tokens || 0, 5000000).toLocaleString() + ' / 5,000,000（超出不返还）">ⓘ</span>')
+          + '&#10;当前可用余额：' + (m.gift_balance ?? 0).toLocaleString() + '&#10;上一天剩余（昨日 24:00）：' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok&#10;今日已采：' + Math.min(m.today_tokens || 0, m.gift_grant_cap || 5000000).toLocaleString() + ' / ' + (m.gift_grant_cap || 5000000).toLocaleString() + '（超出不返还）">ⓘ</span>')
         : ('预计 ' + (m.refresh_time || '到账时刻') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString()
           + ' <span class="i-tip" data-tip="预计到账：' + (m.refresh_time || '') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString() + '（按昨日自然日消耗，不超过上限）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
-          + '&#10;当前可用余额：' + (m.gift_balance ?? 0).toLocaleString() + '&#10;上一天剩余（昨日 24:00）：' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok&#10;今日已采：' + Math.min(m.today_tokens || 0, 5000000).toLocaleString() + ' / 5,000,000（超出不返还）">ⓘ</span>'))
+          + '&#10;当前可用余额：' + (m.gift_balance ?? 0).toLocaleString() + '&#10;上一天剩余（昨日 24:00）：' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok&#10;今日已采：' + Math.min(m.today_tokens || 0, m.gift_grant_cap || 5000000).toLocaleString() + ' / ' + (m.gift_grant_cap || 5000000).toLocaleString() + '（超出不返还）">ⓘ</span>'))
       : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
     if (m._windowModel && !m._gift && isBilling && (m.today_tokens || 0) > 0) {
       refresh += ` · 自然日 ${(m.today_tokens || 0).toLocaleString()} tok`;
@@ -1829,6 +1830,8 @@ function onTokenTypeChange() {
   // 条件显隐（问题16）：刷新时间/限额字段 daily 与 gift（余额返还制）都需要；one_time 隐藏
   const _df = document.getElementById('daily-fields');
   if (_df) _df.style.display = (ttype === 'daily' || ttype === 'gift') ? '' : 'none';
+  const _gc = document.getElementById('grant-cap-fields');
+  if (_gc) _gc.style.display = ttype === 'gift' ? '' : 'none';  // 每日返还上限：仅余额返还制显示
   const _lf = document.getElementById('limit-fields');
   if (_lf) _lf.style.display = ttype === 'one_time' ? 'none' : '';
   updateGiftHint();
@@ -1839,6 +1842,7 @@ function showAdd() {
   editingId = null;
   document.getElementById('modal-title').textContent = '添加模型';
   document.getElementById('mform').reset();
+  document.getElementById('mform').gift_grant_cap.value = 5000000;
   document.getElementById('f-model-id').disabled = false;
   renderReasoningStrip(null);
   populateProviderSelect('').then(() => { onBillingChange(); onProviderSelect(); });
@@ -1850,6 +1854,7 @@ async function showAddUnder(pid) {
   editingId = null;
   document.getElementById('modal-title').textContent = '在供应商下添加模型';
   document.getElementById('mform').reset();
+  document.getElementById('mform').gift_grant_cap.value = 5000000;
   document.getElementById('f-model-id').disabled = false;
   renderReasoningStrip(null);
   await populateProviderSelect(pid);
@@ -2042,6 +2047,7 @@ async function editModel(id) {
   const _se = document.getElementById('f-smart-estimate'); if (_se) _se.checked = !!m.smart_estimate;
   const _nso = document.getElementById('f-nso'); if (_nso) _nso.checked = !!m.no_stream_options;
   f.max_concurrency.value = m.max_concurrency ?? 10; f.refresh_time.value = m.refresh_time || '';
+  f.gift_grant_cap.value = m.gift_grant_cap || 5000000;
   f.max_tokens.value = m.max_tokens || 0; f.ttl_seconds.value = m.ttl_seconds || 0;
   f.expire_date.value = m.expire_date || '';
   onTokenTypeChange(); onSmartToggle();
@@ -2062,6 +2068,7 @@ async function submitModel(e) {
   e.preventDefault();
   const body = Object.fromEntries(new FormData(document.getElementById('mform')).entries());
   ['daily_token_limit','rpm_limit','tpm_limit','context_window','max_concurrency','max_tokens','ttl_seconds'].forEach(k => body[k] = parseInt(body[k]) || 0);
+  body.gift_grant_cap = parseInt(body.gift_grant_cap) || 5000000;  // 每日返还上限（默认 500 万）
   // 超时时间：120=系统默认；0=无限等待；其余为秒数（旧配置 null 编辑保存后落为显式 120，行为不变）
   body.timeout_seconds = parseInt(body.timeout_seconds) || 0;
   body.is_free = body.is_free === 'true';

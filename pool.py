@@ -39,6 +39,7 @@ class ModelEntry:
     is_free: bool = True
     modality: str = "text"
     gift_refund: bool = False  # 余额返还制（token_type=gift）：配额走连续余额账本而非每日清零
+    gift_grant_cap: int = 5_000_000  # 每日返还上限（对应火山"每日采集额度"），超出部分不返还
     json_output: bool = False  # 支持格式输出（json）——请求带 response_format json 时只选 true 的模型
     extra_params: dict = field(default_factory=dict)  # 用户自定义参数（注入上游 payload，黑名单过滤）
     reasoning_map: dict = field(default_factory=dict)  # 统一思考档位 -> 上游请求体片段（reasoning.py 解析）
@@ -202,6 +203,7 @@ class ModelPool:
                 is_free=m.get("is_free", True),
                 modality=m.get("modality", "text"),
                 gift_refund=(m.get("token_type") == "gift"),
+                gift_grant_cap=int(m.get("gift_grant_cap", 0) or 0) or 5_000_000,
                 json_output=bool(m.get("json_output", False)),
                 extra_params=(m.get("extra_params") or {}),
                 reasoning_map=(m.get("reasoning_map") or {}),
@@ -445,7 +447,7 @@ class ModelPool:
             # 余额返还制预检（v2.11.26）：上限 = min(今日总额池[昨日剩余+今日已补], 用户设置上限)，
             # 今日自然日消耗达到上限即拒绝。账本余额按固定 500 万/日返还规则逐日结算（get_gift_balance），
             # 用户设置上限语义 = 今天最多用多少（建议 ≤ 火山每日采集额度 5M 的 80% 防意外）。
-            await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time)
+            await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time, entry.gift_grant_cap)
             pool = await db.get_gift_window_start(entry.id)
             limit = min(pool, entry.daily_token_limit)
             used = int((await db.get_model_daily_stats(entry.id)).get("total_tokens", 0) or 0)
@@ -1645,7 +1647,7 @@ class ModelPool:
                 # 补账时刻后 = 剩余 + 补账（即补账后余额，window_start_balance）；
                 # 预计补账 = min(最近一个自然日消耗, 上限)——14:00 前指今日将到账的（按昨日），
                 # 14:00 后指明日将到账的（按今日已耗）。
-                balance = await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time)
+                balance = await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time, entry.gift_grant_cap)
                 wstart = await db.get_gift_window_start(entry.id)
                 from datetime import datetime, timedelta
                 from zoneinfo import ZoneInfo as _ZI
@@ -1664,6 +1666,7 @@ class ModelPool:
                 last_grant_amount = await db.get_gift_last_grant_amount(entry.id)
                 pending = min((today_usage if after_grant else yday_usage), entry.daily_token_limit)
                 s["gift_refund"] = True
+                s["gift_grant_cap"] = entry.gift_grant_cap  # 每日返还上限（编辑界面可填）
                 s["gift_balance"] = max(0, balance)       # 当前可用余额（= 分母/总额）
                 s["gift_available"] = max(0, balance)     # 进度条分母：14:00 补账后跳增（剩余+补账）
                 s["gift_usage_today"] = today_usage       # 大数字：今日自然日真实消耗（不被上限钳制）

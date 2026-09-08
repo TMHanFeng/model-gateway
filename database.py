@@ -367,7 +367,7 @@ async def reset_all_daily():
 GIFT_GRANT_CAP = 5_000_000
 
 
-async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "") -> int:
+async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "", grant_cap: int = 0) -> int:
     """读取赠还余额；首见惰性初始化，并按 model_daily_stats 历史逐日补齐错过的赠还。
 
     余额返还制口径（v2.11.26，对齐火山奖励计划）：
@@ -377,21 +377,22 @@ async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "") ->
     - window_start_balance = 本窗口总额池（昨日剩余+今日已补，进度条分母候选）。
     - 预检与展示限制 = min(总额池, 用户设置上限)，两者取小。"""
     async with _lock:
+        gcap = int(grant_cap or 0) or GIFT_GRANT_CAP  # 每日返还上限（用户可在编辑界面填写，默认 500 万）
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT balance, last_grant_date, window_start_balance, last_grant_amount FROM gift_state WHERE model_name = ?",
             (model_name,))
         row = await cursor.fetchone()
         if not row:
-            balance = min(max(0, int(cap or 0)), GIFT_GRANT_CAP)
+            balance = min(max(0, int(cap or 0)), gcap)
             await db.execute(
                 "INSERT INTO gift_state (model_name, balance, last_grant_date, window_start_balance, last_grant_amount) VALUES (?, ?, '', ?, 0)",
                 (model_name, balance, balance))
             await _commit(db)
             return balance
         balance, last, wstart = int(row[0] or 0), row[1] or "", int(row[2] or 0)
-        if wstart <= 0:  # 存量行采纳：以 min(用户上限, 单日返还上限) 与余额较大者为窗口基线
-            wstart = max(min(int(cap or 0), GIFT_GRANT_CAP), balance, 1)
+        if wstart <= 0:  # 存量行采纳：以 min(用户上限, 每日返还上限) 与余额较大者为窗口基线
+            wstart = max(min(int(cap or 0), gcap), balance, 1)
             await db.execute("UPDATE gift_state SET window_start_balance = ? WHERE model_name = ?",
                              (wstart, model_name))
             await _commit(db)
@@ -422,8 +423,8 @@ async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "") ->
                 "SELECT total_tokens FROM model_daily_stats WHERE model_name = ? AND date = ?",
                 (model_name, basis))
             r = await cursor.fetchone()
-            # 每日返还 = min(昨日用量, 500万)——超出采集上限不返还；余额可跨日累积，不再钳到用户上限
-            balance = balance + min(int(r[0] or 0) if r else 0, GIFT_GRANT_CAP)
+            # 每日返还 = min(昨日用量, 返还上限[默认500万，可按模型填写])——超出采集上限不返还
+            balance = balance + min(int(r[0] or 0) if r else 0, gcap)
             steps += 1
         # 补账后开启新窗口：窗口总额池 = 补后余额（昨日剩余+今日已补，进度条分母候选）
         last_grant_amount = max(0, balance - pre)  # 最近一次到账额度（供"已补 X"展示）

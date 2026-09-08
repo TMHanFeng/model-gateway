@@ -44,8 +44,9 @@ async def grant_gift_model(model_id: str):
             return
         cap = int(m.get("daily_token_limit", 0) or 0)
         rt = m.get("refresh_time", "")
-        balance = await db.get_gift_balance(model_id, cap, rt)
-        logger.info(f"[赠还补账] {model_id} 当前余额 {balance}/{cap}")
+        gc = int(m.get("gift_grant_cap", 0) or 0) or 5_000_000  # 每日返还上限（默认 500 万）
+        balance = await db.get_gift_balance(model_id, cap, rt, gc)
+        logger.info(f"[赠还补账] {model_id} 当前余额 {balance}（每日返还上限 {gc}）")
     except Exception:
         logger.exception(f"[赠还补账] {model_id} 失败")
     try:
