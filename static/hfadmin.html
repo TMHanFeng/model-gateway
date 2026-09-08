@@ -2760,7 +2760,7 @@ loadModels();
   }, true);
 })();
 
-/* ═══════════ 交互式点阵背景：光标附近的点微微亮起、放大并被轻推（磁性科技感）═══════════ */
+/* ═══════════ 交互式点阵背景：静态底图 + 光标附近脏矩形局部重绘（空闲零开销，不再每帧全屏重绘）═══════════ */
 (function () {
   if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   var host = document.getElementById('bg-bubbles');
@@ -2772,38 +2772,37 @@ loadModels();
   if (!ctx) return;
   var dpr = Math.min(window.devicePixelRatio || 1, 2);
   var W = 0, H = 0, dots = [];
-  var SPACING = 26, RADIUS = 130, R2 = RADIUS * RADIUS;
-  var mx = -9999, my = -9999, tx = -9999, ty = -9999;
+  var SPACING = 26, RADIUS = 130, R2 = RADIUS * RADIUS, PAD = RADIUS + SPACING;
   var blue = [];
   for (var b = 0; b <= 20; b++) blue.push('rgba(0,113,227,' + (0.14 + 0.55 * b / 20).toFixed(3) + ')');
+  var base = document.createElement('canvas');   // 静态底图：纯淡点阵
+  var bctx = base.getContext('2d');
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;
+    base.width = canvas.width; base.height = canvas.height;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     dots = [];
     for (var y = SPACING; y < H; y += SPACING)
       for (var x = SPACING; x < W; x += SPACING) dots.push({ x: x, y: y });
+    bctx.clearRect(0, 0, W, H);
+    bctx.fillStyle = 'rgba(29, 41, 61, 0.12)';
+    for (var i = 0; i < dots.length; i++) bctx.fillRect(dots[i].x - 0.55, dots[i].y - 0.55, 1.1, 1.1);
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(base, 0, 0, W * dpr, H * dpr, 0, 0, W, H);
   }
   resize();
   window.addEventListener('resize', resize);
-  var fine = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
-  if (fine) {
-    document.addEventListener('pointermove', function (e) { tx = e.clientX; ty = e.clientY; }, { passive: true });
-    document.documentElement.addEventListener('mouseleave', function () { tx = -9999; ty = -9999; });
+  function restore(x, y) {   // 脏矩形内还原底图
+    ctx.clearRect(x - PAD, y - PAD, 2 * PAD, 2 * PAD);
+    ctx.drawImage(base, (x - PAD) * dpr, (y - PAD) * dpr, 2 * PAD * dpr, 2 * PAD * dpr, x - PAD, y - PAD, 2 * PAD, 2 * PAD);
   }
-  var running = true;
-  document.addEventListener('visibilitychange', function () {
-    var was = running; running = !document.hidden;
-    if (running && !was) requestAnimationFrame(tick);
-  });
-  function tick() {
-    if (!running) return;
-    mx += (tx - mx) * 0.16; my += (ty - my) * 0.16;   // 缓动跟随：光标带一点"磁性"惯性
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = 'rgba(29, 41, 61, 0.12)';
-    for (var i = 0; i < dots.length; i++) ctx.fillRect(dots[i].x - 0.55, dots[i].y - 0.55, 1.1, 1.1);
+  function highlight(x, y) { // 画光标附近的亮粒
     for (var j = 0; j < dots.length; j++) {
-      var d = dots[j], dx = d.x - mx, dy = d.y - my, d2 = dx * dx + dy * dy;
+      var d = dots[j];
+      if (d.x < x - PAD || d.x > x + PAD || d.y < y - PAD || d.y > y + PAD) continue;
+      var dx = d.x - x, dy = d.y - y, d2 = dx * dx + dy * dy;
       if (d2 < R2) {
         var t = 1 - Math.sqrt(d2) / RADIUS, e2 = t * t;
         ctx.fillStyle = blue[Math.round(e2 * 20)];
@@ -2812,9 +2811,27 @@ loadModels();
         ctx.fill();
       }
     }
-    requestAnimationFrame(tick);
   }
-  requestAnimationFrame(tick);
+  var fine = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  if (fine) {
+    var prev = null, queued = false, lastEvt = null;
+    document.addEventListener('pointermove', function (e) {
+      lastEvt = e;
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(function () {   // rAF 节流：每帧至多一次局部重绘
+        queued = false;
+        var x = lastEvt.clientX, y = lastEvt.clientY;
+        if (prev) restore(prev.x, prev.y);  // 还原上一次高亮区（防拖影）
+        restore(x, y);
+        highlight(x, y);
+        prev = { x: x, y: y };
+      });
+    }, { passive: true });
+    document.documentElement.addEventListener('mouseleave', function () {
+      if (prev) { restore(prev.x, prev.y); prev = null; }
+    });
+  }
 })();
 
 /* ═══════════ 卡片聚光灯坐标：--mx/--my 跟随光标（rAF 节流，事件委托，不改任何业务逻辑）═══════════ */
