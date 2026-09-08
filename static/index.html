@@ -267,7 +267,7 @@ body {
 @keyframes fade { from { opacity: 0; } }
 .modal {
   background: var(--panel); border: 1px solid var(--line-hi); border-radius: 10px;
-  padding: 26px; width: 660px; max-width: calc(100vw - 32px); max-height: 84vh; overflow-y: auto;
+  padding: 26px; width: 800px; max-width: calc(100vw - 32px); max-height: 84vh; overflow-y: auto;
   animation: pop .22s cubic-bezier(.22,1,.36,1);
 }
 @keyframes pop { from { opacity: 0; transform: translateY(14px) scale(.98); } }
@@ -286,6 +286,19 @@ body {
 }
 .fg input:focus, .fg select:focus { outline: none; border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-dim); }
 .fg input:disabled { opacity: .55; cursor: not-allowed; background: var(--panel-2); }
+/* 多行输入（思考映射 JSON 等）：此前未样式化、只剩浏览器默认 ~20ch 宽，是"编辑框太窄"的根因 */
+.fg textarea {
+  width: 100%; padding: 9px 11px; border-radius: 6px; border: 1px solid var(--line-hi);
+  background: var(--bg); color: var(--text); font-size: 12.5px; font-family: var(--mono);
+  line-height: 1.75; min-height: 150px; resize: vertical; tab-size: 2;
+  transition: border-color .15s, box-shadow .15s;
+}
+.fg textarea:focus { outline: none; border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-dim); }
+/* 探测结论条：状态着色面板 */
+.probe-strip { border: 1px solid var(--line-hi); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); font-size: 12px; line-height: 1.7; }
+.probe-strip.ok { border-color: rgba(46, 204, 113, .35); background: rgba(46, 204, 113, .07); }
+.probe-strip.bad { border-color: rgba(231, 76, 60, .38); background: rgba(231, 76, 60, .07); }
+.probe-strip .strip-btns { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 7px; }
 /* 编辑弹窗：分组标题 + 选项卡片 */
 .form-sec { font-size: 11.5px; color: var(--muted); letter-spacing: 1px; margin: 20px 0 12px; padding-top: 14px; border-top: 1px dashed var(--line-hi); display: flex; align-items: center; gap: 6px; }
 .form-sec::before { content: ''; width: 3px; height: 11px; background: var(--amber); border-radius: 2px; opacity: .75; }
@@ -2082,13 +2095,15 @@ async function renderReasoningStrip(modelId, opts = {}) {
   const strip = document.getElementById('reasoning-probe-strip');
   if (!strip) return;
   if (!modelId) {
+    strip.className = '';
     strip.innerHTML = '<span class="hint">🧠 模型添加后，这里会显示云端思考参数探测结论，可一键填入/重测</span>';
     strip.dataset.built = '';
     return;
   }
   if (!strip.dataset.built) {
-    strip.innerHTML = '<div id="reasoning-probe-text" class="hint" style="margin-bottom:4px">🧠 探测结论加载中…</div>'
-      + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px">'
+    strip.className = 'probe-strip';
+    strip.innerHTML = '<div id="reasoning-probe-text" class="hint" style="margin:0">🧠 探测结论加载中…</div>'
+      + '<div class="strip-btns">'
       + '<button type="button" class="btn btn-ghost btn-sm" id="reasoning-fill-btn" onclick="fillReasoningSuggestion()">📥 填入建议</button>'
       + '<button type="button" class="btn btn-ghost btn-sm" id="reasoning-probe-btn" onclick="reprobeReasoning()">🔄 重新探测</button>'
       + '<button type="button" class="btn btn-ghost btn-sm" onclick="renderReasoningStrip(editingId, {force:true})" title="重新拉取探测结论（纯本地缓存，不发上游请求）">⟳</button>'
@@ -2104,11 +2119,15 @@ async function renderReasoningStrip(modelId, opts = {}) {
   const statusEl = document.getElementById('reasoning-probe-status');
   if (statusEl) statusEl.textContent = '';  // 清掉上一次弹窗残留的状态文案
   const rec = info ? info.models[modelId] : undefined;
-  if (!info) txt.textContent = '🧠 探测结论加载失败';
-  else if (!rec || !rec.probed) txt.innerHTML = '🧠 探测结论：<b>未探测</b>（点「🔄 重新探测」实测该云端模型支持的思考参数写法）';
-  else if (rec.default_thinking && String(rec.default_thinking).indexOf('不可用') === 0)
-    txt.innerHTML = '🧠 探测结论：<span style="color:#c0392b">' + esc(rec.default_thinking) + '</span>（可点「🔄 重新探测」重试）';
+  if (!info) { strip.className = 'probe-strip bad'; txt.textContent = '🧠 探测结论加载失败'; }
+  else if (!rec || !rec.probed) { strip.className = 'probe-strip'; txt.innerHTML = '🧠 探测结论：<b>未探测</b>（点「🔄 重新探测」实测该云端模型支持的思考参数写法）'; }
+  else if (rec.default_thinking && String(rec.default_thinking).indexOf('不可用') === 0) {
+    strip.className = 'probe-strip bad';
+    txt.innerHTML = '🧠 探测结论：<span style="color:#e74c3c;font-weight:600">' + esc(rec.default_thinking) + '</span>'
+      + '（探测于 ' + esc((rec.probe_time || '').slice(0, 16) || '?') + ' · 上游当时限流/额度不足，非网关故障，可换个时段点「🔄 重新探测」重试）';
+  }
   else {
+    strip.className = 'probe-strip ok';
     const bits = ['🧠 探测于 ' + esc((rec.probe_time || '').slice(0, 10) || '?')];
     bits.push(rec.param_family ? '参数族 <b>' + esc(rec.param_family) + '</b>' : '不支持思考控制');
     bits.push('默认思考' + esc(rec.default_thinking || '?'));
