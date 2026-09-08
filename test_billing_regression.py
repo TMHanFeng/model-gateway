@@ -111,6 +111,7 @@ def deep_clean():
     c["providers"] = [p for p in c.get("providers", []) if p["id"] not in ("zzmock", "zzark")]
     c["models"] = [m for m in c.get("models", []) if not str(m.get("id", "")).startswith("zzbt/")]
     c.get("pools", {}).pop("zzall", None)
+    c.get("pools", {}).pop("zzdef", None)  # v2.11.19 曾漏清该测试池残留至生产配置
     for pn in ("zzreq", "zzonce", "zzsmart", "zznso", "zzgift"):
         c.get("pools", {}).pop(pn, None)
     json.dump(c, open(os.path.join(REPO, "config.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)

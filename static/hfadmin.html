@@ -204,9 +204,10 @@ main { max-width: 1240px; margin: 0 auto; padding: 40px 24px 90px; }
   padding: 20px 22px;
   box-shadow: var(--shadow-card);
   margin-bottom: 16px;
-  opacity: 0; transform: translateY(10px);
-  animation: cardIn 420ms var(--ease-out) forwards;
 }
+/* 入场动画只加在显式带 card-anim 的卡片上（首屏一次性）；普通渲染静态可见。
+   此前 opacity:0 写在 .card 基类、靠 cardIn 拉回——一旦抑制动画(animation:none)卡片就永久隐身。 */
+.card.card-anim { opacity: 0; transform: translateY(10px); animation: cardIn 420ms var(--ease-out) forwards; }
 @keyframes cardIn { to { opacity: 1; transform: none; } }
 .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
 .card-title { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -1076,7 +1077,7 @@ async function loadModels() {
   providers.forEach((p, i) => {
     const pmodels = models.filter(m => m.provider_id === p.id);
     html += `
-    <div class="card provider-card" draggable="true" data-provider-drag="${esc(p.id)}" style="${animProv ? `animation-delay:${Math.min(i * 50, 400)}ms;` : 'animation:none;'}cursor:grab" title="拖拽排序供应商">
+    <div class="card provider-card${animProv ? ' card-anim' : ''}" draggable="true" data-provider-drag="${esc(p.id)}" style="${animProv ? `animation-delay:${Math.min(i * 50, 400)}ms;` : ''}cursor:grab" title="拖拽排序供应商">
       <div class="card-head provider-head">
         <div>
           <div class="card-title"><span class="drag-handle">⠿</span> ${esc(p.name)} ${provBadge(p.protocol)}</div>
@@ -1094,7 +1095,7 @@ async function loadModels() {
   const standalone = models.filter(m => !m.provider_id);
   if (standalone.length) {
     html += `
-    <div class="card provider-card"${animProv ? '' : ' style="animation:none"'}>
+    <div class="card provider-card${animProv ? ' card-anim' : ''}">
       <div class="card-head provider-head">
         <div><div class="card-title">独立模型（内联连接）</div><div class="card-sub">未挂载到任何供应商</div></div>
       </div>
@@ -1653,7 +1654,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
   const name = hint.dataset.thHint;
   if (input && name) updateThHint(name, input.value);
 });
-  const animItem = onceFlag('pool-item');
+  const animItem = onceFlag('pool-item'), animCard = onceFlag('pool-card');
   const poolHtml = entries.map(([name, pool], pi) => {
     const ids = pool.model_ids || [];
     const availModels = mdata.models.filter(m => !ids.includes(m.id));
@@ -1679,7 +1680,7 @@ document.querySelectorAll('.threshold-ctl').forEach(ctl => {
     const isDraggable = !isAuto;
     const dedicatedTag = isDedicated ? `<span class="badge b-5h">👤 专属池 · Key#${esc(pool.owner_key_id)}</span>` : '';
     return `
-    <div class="card" data-pool-card="${esc(name)}" ${isDraggable ? 'draggable="true"' : ''} style="${onceFlag('pool-card') ? `animation-delay:${pi * 50}ms;` : 'animation:none;'}">
+    <div class="card${animCard ? ' card-anim' : ''}" data-pool-card="${esc(name)}" ${isDraggable ? 'draggable="true"' : ''} style="${animCard ? `animation-delay:${pi * 50}ms;` : ''}">
       <div class="card-head">
         <div>
           <div class="card-title">
@@ -2502,8 +2503,9 @@ async function loadKeys() {
   const data = await api('/admin/keys');
   const el = document.getElementById('key-list');
   if (!data) return;
+  const animKey = onceFlag('keys');
   const keyHtml = data.keys.map((k, i) => `
-    <div class="card" style="${onceFlag('keys') ? `animation-delay:${i * 45}ms;` : 'animation:none;'}">
+    <div class="card${animKey ? ' card-anim' : ''}" style="${animKey ? `animation-delay:${i * 45}ms;` : ''}">
       <div class="card-head">
         <div>
           <div class="card-title">${esc(k.name)} <span class="mono" style="color:var(--muted);font-size:12px">#${k.id}</span></div>
