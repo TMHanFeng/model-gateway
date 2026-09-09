@@ -1669,7 +1669,7 @@ class ModelPool:
                 grant_dt = now_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
                 after_grant = now_dt >= grant_dt
                 last_grant_amount = await db.get_gift_last_grant_amount(entry.id)
-                pending = min((today_usage if after_grant else yday_usage), entry.daily_token_limit)
+                pending = min((today_usage if after_grant else yday_usage), entry.gift_grant_cap)  # 补账量只受"每日采集额度"限制，不受用户本地上限钳制
                 s["gift_refund"] = True
                 s["gift_grant_cap"] = entry.gift_grant_cap  # 每日返还上限（编辑界面可填）
                 s["gift_balance"] = max(0, balance)       # 当前可用余额（= 分母/总额）
