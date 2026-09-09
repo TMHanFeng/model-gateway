@@ -1607,6 +1607,13 @@ class ModelPool:
         return list(results)
 
     async def get_stats(self) -> list[dict]:
+        # v2.11.41 批量化：今昨两天统计 + token_usage（含懒重置）+ one_time/5h 状态
+        # 一次临界区取回（原每模型 4~8 次锁内查询 × 48 模型 → 1 次快照 + gift 逐个结算）
+        from zoneinfo import ZoneInfo as _ZI
+        now_dt = datetime.now(_ZI("Asia/Shanghai"))
+        today = now_dt.date().isoformat()
+        yday = (now_dt.date() - timedelta(days=1)).isoformat()
+        snap = await db.get_stats_snapshot([today, yday])
         stats = []
         for entry in self.registry.values():
             s = {
@@ -1627,11 +1634,11 @@ class ModelPool:
                 "current_tpm": db.get_tpm(entry.id),
                 "latency_ms": entry.latency_ms,
             }
-            daily_stats = await db.get_model_daily_stats(entry.id)
-            s["today_requests"] = daily_stats["request_count"]
-            s["today_tokens"] = daily_stats["total_tokens"]
+            td = snap["stats"].get(entry.id, {}).get(today, {"request_count": 0, "total_tokens": 0})
+            s["today_requests"] = td["request_count"]
+            s["today_tokens"] = td["total_tokens"]
             if entry.token_type == "one_time":
-                state = await db.get_one_time_state(entry.id)
+                state = snap["one_time"].get(entry.id)
                 if state:
                     s["used_tokens"] = state["used_tokens"]
                     s["max_tokens"] = entry.max_tokens
@@ -1642,7 +1649,7 @@ class ModelPool:
                     s["max_tokens"] = entry.max_tokens
                     s["expired"] = False
             elif entry.token_type == "rolling_5h":
-                state = await db.get_5h_state(entry.id)
+                state = snap["rolling5h"].get(entry.id)
                 now = time.time()
                 if state and (now - state["window_start"]) < ROLLING_5H_SECONDS:
                     used = state["used_amount"]
@@ -1663,13 +1670,8 @@ class ModelPool:
                 # 预计补账 = min(最近一个自然日消耗, 返还上限)——14:00 前指今日将到账的（按昨日），
                 # 14:00 后指明日将到账的（按今日已耗）。人工校准值持久于 gift_state/自然日统计，优先于系统重算。
                 balance = await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time, entry.gift_grant_cap)
-                from datetime import datetime, timedelta
-                from zoneinfo import ZoneInfo as _ZI
-                now_dt = datetime.now(_ZI("Asia/Shanghai"))
-                today_stat = await db.get_model_daily_stats(entry.id)
-                today_usage = int(today_stat.get("total_tokens", 0) or 0)
-                yday = (now_dt.date() - timedelta(days=1)).isoformat()
-                ystat = await db.get_model_daily_stats(entry.id, yday)
+                today_usage = int(td.get("total_tokens", 0) or 0)
+                ystat = snap["stats"].get(entry.id, {}).get(yday, {"total_tokens": 0})
                 yday_usage = int(ystat.get("total_tokens", 0) or 0)
                 try:
                     hh, mm = (int(x) for x in (entry.refresh_time or "00:00").split(":"))
@@ -1699,7 +1701,7 @@ class ModelPool:
                 s["daily_remaining"] = max(0, balance)
                 s["refresh_time"] = entry.refresh_time
             else:
-                used = await db.get_daily_usage(entry.id)
+                used = snap["daily"].get(entry.id, {}).get("used_tokens", 0)
                 s["daily_used_tokens"] = used
                 s["daily_token_limit"] = entry.daily_token_limit
                 s["daily_remaining"] = max(0, entry.daily_token_limit - used) if entry.daily_token_limit > 0 else -1

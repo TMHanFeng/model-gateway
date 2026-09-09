@@ -629,6 +629,51 @@ async def get_rpm_tpm_all() -> dict[str, tuple[int, int]]:
     return out
 
 
+async def get_stats_snapshot(dates: list[str]) -> dict:
+    """/stats 批量快照（v2.11.41：每面板轮询约 250 次锁内查询 → 1 次临界区 4 条 SQL）。
+
+    - daily: token_usage 全表 + 跨窗口懒重置（与 get_daily_usage 同口径：
+      last_reset_date != 逻辑日 的行 UPDATE used_tokens=0 并计 0，通常 0 行写）
+    - stats: model_daily_stats WHERE date IN (...)（调用方传今/昨两天）
+    - one_time / rolling5h: 两张小状态表全量
+    gift 的余额账本不进快照：get_gift_balance 的惰性补账/校准写 + 之后读 gift_state
+    的"先结算后取值"顺序原样保留（pool.get_stats 对 gift 模型逐个结算）。"""
+    async with _maybe_lock():
+        db = await _get_conn()
+        now = time.time()
+        tu_rows = await (await db.execute(
+            "SELECT model_name, used_tokens, last_reset_date, refresh_time FROM token_usage")).fetchall()
+        ph = ",".join("?" * len(dates))
+        ds_rows = await (await db.execute(
+            f"SELECT model_name, date, request_count, total_tokens FROM model_daily_stats WHERE date IN ({ph})",
+            dates)).fetchall()
+        ot_rows = await (await db.execute("SELECT * FROM one_time_state")).fetchall()
+        fh_rows = await (await db.execute("SELECT * FROM rolling5h_state")).fetchall()
+        resets = []
+        daily = {}
+        for r in tu_rows:
+            logical = _logical_today(now, r[3])
+            if r[2] != logical:
+                resets.append((logical, r[0]))
+                daily[r[0]] = {"used_tokens": 0}
+            else:
+                daily[r[0]] = {"used_tokens": int(r[1] or 0)}
+        if resets:
+            await db.executemany(
+                "UPDATE token_usage SET used_tokens = 0, last_reset_date = ? WHERE model_name = ?",
+                resets)
+            await _commit(db)
+    stats: dict[str, dict[str, dict]] = {}
+    for m, d, rc, tt in ds_rows:
+        stats.setdefault(m, {})[d] = {"request_count": int(rc or 0), "total_tokens": int(tt or 0)}
+    return {
+        "daily": daily,
+        "stats": stats,
+        "one_time": {r["model_name"]: dict(r) for r in ot_rows},
+        "rolling5h": {r["model_name"]: dict(r) for r in fh_rows},
+    }
+
+
 # ── 模型调用统计（请求次数 / token 用量，与计费量 token_usage 分离）────
 
 async def add_model_call(model_name: str, tokens: int):
