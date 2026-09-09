@@ -182,7 +182,10 @@ async def init_db():
                 balance INTEGER DEFAULT 0,
                 last_grant_date TEXT DEFAULT '',
                 window_start_balance INTEGER DEFAULT 0,
-                last_grant_amount INTEGER DEFAULT 0
+                last_grant_amount INTEGER DEFAULT 0,
+                yesterday_leftover INTEGER DEFAULT 0,
+                grant_date TEXT DEFAULT '',
+                snapshot_date TEXT DEFAULT ''
             )
         """)
         cols = [r[1] for r in await (await db.execute("PRAGMA table_info(gift_state)")).fetchall()]
@@ -190,6 +193,9 @@ async def init_db():
             await db.execute("ALTER TABLE gift_state ADD COLUMN window_start_balance INTEGER DEFAULT 0")
         if cols and "last_grant_amount" not in cols:
             await db.execute("ALTER TABLE gift_state ADD COLUMN last_grant_amount INTEGER DEFAULT 0")
+        for extra, typedef in (("yesterday_leftover", "INTEGER DEFAULT 0"), ("grant_date", "TEXT DEFAULT ''"), ("snapshot_date", "TEXT DEFAULT ''")):
+            if cols and extra not in cols:
+                await db.execute(f"ALTER TABLE gift_state ADD COLUMN {extra} {typedef}")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS api_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -368,113 +374,70 @@ GIFT_GRANT_CAP = 5_000_000
 
 
 async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "", grant_cap: int = 0) -> int:
-    """读取赠还余额；首见惰性初始化，并按 model_daily_stats 历史逐日补齐错过的赠还。
+    """读取赠还余额（v2.11.30 自然日口径，对齐火山奖励计划）。
 
-    余额返还制口径（v2.11.26，对齐火山奖励计划）：
-    - 每日返还（发放）= min(昨日自然日用量, GIFT_GRANT_CAP=500万)，超出部分不返还；
-      发放时点 = 模型 refresh_time（用户填写，如 14:00）。
-    - 余额（balance）= 昨日剩余 + 今日已补 - 今日已耗，可跨日累积（对应火山"发放额度总量-剩余"）。
-    - window_start_balance = 本窗口总额池（昨日剩余+今日已补，进度条分母候选）。
-    - 预检与展示限制 = min(总额池, 用户设置上限)，两者取小。"""
+    - 0:00（自然日）：昨日剩余快照 y_left = 0 点余额；今日用量随 model_daily_stats 自然清零
+      ——"0:00 修改一次今日上限"。
+    - refresh_time（用户填写，如 14:00）：到账返还 G = min(昨日自然日用量, 返还上限) 加进余额
+      ——"14:00 修改一次今日上限"。用户设置上限 = 今天最多用多少，预检取 min(池, 上限)。
+    - balance = 实时剩余（= 昨日剩余 + 今日已补 - 今日已耗，若现在停用）；人工校准可单独修正。"""
+    gcap = int(grant_cap or 0) or GIFT_GRANT_CAP
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
     async with _lock:
-        gcap = int(grant_cap or 0) or GIFT_GRANT_CAP  # 每日返还上限（用户可在编辑界面填写，默认 500 万）
         db = await _get_conn()
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        today = now.date().isoformat()
+        try:
+            hh, mm = (int(x) for x in (refresh_time or "00:00").split(":"))
+        except ValueError:
+            hh, mm = 0, 0
+        after_grant = (now.hour, now.minute) >= (hh, mm)
         cursor = await db.execute(
-            "SELECT balance, last_grant_date, window_start_balance, last_grant_amount FROM gift_state WHERE model_name = ?",
+            "SELECT balance, yesterday_leftover, last_grant_amount, grant_date, snapshot_date FROM gift_state WHERE model_name = ?",
             (model_name,))
-        row = await cursor.fetchone()
-        if not row:
+        r = await cursor.fetchone()
+        if not r:
             balance = min(max(0, int(cap or 0)), gcap)
             await db.execute(
-                "INSERT INTO gift_state (model_name, balance, last_grant_date, window_start_balance, last_grant_amount) VALUES (?, ?, '', ?, 0)",
-                (model_name, balance, balance))
+                "INSERT INTO gift_state (model_name, balance, yesterday_leftover, last_grant_amount, grant_date, last_grant_date, snapshot_date) VALUES (?, ?, ?, 0, ?, ?, ?)",
+                (model_name, balance, balance, today, today, today))
             await _commit(db)
             return balance
-        balance, last, wstart = int(row[0] or 0), row[1] or "", int(row[2] or 0)
-        if wstart <= 0:  # 存量行采纳：以 min(用户上限, 每日返还上限) 与余额较大者为窗口基线
-            wstart = max(min(int(cap or 0), gcap), balance, 1)
-            await db.execute("UPDATE gift_state SET window_start_balance = ? WHERE model_name = ?",
-                             (wstart, model_name))
-            await _commit(db)
-        logical = _logical_today(time.time(), refresh_time)
-        if last == logical:
-            return balance
-        if cap <= 0:  # 不限额度：无补账概念，仅推进锚点日期
-            await db.execute("UPDATE gift_state SET last_grant_date = ? WHERE model_name = ?",
-                             (logical, model_name))
-            await _commit(db)
-            return balance
-        from datetime import datetime, timedelta
-        try:
-            day = datetime.strptime(last, "%Y-%m-%d").date()
-            target = datetime.strptime(logical, "%Y-%m-%d").date()
-        except ValueError:
-            # 无有效锚点（如刚初始化）：只落锚不补账，初始 cap 即当日额度
-            await db.execute("UPDATE gift_state SET last_grant_date = ? WHERE model_name = ?",
-                             (logical, model_name))
-            await _commit(db)
-            return balance
-        if day >= target:
-            # 锚点不早于逻辑日（含人工校准写入的本窗口/未来锚点）：本窗口已发放，不再补账
-            # （防止 14:00 补账对人工校准值二次发放）
-            return balance
-        steps = 0
-        pre = balance
-        while day < target and steps < 400:  # 逐日补账；上限防脏数据拖垮预检
-            day += timedelta(days=1)
-            basis = (day - timedelta(days=1)).isoformat()
+        balance = int(r[0] or 0)
+        y_left = int(r[1] or 0)
+        g_amt = int(r[2] or 0)
+        g_date = r[3] or ""
+        snap = r[4] or ""
+        cursor = await db.execute(
+            "SELECT total_tokens FROM model_daily_stats WHERE model_name = ? AND date = ?",
+            (model_name, today))
+        rr = await cursor.fetchone()
+        usage_today = int(rr[0] or 0) if rr else 0
+        changed = False
+        if snap != today:
+            # 新自然日首见：快照昨日剩余（0 点余额 = 当前余额 + 今日已耗还原）
+            y_left = balance + usage_today
+            snap = today
+            changed = True
+        if g_date != today and after_grant:
+            # 到账时刻（refresh_time）：返还 = min(昨日自然日用量, 返还上限)
+            yday = (now.date() - timedelta(days=1)).isoformat()
             cursor = await db.execute(
                 "SELECT total_tokens FROM model_daily_stats WHERE model_name = ? AND date = ?",
-                (model_name, basis))
-            r = await cursor.fetchone()
-            # 每日返还 = min(昨日用量, 返还上限[默认500万，可按模型填写])——超出采集上限不返还
-            balance = balance + min(int(r[0] or 0) if r else 0, gcap)
-            steps += 1
-        # 补账后开启新窗口：窗口总额池 = 补后余额（昨日剩余+今日已补，进度条分母候选）
-        last_grant_amount = max(0, balance - pre)  # 最近一次到账额度（供"已补 X"展示）
-        await db.execute("UPDATE gift_state SET balance = ?, last_grant_date = ?, window_start_balance = ?, last_grant_amount = ? WHERE model_name = ?",
-                         (balance, logical, balance, last_grant_amount, model_name))
-        await _commit(db)
+                (model_name, yday))
+            rr2 = await cursor.fetchone()
+            grant = min(int(rr2[0] or 0) if rr2 else 0, gcap)
+            balance += grant
+            g_amt = grant
+            g_date = today
+            changed = True
+        if changed:
+            await db.execute(
+                "UPDATE gift_state SET balance=?, yesterday_leftover=?, last_grant_amount=?, grant_date=?, snapshot_date=? WHERE model_name=?",
+                (balance, y_left, g_amt, g_date, snap, model_name))
+            await _commit(db)
         return balance
-
-
-async def get_gift_state(model_name: str):
-    """读取 gift_state 原始行（人工校准用）。"""
-    async with _lock:
-        db = await _get_conn()
-        cursor = await db.execute(
-            "SELECT balance, window_start_balance, last_grant_amount, last_grant_date FROM gift_state WHERE model_name = ?",
-            (model_name,))
-        row = await cursor.fetchone()
-        if not row:
-            return None
-        return {"balance": int(row[0] or 0), "window_start_balance": int(row[1] or 0),
-                "last_grant_amount": int(row[2] or 0), "last_grant_date": row[3] or ""}
-
-
-async def set_gift_state(model_name: str, balance: int, window_start_balance: int, last_grant_amount: int, last_grant_date: str):
-    """整行写回 gift_state（人工校准用）。"""
-    async with _lock:
-        db = await _get_conn()
-        await db.execute(
-            "UPDATE gift_state SET balance=?, window_start_balance=?, last_grant_amount=?, last_grant_date=? WHERE model_name=?",
-            (balance, window_start_balance, last_grant_amount, last_grant_date, model_name))
-        await _commit(db)
-
-
-async def set_model_daily_usage(model_name: str, tokens: int):
-    """人工校准：直接改写今日（自然日）用量。"""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
-    async with _lock:
-        db = await _get_conn()
-        await db.execute(
-            """INSERT INTO model_daily_stats (model_name, date, request_count, total_tokens)
-               VALUES (?, ?, 0, ?)
-               ON CONFLICT(model_name, date) DO UPDATE SET total_tokens = ?""",
-            (model_name, date, tokens, tokens))
-        await _commit(db)
 
 
 def gift_logical_today(refresh_time: str = "") -> str:
@@ -508,6 +471,53 @@ async def add_gift_usage(model_name: str, tokens: int):
         db = await _get_conn()
         await db.execute("UPDATE gift_state SET balance = balance - ? WHERE model_name = ?",
                          (tokens, model_name))
+        await _commit(db)
+
+
+async def get_gift_state(model_name: str):
+    """读取 gift_state 原始行（人工校准用）。"""
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT balance, window_start_balance, last_grant_amount, last_grant_date, "
+            "yesterday_leftover, grant_date, snapshot_date FROM gift_state WHERE model_name = ?",
+            (model_name,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {"balance": int(row[0] or 0), "window_start_balance": int(row[1] or 0),
+                "last_grant_amount": int(row[2] or 0), "last_grant_date": row[3] or "",
+                "yesterday_leftover": int(row[4] or 0), "grant_date": row[5] or "",
+                "snapshot_date": row[6] or ""}
+
+
+async def set_gift_state(model_name: str, balance: int, window_start_balance: int, last_grant_amount: int,
+                         last_grant_date: str, yesterday_leftover: int = None, grant_date: str = None,
+                         snapshot_date: str = None):
+    """整行写回 gift_state（人工校准用）；未提供的可选列保持原值。"""
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            "UPDATE gift_state SET balance=?, window_start_balance=?, last_grant_amount=?, last_grant_date=?, "
+            "yesterday_leftover=COALESCE(?, yesterday_leftover), grant_date=COALESCE(?, grant_date), "
+            "snapshot_date=COALESCE(?, snapshot_date) WHERE model_name=?",
+            (balance, window_start_balance, last_grant_amount, last_grant_date,
+             yesterday_leftover, grant_date, snapshot_date, model_name))
+        await _commit(db)
+
+
+async def set_model_daily_usage(model_name: str, tokens: int):
+    """人工校准：直接改写今日（自然日）用量。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            """INSERT INTO model_daily_stats (model_name, date, request_count, total_tokens)
+               VALUES (?, ?, 0, ?)
+               ON CONFLICT(model_name, date) DO UPDATE SET total_tokens = ?""",
+            (model_name, date, tokens, tokens))
         await _commit(db)
 
 

@@ -360,10 +360,21 @@ def main():
         # v2.11.19：预检改"今日已采（自然日消耗）≥ 本地上限"口径，余额账本仅作展示不再作为预检依据
         r = chat("zzgift", max_tokens=500)
         check("T11e 今日已采达上限调用被拒(与余额账本无关)", r.status_code == 503, r.status_code)
-        r = httpx.get(f"{BASE}/stats", headers=ADMIN, timeout=15)  # 读路径触发惰性补账 min(133,266) → 1+133=134
-        check("T11e2 昨日用量补账后展示余额=134", gift_bal() == 134, gift_bal())
+        # v2.11.30：人工校准（独立窗口后端）——单独修正三项，余额 = 昨日剩余+今日返还-今日使用
+        r = httpx.post(f"{BASE}/admin/gift/calibrate", headers=ADMIN,
+                       json={"model_id": "zzbt/echo-gift", "yesterday_leftover": 400,
+                             "grant_today": 133, "usage_today": 100})
+        check("T11e2 人工校准接口生效(余额=400+133-100=433)",
+              r.status_code == 200 and r.json().get("balance") == 433, r.text[:80])
+        r = chat("zzgift", max_tokens=500)
+        check("T11e3 校准后(今日耗100<上限266)调用成功", r.status_code == 200, r.status_code)
+        check("T11e4 校准后余额=433-133=300", gift_bal() == 300, gift_bal())
+        r = httpx.get(f"{BASE}/stats", headers=ADMIN, timeout=15)
         row = next((x for x in r.json().get("models", []) if x.get("id") == "zzbt/echo-gift"), {})
-        check("T11f stats含gift_balance展示", row.get("gift_refund") is True and row.get("gift_balance") == 134, row.get("gift_balance"))
+        check("T11f stats含gift_balance/昨日剩余展示",
+              row.get("gift_refund") is True and row.get("gift_balance") == 300
+              and row.get("gift_yesterday_leftover") == 400,
+              {k: row.get(k) for k in ("gift_balance", "gift_yesterday_leftover")})
 
     finally:
         try:
