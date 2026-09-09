@@ -414,6 +414,10 @@ async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "", gr
                              (logical, model_name))
             await _commit(db)
             return balance
+        if day >= target:
+            # 锚点不早于逻辑日（含人工校准写入的本窗口/未来锚点）：本窗口已发放，不再补账
+            # （防止 14:00 补账对人工校准值二次发放）
+            return balance
         steps = 0
         pre = balance
         while day < target and steps < 400:  # 逐日补账；上限防脏数据拖垮预检
@@ -432,6 +436,50 @@ async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "", gr
                          (balance, logical, balance, last_grant_amount, model_name))
         await _commit(db)
         return balance
+
+
+async def get_gift_state(model_name: str):
+    """读取 gift_state 原始行（人工校准用）。"""
+    async with _lock:
+        db = await _get_conn()
+        cursor = await db.execute(
+            "SELECT balance, window_start_balance, last_grant_amount, last_grant_date FROM gift_state WHERE model_name = ?",
+            (model_name,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {"balance": int(row[0] or 0), "window_start_balance": int(row[1] or 0),
+                "last_grant_amount": int(row[2] or 0), "last_grant_date": row[3] or ""}
+
+
+async def set_gift_state(model_name: str, balance: int, window_start_balance: int, last_grant_amount: int, last_grant_date: str):
+    """整行写回 gift_state（人工校准用）。"""
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            "UPDATE gift_state SET balance=?, window_start_balance=?, last_grant_amount=?, last_grant_date=? WHERE model_name=?",
+            (balance, window_start_balance, last_grant_amount, last_grant_date, model_name))
+        await _commit(db)
+
+
+async def set_model_daily_usage(model_name: str, tokens: int):
+    """人工校准：直接改写今日（自然日）用量。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    async with _lock:
+        db = await _get_conn()
+        await db.execute(
+            """INSERT INTO model_daily_stats (model_name, date, request_count, total_tokens)
+               VALUES (?, ?, 0, ?)
+               ON CONFLICT(model_name, date) DO UPDATE SET total_tokens = ?""",
+            (model_name, date, tokens, tokens))
+        await _commit(db)
+
+
+def gift_logical_today(refresh_time: str = "") -> str:
+    """当前逻辑日（锚定模型 refresh_time，人工校准写账本时使用，避免与补账锚点错位）。"""
+    return _logical_today(time.time(), refresh_time)
 
 
 async def get_gift_last_grant_amount(model_name: str) -> int:

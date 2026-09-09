@@ -155,6 +155,59 @@ async def get_reasoning(_=Depends(verify_admin)):
     }
 
 
+@router.post("/gift/calibrate")
+async def gift_calibrate(request: Request, _=Depends(verify_admin)):
+    """余额返还制人工校准：单独修正 昨日剩余量 / 今日返还量 / 今日使用量（未提供项保持现值）。
+
+    语义：窗口总额池 = 昨日剩余 + 今日返还；余额 = 总额池 - 今日使用（下限 0）。
+    同步改写 model_daily_stats 今日 total_tokens，并失效该模型的配额预检缓存。"""
+    body = await request.json()
+    model_id = body.get("model_id")
+    config = load_config()
+    m = next((x for x in config.get("models", []) if x.get("id") == model_id), None)
+    if not m or m.get("token_type") != "gift":
+        raise HTTPException(status_code=404, detail="模型不存在或非余额返还制")
+
+    cap = int(m.get("daily_token_limit", 0) or 0)
+    grant_cap = int(m.get("gift_grant_cap", 0) or 0) or 5_000_000
+    rt = m.get("refresh_time", "")
+
+    # 先走一次读路径（惰性补账到当前逻辑日），保证账本为最新
+    await db.get_gift_balance(model_id, cap, rt, grant_cap)
+    state = await db.get_gift_state(model_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="账本尚未初始化（该模型还没有调用记录）")
+
+    st = await db.get_model_daily_stats(model_id)
+    u_cur = int(st.get("total_tokens", 0) or 0)
+    g_cur = int(state.get("last_grant_amount", 0) or 0)
+    w_cur = int(state.get("window_start_balance", 0) or 0)
+    y_cur = max(0, w_cur - g_cur)  # 昨日剩余 = 窗口池 - 今日已补
+
+    y = body.get("yesterday_leftover")
+    g = body.get("grant_today")
+    u = body.get("usage_today")
+    y_new = int(y) if y is not None else y_cur
+    g_new = int(g) if g is not None else g_cur
+    u_new = int(u) if u is not None else u_cur
+    for name, v in (("yesterday_leftover", y_new), ("grant_today", g_new), ("usage_today", u_new)):
+        if v < 0:
+            raise HTTPException(status_code=400, detail=f"{name} 不能为负数")
+
+    new_pool = y_new + g_new
+    new_balance = max(0, new_pool - u_new)
+    await db.set_gift_state(model_id, new_balance, new_pool, g_new, db.gift_logical_today(rt))
+    if u is not None:
+        await db.set_model_daily_usage(model_id, u_new)
+    try:
+        from main import pool as _pool
+        _pool._invalidate_quota_cache(model_id)
+    except Exception:
+        pass
+    return {"model_id": model_id, "yesterday_leftover": y_new, "grant_today": g_new,
+            "usage_today": u_new, "balance": new_balance}
+
+
 @router.post("/reasoning/probe")
 async def probe_reasoning_api(request: Request, _=Depends(verify_admin)):
     """强制重测单个模型的思考参数（后台执行，结果只写探测缓存，不改 reasoning_map）。"""

@@ -444,18 +444,23 @@ class ModelPool:
             else:
                 entry.rolling5h_window_start = None
         elif entry.token_type == "gift" and entry.daily_token_limit > 0:
-            # 余额返还制预检（v2.11.26）：上限 = min(今日总额池[昨日剩余+今日已补], 用户设置上限)，
-            # 今日自然日消耗达到上限即拒绝。账本余额按固定 500 万/日返还规则逐日结算（get_gift_balance），
-            # 用户设置上限语义 = 今天最多用多少（建议 ≤ 火山每日采集额度 5M 的 80% 防意外）。
-            await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time, entry.gift_grant_cap)
-            pool = await db.get_gift_window_start(entry.id)
-            limit = min(pool, entry.daily_token_limit)
+            # 余额返还制预检（v2.11.28）：可用量 = 账本余额（若现在停用的剩余量，逐日按
+            # min(昨日用量, 返还上限) 补账、实时扣减）。余额 ≤ 0 即拒绝——直到 refresh_time
+            # 补账恢复；用户设置上限 = 今天最多用多少，同样拒绝。
+            # 注意：不能用 window_start（跨天后是旧窗口的池，会放行已耗尽模型）。
+            balance = await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time, entry.gift_grant_cap)
+            if balance <= 0:
+                return False, "quota_exhausted", {
+                    "gift_balance": 0,
+                    "limit": entry.daily_token_limit,
+                    "reason_detail": "赠还余额已耗尽（补账时刻恢复）",
+                }
             used = int((await db.get_model_daily_stats(entry.id)).get("total_tokens", 0) or 0)
-            if used >= limit:
+            if used >= entry.daily_token_limit:
                 return False, "quota_exhausted", {
                     "used": used,
-                    "limit": limit,
-                    "reason_detail": "今日可用量已耗尽（池与用户上限取小）",
+                    "limit": entry.daily_token_limit,
+                    "reason_detail": "今日消耗达用户设置上限",
                 }
         elif entry.daily_token_limit > 0:
             used = await db.get_daily_usage(entry.id)

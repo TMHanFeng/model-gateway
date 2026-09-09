@@ -753,6 +753,20 @@ select { max-width: 100%; }
 <div id="toast"></div>
 
 <!-- ════════ 模态：模型 ════════ -->
+<div class="overlay" id="overlay-giftcal">
+  <div class="modal" style="max-width:560px;width:calc(100vw - 32px)">
+    <h3>🛠 余额返还制人工校准</h3>
+    <div class="card-sub" style="margin-bottom:16px">模型：<b id="giftcal-model"></b>。对齐火山控制台实际值；<b>留空的项不修改</b>。校准后：余额 = 昨日剩余 + 今日返还 − 今日使用。</div>
+    <div class="fg"><label>昨日剩余量（当前 <span id="cal-y-cur">?</span>）</label><input type="number" id="cal-yesterday" placeholder="留空 = 不修改"></div>
+    <div class="fg"><label>今日返还量（昨日使用量）<span class="hint" style="margin-left:6px">当前 <span id="cal-g-cur">?</span></span></label><input type="number" id="cal-grant" placeholder="留空 = 不修改"></div>
+    <div class="fg"><label>今日使用量（当前 <span id="cal-u-cur">?</span>）</label><input type="number" id="cal-usage" placeholder="留空 = 不修改"></div>
+    <div class="hint" id="gift-cal-status" style="margin-top:10px"></div>
+    <div style="display:flex;gap:8px;margin-top:18px">
+      <button type="button" class="btn btn-amber" style="flex:1" onclick="applyGiftCalibrate()">✓ 应用校准</button>
+      <button type="button" class="btn btn-ghost" style="flex:1" onclick="closeModal('overlay-giftcal')">取消</button>
+    </div>
+  </div>
+</div>
 <div class="overlay" id="overlay-model">
   <div class="modal">
     <h3 id="model-modal-title">添加模型</h3>
@@ -790,7 +804,14 @@ select { max-width: 100%; }
       <div class="f2">
         <div class="fg"><label>超时时间（秒，0=无限等待）</label><input name="timeout_seconds" type="number" value="120" min="0"></div>
         <div class="fg" id="daily-fields"><label id="refresh-label">每日刷新时间（HH:MM，北京时间）</label><input name="refresh_time" placeholder="00:00"></div>
-      <div class="fg hidden" id="grant-cap-fields"><label id="grant-cap-label">每日返还上限（火山"每日采集额度"，超出不返还）</label><input name="gift_grant_cap" type="number" min="0" step="100000" placeholder="5000000"></div>
+      </div>
+      <div id="gift-fields" class="hidden">
+        <div class="form-sec">余额返还制</div>
+        <div class="f2">
+          <div class="fg"><label>每日返还上限（火山"每日采集额度"，超出不返还）</label><input name="gift_grant_cap" type="number" min="0" step="100000" placeholder="5000000"></div>
+          <div class="fg"><label>人工校准（独立窗口 · 对齐火山控制台实际值）</label><button type="button" class="btn btn-ghost" style="width:100%;justify-content:center" onclick="showGiftCalibrate()">🛠 打开人工校准窗口</button><div class="hint" style="margin-top:4px">逐项填写，未填项保持不变，防误改</div></div>
+        </div>
+      </div>
       </div>
       <div id="once-fields" class="hidden">
         <div class="f3">
@@ -1362,8 +1383,8 @@ function onTokenTypeChange() {
   // 条件显隐（问题16）：刷新时间/限额字段 daily 与 gift（余额返还制）都需要；one_time 隐藏
   const _df = document.getElementById('daily-fields');
   if (_df) _df.classList.toggle('hidden', ttype !== 'daily' && ttype !== 'gift');
-  const _gc = document.getElementById('grant-cap-fields');
-  if (_gc) _gc.classList.toggle('hidden', ttype !== 'gift');  // 每日返还上限：仅余额返还制显示
+  const _gf = document.getElementById('gift-fields');
+  if (_gf) _gf.classList.toggle('hidden', ttype !== 'gift');  // 余额返还制区块（返还上限+人工校准入口）：仅 gift 显示
   const _lf = document.getElementById('limit-fields');
   if (_lf) _lf.classList.toggle('hidden', ttype === 'one_time');
   updateGiftHint();
@@ -1383,6 +1404,40 @@ function onProviderSelect() {
   document.getElementById('inherit-note').classList.toggle('hidden', !pid);
   document.getElementById('f-base-url').required = !pid;
   document.getElementById('f-api-key').required = !pid;
+}
+function showGiftCalibrate() {
+  if (!editingId) return;
+  document.getElementById('giftcal-model').textContent = editingId;
+  ['cal-yesterday', 'cal-grant', 'cal-usage'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  document.getElementById('gift-cal-status').textContent = '正在读取当前值…';
+  fillGiftCalibrate();
+  document.getElementById('overlay-giftcal').classList.add('show');
+}
+async function fillGiftCalibrate() {
+  const d = await api('/stats');
+  const m = d && editingId ? (d.models || []).find(x => x.id === editingId) : null;
+  const status = document.getElementById('gift-cal-status');
+  if (!m || !m.gift_refund) { if (status) status.textContent = '暂无账本数据'; return; }
+  document.getElementById('cal-y-cur').textContent = '当前 ' + (m.gift_yesterday_leftover ?? 0).toLocaleString();
+  document.getElementById('cal-g-cur').textContent = '当前 ' + (m.gift_last_grant_amount ?? 0).toLocaleString();
+  document.getElementById('cal-u-cur').textContent = '当前 ' + (m.gift_usage_today ?? 0).toLocaleString();
+  if (status) status.textContent = '';
+}
+async function applyGiftCalibrate() {
+  const body = { model_id: editingId };
+  const y = document.getElementById('cal-yesterday').value.trim();
+  const g = document.getElementById('cal-grant').value.trim();
+  const u = document.getElementById('cal-usage').value.trim();
+  if (y !== '') body.yesterday_leftover = parseInt(y) || 0;
+  if (g !== '') body.grant_today = parseInt(g) || 0;
+  if (u !== '') body.usage_today = parseInt(u) || 0;
+  if (Object.keys(body).length === 1) { toast('请至少填写一项', true); return; }
+  const r = await api('/admin/gift/calibrate', { method: 'POST', body: JSON.stringify(body) });
+  if (r) {
+    await fillGiftCalibrate();
+    toast('人工校准已完成，余额 ' + (r.balance ?? 0).toLocaleString());
+    closeModal('overlay-giftcal');
+  }
 }
 function showAdd() {
   editingId = null;
@@ -2216,8 +2271,8 @@ async function loadStats() {
     return { m, used, limit, unit, numsTitle, limitText, pct, cls, pctText, billing, typeBadge, freeBadge, refresh, _used: used, _limit: limit, _wused: wUsed };
   }).sort((a, b) => {
     // 剩余百分比越少越靠前；不限量（未设限额）固定在最后
-    const ar = a._limit > 0 ? Math.max(0, 100 - Math.min(100, (a._wused || 0) / a._limit * 100)) : Infinity;
-    const br = b._limit > 0 ? Math.max(0, 100 - Math.min(100, (b._wused || 0) / b._limit * 100)) : Infinity;
+    const ar = a._limit > 0 ? Math.max(0, 100 - Math.min(100, (a._wused || 0) / a._limit * 100)) : (a.m.token_type === 'gift' ? -Infinity : Infinity);
+    const br = b._limit > 0 ? Math.max(0, 100 - Math.min(100, (b._wused || 0) / b._limit * 100)) : (b.m.token_type === 'gift' ? -Infinity : Infinity);
     return ar - br;
   });
 
