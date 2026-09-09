@@ -1648,12 +1648,11 @@ class ModelPool:
             elif entry.token_type == "gift" and entry.daily_token_limit > 0:
                 # 余额返还制统计口径（用户确认）：
                 # 使用量 = 今日自然日消耗（真实值，不随补账窗口变化、不被上限钳制）；
-                # 分母（当前可用量）分两段——补账时刻前 = 上一日剩余（0 点余额 = 余额+今日已耗），
-                # 补账时刻后 = 剩余 + 补账（即补账后余额，window_start_balance）；
-                # 预计补账 = min(最近一个自然日消耗, 上限)——14:00 前指今日将到账的（按昨日），
-                # 14:00 后指明日将到账的（按今日已耗）。
+                # 当前可用总额（分母候选）分两段——补账时刻前 = 昨日剩余，补账时刻后 = 昨日剩余 + 今日已补，
+                # 计费上限 = min(当前可用总额, 用户设置上限)；预检同源（balance≤0 或 今日消耗≥上限 即拒）。
+                # 预计补账 = min(最近一个自然日消耗, 返还上限)——14:00 前指今日将到账的（按昨日），
+                # 14:00 后指明日将到账的（按今日已耗）。人工校准值持久于 gift_state/自然日统计，优先于系统重算。
                 balance = await db.get_gift_balance(entry.id, entry.daily_token_limit, entry.refresh_time, entry.gift_grant_cap)
-                wstart = await db.get_gift_window_start(entry.id)
                 from datetime import datetime, timedelta
                 from zoneinfo import ZoneInfo as _ZI
                 now_dt = datetime.now(_ZI("Asia/Shanghai"))
@@ -1668,31 +1667,21 @@ class ModelPool:
                     hh, mm = 0, 0
                 grant_dt = now_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
                 after_grant = now_dt >= grant_dt
-                last_grant_amount = await db.get_gift_last_grant_amount(entry.id)
-                pending = min((today_usage if after_grant else yday_usage), entry.gift_grant_cap)  # 补账量只受"每日采集额度"限制，不受用户本地上限钳制
-                s["gift_refund"] = True
-                s["gift_grant_cap"] = entry.gift_grant_cap  # 每日返还上限（编辑界面可填）
-                s["gift_balance"] = max(0, balance)       # 当前可用余额（= 分母/总额）
-                s["gift_available"] = max(0, balance)     # 进度条分母：14:00 补账后跳增（剩余+补账）
-                s["gift_usage_today"] = today_usage       # 大数字：今日自然日真实消耗（不被上限钳制）
-                s["gift_pending_grant"] = pending         # 右下角：预计补账额度（下次到账）
-                s["gift_last_grant_amount"] = last_grant_amount  # 今日 14:00 已到账额度
                 state = await db.get_gift_state(entry.id)
                 y_left = int(state.get("yesterday_leftover", 0) or 0)
                 g_amt = int(state.get("last_grant_amount", 0) or 0)
-                after_grant = now_dt >= grant_dt
-                pool = y_left + (g_amt if after_grant else 0)  # 今日总额池（昨日剩余+今日已补）
-                pending = min((today_usage if after_grant else yday_usage), entry.gift_grant_cap)
+                pool = y_left + (g_amt if after_grant else 0)  # 今日总额池（14:00 前=昨日剩余，后=昨日剩余+今日已补）
+                pending = min((today_usage if after_grant else yday_usage), entry.gift_grant_cap)  # 补账量只受"每日采集额度"限制，不受用户本地上限钳制
                 s["gift_refund"] = True
                 s["gift_grant_cap"] = entry.gift_grant_cap  # 每日返还上限（编辑界面可填）
                 s["gift_balance"] = max(0, balance)       # 剩余（若现在停用）
-                s["gift_pool"] = pool                     # 今日总额池（分母候选）
+                s["gift_pool"] = pool                     # 当前可用总额（ⓘ 展示 + 分母候选）
                 s["gift_yesterday_leftover"] = y_left     # 昨日剩余（0 点快照，校准同步）
-                s["gift_last_grant_amount"] = g_amt if after_grant else 0  # 今日已到账
+                s["gift_last_grant_amount"] = g_amt if after_grant else 0  # 今日已到账（14:00 前恒 0）
                 s["gift_usage_today"] = today_usage       # 大数字：今日自然日真实消耗（不被上限钳制）
                 s["gift_pending_grant"] = pending         # 右下角：预计补账额度（下次到账）
                 s["gift_cal_yesterday"] = y_left
-                s["gift_cal_grant"] = g_amt
+                s["gift_cal_grant"] = g_amt if after_grant else pending  # 校准注记：14:00 前显示预计到账（含校准改写值），后显示已到账
                 s["gift_cal_usage"] = today_usage
                 s["gift_yesterday_usage"] = yday_usage
                 s["daily_used_tokens"] = today_usage

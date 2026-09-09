@@ -159,6 +159,7 @@ async def get_reasoning(_=Depends(verify_admin)):
 async def gift_calibrate(request: Request, _=Depends(verify_admin)):
     """余额返还制人工校准：单独修正 昨日剩余量 / 今日返还量(=昨日使用量) / 今日使用量（未提供项保持现值）。
 
+    校准值同步改写对应自然日统计（人工校准优先于系统统计，自校准时刻起持续生效，不随跨日重算消失）。
     时间感知：
     - 到账时刻（refresh_time，如 14:00）前校准：今日返还未到账，不计入余额（余额 = 昨日剩余 - 今日使用）；
       昨日自然日消耗改写为校准值，14:00 到账时按其发放。
@@ -210,14 +211,19 @@ async def gift_calibrate(request: Request, _=Depends(verify_admin)):
     if g is not None:
         # 校准昨日使用量 → 改写昨日自然日统计（ⓘ 展示与到账时刻的发放基数同步）
         await db.set_model_daily_usage(model_id, g_new, yday)
+    if u is not None:
+        # 校准今日使用量 → 同步改写今日自然日统计（ⓘ 今日已采、明日发放基数、上限预检同源）
+        await db.set_model_daily_usage(model_id, u_new, today)
 
     # 到账时刻前：今日返还未到账不计入余额；到账后：余额 = 昨日剩余 + 今日返还 - 今日使用
     if after_grant:
         new_balance = max(0, y_new + g_new - u_new)
     else:
         new_balance = max(0, y_new - u_new)
+    # last_grant_amount 始终写校准值：14:00 前校准的返还量在弹窗注记/账本中即刻可见，
+    # 到账时刻 get_gift_balance 按昨日统计（已改写为同一数值）发放，两处自然一致
     await db.set_gift_state(model_id, new_balance, y_new + (g_new if after_grant else 0),
-                            g_new if after_grant else g_cur, today, y_new,
+                            g_new, today, y_new,
                             today if after_grant else None, today)
     try:
         from main import pool as _pool

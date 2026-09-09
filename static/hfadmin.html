@@ -756,7 +756,7 @@ select { max-width: 100%; }
 <div class="overlay" id="overlay-giftcal" style="z-index:120">
   <div class="modal" style="max-width:560px;width:calc(100vw - 32px)">
     <h3>🛠 余额返还制人工校准</h3>
-    <div class="card-sub" style="margin-bottom:16px">模型：<b id="giftcal-model"></b>。对齐火山控制台实际值；<b>留空的项不修改</b>。余额 = 昨日剩余 − 今日使用（14:00 后再加今日返还）；<b>今日返还量</b>即昨日使用量的校准值，将作为 14:00 的发放数额。</div>
+    <div class="card-sub" style="margin-bottom:16px">模型：<b id="giftcal-model"></b>。对齐火山控制台实际值；<b>留空的项不修改</b>。余额 = 昨日剩余 − 今日使用（14:00 后再加今日返还）；<b>今日返还量</b>即昨日使用量的校准值，将作为 14:00 的发放数额；<b>今日使用量</b>校准会同步今日已采与明日发放基数。校准后自当刻起按新值计算，不随跨日重算消失。</div>
     <div class="fg"><label>昨日剩余量（当前 <span id="cal-y-cur">?</span>）</label><input type="number" id="cal-yesterday" placeholder="留空 = 不修改"></div>
     <div class="fg"><label>今日返还量（昨日使用量）<span class="hint" style="margin-left:6px">当前 <span id="cal-g-cur">?</span></span></label><input type="number" id="cal-grant" placeholder="留空 = 不修改"></div>
     <div class="fg"><label>今日使用量（当前 <span id="cal-u-cur">?</span>）</label><input type="number" id="cal-usage" placeholder="留空 = 不修改"></div>
@@ -1436,6 +1436,7 @@ async function applyGiftCalibrate() {
     await fillGiftCalibrate();
     toast('人工校准已完成，余额 ' + (r.balance ?? 0).toLocaleString());
     closeModal('overlay-giftcal');
+    loadStats();   // 立即刷新统计卡片，校准值即刻可见（不等下次轮询）
   }
 }
 function showAdd() {
@@ -2225,6 +2226,9 @@ async function loadStats() {
     const windowModel = m.token_type === 'daily' && m.refresh_time && !['00:00', '0:00', '24:00'].includes((m.refresh_time || '').trim());
     const isGift = !!m.gift_refund;
               const giftPosted = (() => { const p = ((m.refresh_time || '00:00') + ':00').split(':').map(Number); const n = new Date(); return n.getHours() * 60 + n.getMinutes() >= (p[0] || 0) * 60 + (p[1] || 0); })();
+    // 当前可用总额：14:00 前=昨日剩余，后=昨日剩余+今日已补；计费上限=min(总额, 用户设置上限)（ⓘ 与分母同源，任何维度都算）
+    const giftPool = isGift ? (m.gift_yesterday_leftover ?? 0) + (giftPosted ? (m.gift_last_grant_amount ?? 0) : 0) : 0;
+    const giftLimit = isGift ? Math.min(giftPool, m.daily_token_limit || Infinity) : 0;
     let used = wUsed;
     let limit = m.daily_token_limit || m.max_tokens || 0;
     let unit = m.unit || 'tokens';
@@ -2235,9 +2239,7 @@ async function loadStats() {
     else if (isBilling && isGift) {
       // 分母=今日可用总额（恒定，仅到账时刻跳增）：min(昨日剩余 + 今日已补, 用户设置上限)
       // 用户上限语义 = 今天最多用多少（建议设为火山每日采集额度的 80% 防意外），两者取小
-      const _pool = (m.gift_yesterday_leftover ?? 0) + (giftPosted ? (m.gift_last_grant_amount ?? 0) : 0);
-      const _cap = m.daily_token_limit || Infinity;
-      limit = Math.min(_pool, _cap);
+      limit = giftLimit;
       used = m.gift_usage_today ?? wUsed;         // 使用量=今日自然日消耗（真实，不随窗口变化）
       limitText = limit.toLocaleString();       // 分母显示同步为今日可用总额
       numsTitle = '使用量=今日自然日消耗；分母=min(昨日剩余+今日已补, 用户设置上限)，两者取小';
@@ -2258,10 +2260,10 @@ async function loadStats() {
       : m.token_type === 'rolling_5h' ? '5h窗口 · 剩 ' + fmtDur(m.window_remaining_sec)
       : isGift ? (giftPosted
         ? ('已补 ' + (m.gift_last_grant_amount ?? 0).toLocaleString()
-          + ' <span class="i-tip" data-tip="今日 ' + (m.refresh_time || '') + ' 已到账 ' + (m.gift_last_grant_amount ?? 0).toLocaleString() + '&#10;预计下次补账：' + (m.gift_pending_grant ?? 0).toLocaleString() + '（明日 ' + (m.refresh_time || '') + '，按今日消耗）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
+          + ' <span class="i-tip" data-tip="今日 ' + (m.refresh_time || '') + ' 已到账 ' + (m.gift_last_grant_amount ?? 0).toLocaleString() + '&#10;预计下次补账：' + (m.gift_pending_grant ?? 0).toLocaleString() + '（明日 ' + (m.refresh_time || '') + '，按今日消耗）&#10;当前可用总额：' + giftPool.toLocaleString() + '（昨日剩余 ' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + ' + 今日已补 ' + (m.gift_last_grant_amount ?? 0).toLocaleString() + '）&#10;今日计费上限（与用户上限取小）：' + giftLimit.toLocaleString() + '&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
           + '&#10;当前可用余额：' + (m.gift_balance ?? 0).toLocaleString() + '&#10;上一天剩余（昨日 24:00）：' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok&#10;今日已采：' + Math.min(m.today_tokens || 0, m.gift_grant_cap || 5000000).toLocaleString() + ' / ' + (m.gift_grant_cap || 5000000).toLocaleString() + '（超出不返还）">ⓘ</span>')
         : ('预计 ' + (m.refresh_time || '到账时刻') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString()
-          + ' <span class="i-tip" data-tip="预计到账：' + (m.refresh_time || '') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString() + '（按昨日自然日消耗，不超过上限）&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
+          + ' <span class="i-tip" data-tip="预计到账：' + (m.refresh_time || '') + ' 补 ' + (m.gift_pending_grant ?? 0).toLocaleString() + '（按昨日自然日消耗，不超过上限）&#10;当前可用总额：' + giftPool.toLocaleString() + '（昨日剩余；预计 ' + (m.refresh_time || '') + ' 后为 ' + (giftPool + (m.gift_pending_grant ?? 0)).toLocaleString() + '）&#10;今日计费上限（与用户上限取小）：' + giftLimit.toLocaleString() + '&#10;用户设置上限（封顶）：' + (m.daily_token_limit || 0).toLocaleString()
           + '&#10;当前可用余额：' + (m.gift_balance ?? 0).toLocaleString() + '&#10;上一天剩余（昨日 24:00）：' + (m.gift_yesterday_leftover ?? 0).toLocaleString() + '&#10;今日 / 昨日自然日消耗：' + (m.today_tokens || 0).toLocaleString() + ' / ' + (m.gift_yesterday_usage ?? 0).toLocaleString() + ' tok&#10;今日已采：' + Math.min(m.today_tokens || 0, m.gift_grant_cap || 5000000).toLocaleString() + ' / ' + (m.gift_grant_cap || 5000000).toLocaleString() + '（超出不返还）">ⓘ</span>'))
       : (m.refresh_time ? '刷新 ' + m.refresh_time : '—');
     if (windowModel && !isGift && isBilling && (m.today_tokens || 0) > 0) {

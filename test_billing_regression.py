@@ -373,6 +373,14 @@ def main():
         print("诊断[T11e2后] stats:", {k: _gm.get(k) for k in ("gift_balance", "gift_yesterday_leftover", "gift_last_grant_amount", "gift_usage_today")})
         print("诊断[T11e2后] gift_state:", DB.execute("SELECT balance, yesterday_leftover, last_grant_amount, grant_date, snapshot_date FROM gift_state WHERE model_name='zzbt/echo-gift'").fetchone())
         print("诊断[T11e2后] usage:", DB.execute("SELECT date, total_tokens FROM model_daily_stats WHERE model_name='zzbt/echo-gift' ORDER BY date DESC LIMIT 2").fetchall())
+        # v2.11.34：人工校准优先于系统统计——校准值同步改写自然日统计并即刻可见
+        _tdy = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        _urow = DB.execute("SELECT total_tokens FROM model_daily_stats WHERE model_name='zzbt/echo-gift' AND date=?", (_tdy,)).fetchone()
+        check("T11e2b 校准今日使用量同步改写今日统计(已采/明日发放基数=100)",
+              _urow is not None and _urow["total_tokens"] == 100, dict(_urow) if _urow else None)
+        check("T11e2c 校准注记即时可见(gift_cal_grant=133/gift_cal_usage=100)",
+              _gm.get("gift_cal_grant") == 133 and _gm.get("gift_cal_usage") == 100,
+              {k: _gm.get(k) for k in ("gift_cal_grant", "gift_cal_usage")})
         r = chat("zzgift", max_tokens=500)
         check("T11e3 校准后(今日耗100<上限266)调用成功", r.status_code == 200, r.status_code)
         check("T11e4 校准后余额=433-133=300", gift_bal() == 300, gift_bal())
@@ -382,6 +390,12 @@ def main():
               row.get("gift_refund") is True and row.get("gift_balance") == 300
               and row.get("gift_yesterday_leftover") == 400,
               {k: row.get(k) for k in ("gift_balance", "gift_yesterday_leftover")})
+        # v2.11.34：真实消耗叠加在校准基数上（自校准时刻起按新值累计，不重算消失）；总额池字段
+        check("T11g 校准基数上叠加真实消耗(今日统计=100+133=233)",
+              row.get("gift_usage_today") == 233 and row.get("today_tokens") == 233,
+              {k: row.get(k) for k in ("gift_usage_today", "today_tokens")})
+        check("T11h 当前可用总额池=昨日剩余+今日已补(400+133=533)",
+              row.get("gift_pool") == 533, row.get("gift_pool"))
 
     finally:
         try:
