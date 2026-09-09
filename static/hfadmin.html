@@ -753,7 +753,7 @@ select { max-width: 100%; }
 <div id="toast"></div>
 
 <!-- ════════ 模态：模型 ════════ -->
-<div class="overlay" id="overlay-giftcal">
+<div class="overlay" id="overlay-giftcal" style="z-index:120">
   <div class="modal" style="max-width:560px;width:calc(100vw - 32px)">
     <h3>🛠 余额返还制人工校准</h3>
     <div class="card-sub" style="margin-bottom:16px">模型：<b id="giftcal-model"></b>。对齐火山控制台实际值；<b>留空的项不修改</b>。校准后：余额 = 昨日剩余 + 今日返还 − 今日使用。</div>
@@ -811,7 +811,6 @@ select { max-width: 100%; }
           <div class="fg"><label>每日返还上限（火山"每日采集额度"，超出不返还）</label><input name="gift_grant_cap" type="number" min="0" step="100000" placeholder="5000000"></div>
           <div class="fg"><label>人工校准（独立窗口 · 对齐火山控制台实际值）</label><button type="button" class="btn btn-ghost" style="width:100%;justify-content:center" onclick="showGiftCalibrate()">🛠 打开人工校准窗口</button><div class="hint" style="margin-top:4px">逐项填写，未填项保持不变，防误改</div></div>
         </div>
-      </div>
       </div>
       <div id="once-fields" class="hidden">
         <div class="f3">
@@ -1418,9 +1417,9 @@ async function fillGiftCalibrate() {
   const m = d && editingId ? (d.models || []).find(x => x.id === editingId) : null;
   const status = document.getElementById('gift-cal-status');
   if (!m || !m.gift_refund) { if (status) status.textContent = '暂无账本数据'; return; }
-  document.getElementById('cal-y-cur').textContent = '当前 ' + (m.gift_yesterday_leftover ?? 0).toLocaleString();
-  document.getElementById('cal-g-cur').textContent = '当前 ' + (m.gift_last_grant_amount ?? 0).toLocaleString();
-  document.getElementById('cal-u-cur').textContent = '当前 ' + (m.gift_usage_today ?? 0).toLocaleString();
+  document.getElementById('cal-y-cur').textContent = (m.gift_cal_yesterday ?? 0).toLocaleString();
+  document.getElementById('cal-g-cur').textContent = (m.gift_cal_grant ?? 0).toLocaleString();
+  document.getElementById('cal-u-cur').textContent = (m.gift_cal_usage ?? 0).toLocaleString();
   if (status) status.textContent = '';
 }
 async function applyGiftCalibrate() {

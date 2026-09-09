@@ -1678,6 +1678,10 @@ class ModelPool:
                 s["gift_pending_grant"] = pending         # 右下角：预计补账额度（下次到账）
                 s["gift_last_grant_amount"] = last_grant_amount  # 今日 14:00 已到账额度
                 s["gift_yesterday_leftover"] = max(0, balance + today_usage - (last_grant_amount if after_grant else 0))  # 上一天剩余（昨日 24:00）
+                # 人工校准三现值（精确口径）：昨日剩余 = 窗口池 - 今日已补；已补 = 最近发放；今日耗 = 自然日统计
+                s["gift_cal_yesterday"] = max(0, wstart - last_grant_amount)
+                s["gift_cal_grant"] = last_grant_amount
+                s["gift_cal_usage"] = today_usage
                 s["gift_yesterday_usage"] = yday_usage
                 s["daily_used_tokens"] = today_usage
                 s["daily_token_limit"] = entry.daily_token_limit

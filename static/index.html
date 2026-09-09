@@ -493,7 +493,7 @@ body {
   </div>
 </div>
 
-<div class="overlay" id="overlay-giftcal">
+<div class="overlay" id="overlay-giftcal" style="z-index:120">
   <div class="modal" style="width:560px">
     <h3>🛠 余额返还制人工校准</h3>
     <div class="hint" style="margin-bottom:14px">模型：<b id="giftcal-model"></b>。对齐火山控制台实际值；<b>留空的项不修改</b>。校准后：余额 = 昨日剩余 + 今日返还 − 今日使用。</div>
@@ -1871,9 +1871,9 @@ async function fillGiftCalibrate() {
   const m = d && editingId ? (d.models || []).find(x => x.id === editingId) : null;
   const status = document.getElementById('gift-cal-status');
   if (!m || !m.gift_refund) { if (status) status.textContent = '暂无账本数据'; return; }
-  document.getElementById('cal-y-cur').textContent = '当前 ' + (m.gift_yesterday_leftover ?? 0).toLocaleString();
-  document.getElementById('cal-g-cur').textContent = '当前 ' + (m.gift_last_grant_amount ?? 0).toLocaleString();
-  document.getElementById('cal-u-cur').textContent = '当前 ' + (m.gift_usage_today ?? 0).toLocaleString();
+  document.getElementById('cal-y-cur').textContent = (m.gift_cal_yesterday ?? 0).toLocaleString();
+  document.getElementById('cal-g-cur').textContent = (m.gift_cal_grant ?? 0).toLocaleString();
+  document.getElementById('cal-u-cur').textContent = (m.gift_cal_usage ?? 0).toLocaleString();
   if (status) status.textContent = '';
 }
 async function applyGiftCalibrate() {
