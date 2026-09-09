@@ -366,6 +366,13 @@ def main():
                              "grant_today": 133, "usage_today": 100})
         check("T11e2 人工校准接口生效(余额=400+133-100=433)",
               r.status_code == 200 and r.json().get("balance") == 433, r.text[:80])
+        # 诊断转储（临时）
+        import json as _json
+        _st = httpx.get(f"{BASE}/stats", headers=ADMIN, timeout=15).json()
+        _gm = next((x for x in _st.get("models", []) if x.get("id") == "zzbt/echo-gift"), {})
+        print("诊断[T11e2后] stats:", {k: _gm.get(k) for k in ("gift_balance", "gift_yesterday_leftover", "gift_last_grant_amount", "gift_usage_today")})
+        print("诊断[T11e2后] gift_state:", DB.execute("SELECT balance, yesterday_leftover, last_grant_amount, grant_date, snapshot_date FROM gift_state WHERE model_name='zzbt/echo-gift'").fetchone())
+        print("诊断[T11e2后] usage:", DB.execute("SELECT date, total_tokens FROM model_daily_stats WHERE model_name='zzbt/echo-gift' ORDER BY date DESC LIMIT 2").fetchall())
         r = chat("zzgift", max_tokens=500)
         check("T11e3 校准后(今日耗100<上限266)调用成功", r.status_code == 200, r.status_code)
         check("T11e4 校准后余额=433-133=300", gift_bal() == 300, gift_bal())

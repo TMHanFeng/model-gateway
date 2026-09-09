@@ -1677,10 +1677,22 @@ class ModelPool:
                 s["gift_usage_today"] = today_usage       # 大数字：今日自然日真实消耗（不被上限钳制）
                 s["gift_pending_grant"] = pending         # 右下角：预计补账额度（下次到账）
                 s["gift_last_grant_amount"] = last_grant_amount  # 今日 14:00 已到账额度
-                s["gift_yesterday_leftover"] = max(0, balance + today_usage - (last_grant_amount if after_grant else 0))  # 上一天剩余（昨日 24:00）
-                # 人工校准三现值（精确口径）：昨日剩余 = 窗口池 - 今日已补；已补 = 最近发放；今日耗 = 自然日统计
-                s["gift_cal_yesterday"] = max(0, wstart - last_grant_amount)
-                s["gift_cal_grant"] = last_grant_amount
+                state = await db.get_gift_state(entry.id)
+                y_left = int(state.get("yesterday_leftover", 0) or 0)
+                g_amt = int(state.get("last_grant_amount", 0) or 0)
+                after_grant = now_dt >= grant_dt
+                pool = y_left + (g_amt if after_grant else 0)  # 今日总额池（昨日剩余+今日已补）
+                pending = min((today_usage if after_grant else yday_usage), entry.gift_grant_cap)
+                s["gift_refund"] = True
+                s["gift_grant_cap"] = entry.gift_grant_cap  # 每日返还上限（编辑界面可填）
+                s["gift_balance"] = max(0, balance)       # 剩余（若现在停用）
+                s["gift_pool"] = pool                     # 今日总额池（分母候选）
+                s["gift_yesterday_leftover"] = y_left     # 昨日剩余（0 点快照，校准同步）
+                s["gift_last_grant_amount"] = g_amt if after_grant else 0  # 今日已到账
+                s["gift_usage_today"] = today_usage       # 大数字：今日自然日真实消耗（不被上限钳制）
+                s["gift_pending_grant"] = pending         # 右下角：预计补账额度（下次到账）
+                s["gift_cal_yesterday"] = y_left
+                s["gift_cal_grant"] = g_amt
                 s["gift_cal_usage"] = today_usage
                 s["gift_yesterday_usage"] = yday_usage
                 s["daily_used_tokens"] = today_usage

@@ -157,10 +157,15 @@ async def get_reasoning(_=Depends(verify_admin)):
 
 @router.post("/gift/calibrate")
 async def gift_calibrate(request: Request, _=Depends(verify_admin)):
-    """余额返还制人工校准：单独修正 昨日剩余量 / 今日返还量 / 今日使用量（未提供项保持现值）。
+    """余额返还制人工校准：单独修正 昨日剩余量 / 今日返还量(=昨日使用量) / 今日使用量（未提供项保持现值）。
 
-    语义：窗口总额池 = 昨日剩余 + 今日返还；余额 = 总额池 - 今日使用（下限 0）。
-    同步改写 model_daily_stats 今日 total_tokens，并失效该模型的配额预检缓存。"""
+    时间感知：
+    - 到账时刻（refresh_time，如 14:00）前校准：今日返还未到账，不计入余额（余额 = 昨日剩余 - 今日使用）；
+      昨日自然日消耗改写为校准值，14:00 到账时按其发放。
+    - 到账时刻后校准：余额 = 昨日剩余 + 今日返还 - 今日使用。
+    同步失效该模型的配额预检缓存。"""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
     body = await request.json()
     model_id = body.get("model_id")
     config = load_config()
@@ -172,17 +177,25 @@ async def gift_calibrate(request: Request, _=Depends(verify_admin)):
     grant_cap = int(m.get("gift_grant_cap", 0) or 0) or 5_000_000
     rt = m.get("refresh_time", "")
 
-    # 先走一次读路径（惰性补账到当前逻辑日），保证账本为最新
+    # 先走一次读路径（惰性补账到当前时点），保证账本为最新
     await db.get_gift_balance(model_id, cap, rt, grant_cap)
     state = await db.get_gift_state(model_id)
     if not state:
         raise HTTPException(status_code=404, detail="账本尚未初始化（该模型还没有调用记录）")
 
+    now_dt = datetime.now(ZoneInfo("Asia/Shanghai"))
+    today = now_dt.date().isoformat()
+    yday = (now_dt.date() - timedelta(days=1)).isoformat()
+    try:
+        hh, mm = (int(x) for x in (rt or "00:00").split(":"))
+    except ValueError:
+        hh, mm = 0, 0
+    after_grant = (now_dt.hour, now_dt.minute) >= (hh, mm)
+
     st = await db.get_model_daily_stats(model_id)
     u_cur = int(st.get("total_tokens", 0) or 0)
     g_cur = int(state.get("last_grant_amount", 0) or 0)
-    w_cur = int(state.get("window_start_balance", 0) or 0)
-    y_cur = max(0, w_cur - g_cur)  # 昨日剩余 = 窗口池 - 今日已补
+    y_cur = max(0, int(state.get("yesterday_leftover", 0) or 0))
 
     y = body.get("yesterday_leftover")
     g = body.get("grant_today")
@@ -194,18 +207,25 @@ async def gift_calibrate(request: Request, _=Depends(verify_admin)):
         if v < 0:
             raise HTTPException(status_code=400, detail=f"{name} 不能为负数")
 
-    new_pool = y_new + g_new
-    new_balance = max(0, new_pool - u_new)
-    await db.set_gift_state(model_id, new_balance, new_pool, g_new, db.gift_logical_today(rt))
-    if u is not None:
-        await db.set_model_daily_usage(model_id, u_new)
+    if g is not None:
+        # 校准昨日使用量 → 改写昨日自然日统计（ⓘ 展示与到账时刻的发放基数同步）
+        await db.set_model_daily_usage(model_id, g_new, yday)
+
+    # 到账时刻前：今日返还未到账不计入余额；到账后：余额 = 昨日剩余 + 今日返还 - 今日使用
+    if after_grant:
+        new_balance = max(0, y_new + g_new - u_new)
+    else:
+        new_balance = max(0, y_new - u_new)
+    await db.set_gift_state(model_id, new_balance, y_new + (g_new if after_grant else 0),
+                            g_new if after_grant else g_cur, today, y_new,
+                            today if after_grant else None, today)
     try:
         from main import pool as _pool
         _pool._invalidate_quota_cache(model_id)
     except Exception:
         pass
     return {"model_id": model_id, "yesterday_leftover": y_new, "grant_today": g_new,
-            "usage_today": u_new, "balance": new_balance}
+            "usage_today": u_new, "balance": new_balance, "grant_applied": bool(after_grant)}
 
 
 @router.post("/reasoning/probe")

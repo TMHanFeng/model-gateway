@@ -506,11 +506,12 @@ async def set_gift_state(model_name: str, balance: int, window_start_balance: in
         await _commit(db)
 
 
-async def set_model_daily_usage(model_name: str, tokens: int):
-    """人工校准：直接改写今日（自然日）用量。"""
+async def set_model_daily_usage(model_name: str, tokens: int, date: str = None):
+    """人工校准：直接改写指定自然日（默认今日）的用量。"""
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    if not date:
+        date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
     async with _lock:
         db = await _get_conn()
         await db.execute(

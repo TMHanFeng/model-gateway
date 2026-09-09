@@ -496,7 +496,7 @@ body {
 <div class="overlay" id="overlay-giftcal" style="z-index:120">
   <div class="modal" style="width:560px">
     <h3>🛠 余额返还制人工校准</h3>
-    <div class="hint" style="margin-bottom:14px">模型：<b id="giftcal-model"></b>。对齐火山控制台实际值；<b>留空的项不修改</b>。校准后：余额 = 昨日剩余 + 今日返还 − 今日使用。</div>
+    <div class="hint" style="margin-bottom:14px">模型：<b id="giftcal-model"></b>。对齐火山控制台实际值；<b>留空的项不修改</b>。余额 = 昨日剩余 − 今日使用（14:00 后再加今日返还）；<b>今日返还量</b>即昨日使用量的校准值，将作为 14:00 的发放数额。</div>
     <div class="fg"><label>昨日剩余量（当前 <span id="cal-y-cur">?</span>）</label><input type="number" id="cal-yesterday" placeholder="留空 = 不修改"></div>
     <div class="fg"><label>今日返还量（昨日使用量）<span class="hint" style="margin-left:6px">当前 <span id="cal-g-cur">?</span></span></label><input type="number" id="cal-grant" placeholder="留空 = 不修改"></div>
     <div class="fg"><label>今日使用量（当前 <span id="cal-u-cur">?</span>）</label><input type="number" id="cal-usage" placeholder="留空 = 不修改"></div>
