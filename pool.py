@@ -951,42 +951,46 @@ class ModelPool:
         finally:
             self._record_latency(entry, (time.perf_counter() - t0) * 1000)
             latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-            if captured > 0 and not billed:
-                # 问题24 兜底：usage 已捕获但尚未入账（如 usage 在最后一个 chunk 后才被解析）
-                try:
-                    await self._settle_stream_tokens(entry, captured)
-                except Exception:
-                    logger.warning(
-                        f"[流式计费兜底失败] usage 已捕获但两次入账均抛错，需人工核查 "
-                        f"(模型={entry.id}, tokens={captured})"
-                    )
-                    raise
-            elif captured == 0:
-                # 问题24：上游全程未返回 usage——绝不静默丢，至少记调用次数并告警
-                logger.warning(f"[流式缺失usage] 流式请求未返回 usage，未计 token，需核查 (模型={entry.id}, 估算={estimated}tok)")
-                try:
-                    await db.log_request(entry.id, 0)
-                    self._invalidate_quota_cache(entry.id)
-                    await db.add_model_call(entry.id, 0)
-                except Exception:
-                    logger.warning(f"[流式缺失usage] 补记调用次数失败 (模型={entry.id})")
-            if captured > 0:
-                # 问题22：写校准样本 + 增量更新 EMA；失败不影响主流程
-                try:
-                    await db.add_call_metric(entry.id, estimated or None, usage_detail.get("prompt_tokens"),
-                                             usage_detail.get("completion_tokens"), captured,
-                                             (req.max_tokens if req is not None else 0) or 0, latency_ms)
-                    self._update_metrics_ema(entry, captured, latency_ms, usage_detail.get("completion_tokens"))
-                except Exception:
-                    logger.debug(f"[call_metrics] 流式样本写入失败 model={entry.id}", exc_info=True)
-            if decision_ctx:
-                # v2.10.8 决策日志后置：流结束时一次性写入（含 final actual_tokens），计费不依赖本记录
-                try:
-                    await db.log_decision(decision_ctx["pool"], decision_ctx["requested"], entry.id,
-                                          decision_ctx["estimated"], decision_ctx["steps"], decision_ctx["caller"],
-                                          actual_tokens=captured or 0)
-                except Exception:
-                    logger.warning(f"[决策日志写入失败] model={entry.id}", exc_info=True)
+            # v2.11.39 写合并：流收尾的 入账兜底/缺失usage补记/校准样本/决策日志 单一事务
+            # （此前 3~4 个独立事务各抢一次锁各 commit）。同步完成、不后台化——保住
+            # "最后一个字节发出后、响应收尾前落盘"的时序（回归 T1c/T2a 断言依赖）。
+            async with db.bulk():
+                if captured > 0 and not billed:
+                    # 问题24 兜底：usage 已捕获但尚未入账（如 usage 在最后一个 chunk 后才被解析）
+                    try:
+                        await self._settle_stream_tokens(entry, captured)
+                    except Exception:
+                        logger.warning(
+                            f"[流式计费兜底失败] usage 已捕获但两次入账均抛错，需人工核查 "
+                            f"(模型={entry.id}, tokens={captured})"
+                        )
+                        raise  # 异常传出 with 触发整组回滚（与原行为一致：后续写一并跳过）
+                elif captured == 0:
+                    # 问题24：上游全程未返回 usage——绝不静默丢，至少记调用次数并告警
+                    logger.warning(f"[流式缺失usage] 流式请求未返回 usage，未计 token，需核查 (模型={entry.id}, 估算={estimated}tok)")
+                    try:
+                        await db.log_request(entry.id, 0)
+                        self._invalidate_quota_cache(entry.id)
+                        await db.add_model_call(entry.id, 0)
+                    except Exception:
+                        logger.warning(f"[流式缺失usage] 补记调用次数失败 (模型={entry.id})")
+                if captured > 0:
+                    # 问题22：写校准样本 + 增量更新 EMA；失败不影响主流程
+                    try:
+                        await db.add_call_metric(entry.id, estimated or None, usage_detail.get("prompt_tokens"),
+                                                 usage_detail.get("completion_tokens"), captured,
+                                                 (req.max_tokens if req is not None else 0) or 0, latency_ms)
+                        self._update_metrics_ema(entry, captured, latency_ms, usage_detail.get("completion_tokens"))
+                    except Exception:
+                        logger.debug(f"[call_metrics] 流式样本写入失败 model={entry.id}", exc_info=True)
+                if decision_ctx:
+                    # v2.10.8 决策日志后置：流结束时一次性写入（含 final actual_tokens），计费不依赖本记录
+                    try:
+                        await db.log_decision(decision_ctx["pool"], decision_ctx["requested"], entry.id,
+                                              decision_ctx["estimated"], decision_ctx["steps"], decision_ctx["caller"],
+                                              actual_tokens=captured or 0)
+                    except Exception:
+                        logger.warning(f"[决策日志写入失败] model={entry.id}", exc_info=True)
 
     async def _settle_stream_tokens(self, entry: ModelEntry, tokens: int):
         """问题24：按流式真实 usage.total_tokens 入账，计费口径与非流式 execute() 一致。
@@ -994,22 +998,25 @@ class ModelPool:
         计费单位一致：request 型按次记 1，token 型按真实 token 数。差异在于：流式路径的
         request 型已在流建立时按次预扣 1 次（见 execute_stream_with_fallback），流式不重复计；
         one_time 从不预扣，故必须在此入账。
+        v2.11.39：整组入账合并为单一事务（3~5 commit → 1）——中途入账半写失败时整组回滚，
+        finally 兜底重试不会再叠加重复的 log_request。
         """
-        await db.log_request(entry.id, tokens)
-        self._invalidate_quota_cache(entry.id)
-        await db.add_model_call(entry.id, tokens)
-        charge = 1 if entry.billing_mode == "request" else tokens
-        if entry.token_type == "gift":
-            await db.add_gift_usage(entry.id, charge)
-        elif entry.token_type == "one_time":
-            await db.add_one_time_usage(entry.id, charge)
-            state = await db.get_one_time_state(entry.id)
-            if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
-                await db.expire_one_time(entry.id)
-        elif entry.token_type == "rolling_5h" and entry.billing_mode == "token":
-            await self._charge_rolling_5h(entry, charge)
-        elif entry.billing_mode == "token":
-            await db.add_daily_usage(entry.id, charge)
+        async with db.bulk():
+            await db.log_request(entry.id, tokens)
+            self._invalidate_quota_cache(entry.id)
+            await db.add_model_call(entry.id, tokens)
+            charge = 1 if entry.billing_mode == "request" else tokens
+            if entry.token_type == "gift":
+                await db.add_gift_usage(entry.id, charge)
+            elif entry.token_type == "one_time":
+                await db.add_one_time_usage(entry.id, charge)
+                state = await db.get_one_time_state(entry.id)
+                if state and entry.max_tokens > 0 and state["used_tokens"] >= entry.max_tokens:
+                    await db.expire_one_time(entry.id)
+            elif entry.token_type == "rolling_5h" and entry.billing_mode == "token":
+                await self._charge_rolling_5h(entry, charge)
+            elif entry.billing_mode == "token":
+                await db.add_daily_usage(entry.id, charge)
 
 
     async def execute_embedding(self, entry: ModelEntry, req) -> tuple[dict, int]:
@@ -1460,12 +1467,15 @@ class ModelPool:
                         yield chunk
 
                 # 流建立成功后才计费（按次计费计 1 次；按 token 计费由 _wrap_stream 结束时按实际 token 计）
-                if entry.token_type == "gift" and entry.billing_mode == "request":
-                    await db.add_gift_usage(entry.id, 1)
-                elif entry.token_type == "daily" and entry.billing_mode == "request":
-                    await db.add_daily_usage(entry.id, 1)
-                elif entry.token_type == "rolling_5h" and entry.billing_mode == "request":
-                    await self._charge_rolling_5h(entry, 1)
+                # v2.11.39：预扣入 bulk 单事务——_charge_rolling_5h 的"重置窗口+入账"原子化，
+                # 不再出现窗口已重置而用量未记的半写状态
+                async with db.bulk():
+                    if entry.token_type == "gift" and entry.billing_mode == "request":
+                        await db.add_gift_usage(entry.id, 1)
+                    elif entry.token_type == "daily" and entry.billing_mode == "request":
+                        await db.add_daily_usage(entry.id, 1)
+                    elif entry.token_type == "rolling_5h" and entry.billing_mode == "request":
+                        await self._charge_rolling_5h(entry, 1)
                 self._invalidate_quota_cache(entry.id)
 
                 last_reason = actual_calls[-1]["reason"] if actual_calls else ""
