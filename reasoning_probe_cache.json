@@ -3176,7 +3176,7 @@
   ]
  },
  "openai|https://open.bigmodel.cn/api/paas/v4|glm-5.3-flash": {
-  "ts": "2026-09-04 15:19:49",
+  "ts": "2026-09-08 15:48:04",
   "protocol": "openai",
   "name": "glm-5.3-flash",
   "calls": [
@@ -3519,5 +3519,170 @@
   "notes": [
    "档位有梯度但不支持关闭，未映射 off"
   ]
+ },
+ "anthropic|https://open.bigmodel.cn/api/anthropic|glm-5.3-flash": {
+  "ts": "2026-09-08 16:02:50",
+  "protocol": "anthropic",
+  "name": "glm-5.3-flash",
+  "calls": [
+   {
+    "fragment": null,
+    "status": 200,
+    "error": "",
+    "reasoning_len": 1021,
+    "content_len": 77,
+    "completion_tokens": 303
+   },
+   {
+    "fragment": {
+     "thinking": {
+      "type": "disabled"
+     }
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 0,
+    "content_len": 72,
+    "completion_tokens": 53
+   },
+   {
+    "fragment": {
+     "thinking": {
+      "type": "enabled",
+      "budget_tokens": 4096
+     }
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 907,
+    "content_len": 76,
+    "completion_tokens": 314
+   },
+   {
+    "fragment": {
+     "thinking": {
+      "type": "enabled",
+      "budget_tokens": 1024
+     }
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 576,
+    "content_len": 59,
+    "completion_tokens": 190
+   },
+   {
+    "fragment": {
+     "thinking": {
+      "type": "enabled",
+      "budget_tokens": 4096
+     }
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 720,
+    "content_len": 52,
+    "completion_tokens": 241
+   },
+   {
+    "fragment": {
+     "thinking": {
+      "type": "enabled",
+      "budget_tokens": 10240
+     }
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 1006,
+    "content_len": 83,
+    "completion_tokens": 324
+   },
+   {
+    "fragment": {
+     "thinking": {
+      "type": "enabled",
+      "budget_tokens": 20480
+     }
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 597,
+    "content_len": 61,
+    "completion_tokens": 179
+   },
+   {
+    "fragment": {
+     "thinking": {
+      "type": "enabled",
+      "budget_tokens": 32768
+     }
+    },
+    "status": 200,
+    "error": "",
+    "reasoning_len": 703,
+    "content_len": 62,
+    "completion_tokens": 238
+   }
+  ],
+  "baseline_reasoning": 1021,
+  "default_thinking": "开",
+  "family": "anthropic thinking(type,budget_tokens)",
+  "off_fragment": {
+   "thinking": {
+    "type": "disabled"
+   }
+  },
+  "on_fragment": {
+   "thinking": {
+    "type": "enabled",
+    "budget_tokens": 4096
+   }
+  },
+  "level_lens": {
+   "minimal": 576,
+   "low": 720,
+   "medium": 1006,
+   "high": 597,
+   "max": 703
+  },
+  "levels_effective": true,
+  "suggested": {
+   "off": {
+    "thinking": {
+     "type": "disabled"
+    }
+   },
+   "minimal": {
+    "thinking": {
+     "type": "enabled",
+     "budget_tokens": 1024
+    }
+   },
+   "low": {
+    "thinking": {
+     "type": "enabled",
+     "budget_tokens": 4096
+    }
+   },
+   "medium": {
+    "thinking": {
+     "type": "enabled",
+     "budget_tokens": 10240
+    }
+   },
+   "high": {
+    "thinking": {
+     "type": "enabled",
+     "budget_tokens": 20480
+    }
+   },
+   "max": {
+    "thinking": {
+     "type": "enabled",
+     "budget_tokens": 32768
+    }
+   }
+  },
+  "notes": []
  }
 }
