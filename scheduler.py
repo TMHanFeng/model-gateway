@@ -1,5 +1,6 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from pathlib import Path
 from shutil import copyfile
 import logging
@@ -9,6 +10,17 @@ from pool import load_config
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
+
+
+async def db_maintenance():
+    """低频 DB 维护（每 60s）：决策日志/校准样本批量裁剪 + RPM/TPM 内存滑窗清扫。
+    v2.11.40 起裁剪从每笔写入的逐笔 DELETE 收敛至此（有界性不变，热路径少 2 条语句）。"""
+    try:
+        await db.trim_decision_log()
+        await db.trim_call_metrics()
+        db.sweep_req_windows()
+    except Exception:
+        logger.exception("[DB维护] 裁剪/清扫失败")
 
 
 async def refresh_model(model_id: str):
@@ -118,6 +130,12 @@ def _add_jobs():
         backup_config,
         CronTrigger(hour=14, minute=0, timezone="Asia/Shanghai"),
         id="daily_config_backup",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        db_maintenance,
+        IntervalTrigger(seconds=60),
+        id="db_maintenance",
         replace_existing=True,
     )
 

@@ -96,6 +96,8 @@ TEST_MODELS = [
      "is_free": True, "daily_token_limit": 1000000000, "no_stream_options": True},
     {"id": "zzbt/echo-gift", "name": "mock-echo-gift", "provider_id": "zzark", "modality": "text",
      "is_free": True, "token_type": "gift", "daily_token_limit": 266},
+    {"id": "zzbt/echo-rpm", "name": "mock-echo-rpm", "provider_id": "zzmock", "modality": "text",
+     "is_free": True, "daily_token_limit": 1000000000, "rpm_limit": 1},
 ]
 TEST_IDS = [m["id"] for m in TEST_MODELS]
 
@@ -112,7 +114,7 @@ def deep_clean():
     c["models"] = [m for m in c.get("models", []) if not str(m.get("id", "")).startswith("zzbt/")]
     c.get("pools", {}).pop("zzall", None)
     c.get("pools", {}).pop("zzdef", None)  # v2.11.19 曾漏清该测试池残留至生产配置
-    for pn in ("zzreq", "zzonce", "zzsmart", "zznso", "zzgift"):
+    for pn in ("zzreq", "zzonce", "zzsmart", "zznso", "zzgift", "zzrpm"):
         c.get("pools", {}).pop(pn, None)
     json.dump(c, open(os.path.join(REPO, "config.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     q = " OR ".join([f"model_name='{i}'" for i in TEST_IDS])
@@ -120,7 +122,8 @@ def deep_clean():
                 model_name TEXT PRIMARY KEY,
                 balance INTEGER DEFAULT 0,
                 last_grant_date TEXT DEFAULT '')""")
-    for t in ["token_usage", "model_daily_stats", "call_metrics", "request_log", "gift_state"]:
+    # v2.11.40 起 request_log 表退役（RPM/TPM 内存化），不再列入清理
+    for t in ["token_usage", "model_daily_stats", "call_metrics", "gift_state"]:
         db_exec(f"DELETE FROM {t} WHERE {q}")
     db_exec(f"DELETE FROM decision_log WHERE selected IN ({','.join(chr(39)+i+chr(39) for i in TEST_IDS)}) OR pool_name='zzall'")
     db_exec("DELETE FROM one_time_state WHERE model_name='zzbt/echo-once'")
@@ -172,6 +175,7 @@ def main():
     c["pools"]["zzsmart"] = {"model_ids": ["zzbt/echo-smart"], "strategy": "sequential"}
     c["pools"]["zznso"] = {"model_ids": ["zzbt/echo-nso"], "strategy": "sequential"}
     c["pools"]["zzgift"] = {"model_ids": ["zzbt/echo-gift"], "strategy": "sequential"}
+    c["pools"]["zzrpm"] = {"model_ids": ["zzbt/echo-rpm"], "strategy": "sequential"}
     json.dump(c, open(os.path.join(REPO, "config.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
     # 启动隔离实例
@@ -246,11 +250,14 @@ def main():
         cm0 = DB.execute("SELECT count(*) c FROM call_metrics WHERE model_name='zzbt/echo-token'").fetchone()["c"]
         r = chat("zzall", max_tokens=700)
         d = last_decision("zzbt/echo-token")
-        row = DB.execute("SELECT count(*) c FROM request_log WHERE model_name='zzbt/echo-token'").fetchone()["c"]
+        # v2.11.40 起 request_log 表退役，请求滑窗改经 /stats 的 current_rpm 断言（内存实现）
+        st = httpx.get(f"{BASE}/stats", headers=ADMIN, timeout=15).json()
+        srow = next((x for x in st.get("models", []) if x.get("id") == "zzbt/echo-token"), {})
         check("T5a 非流式200+content", r.status_code == 200 and (r.json().get("choices") or [{}])[0].get("message", {}).get("content"), r.status_code)
         check("T5b token_usage入账", token_used("zzbt/echo-token") - used0 == 133, token_used("zzbt/echo-token") - used0)
         check("T5c model_daily_stats调用+1", call_count("zzbt/echo-token") - mc0 == 1, call_count("zzbt/echo-token") - mc0)
-        check("T5d request_log落库", row > 0, row)
+        check("T5d 请求滑窗入账(current_rpm>=1)", srow.get("current_rpm", 0) >= 1, srow.get("current_rpm"))
+        check("T5d2 滑窗tokens入账(current_tpm>=133)", srow.get("current_tpm", 0) >= 133, srow.get("current_tpm"))
         check("T5e call_metrics落库", DB.execute("SELECT count(*) c FROM call_metrics WHERE model_name='zzbt/echo-token'").fetchone()["c"] == cm0 + 1, "")
         check("T5f decision.actual_tokens=133", d and d["actual_tokens"] == 133, d)
 
@@ -328,6 +335,19 @@ def main():
         r = chat("zzall", stream=True, max_tokens=500)
         b = captured_bodies[-1]
         check("T10b 普通模型流式保留stream_options", r.status_code == 200 and b.get("stream_options") == {"include_usage": True}, b.get("stream_options"))
+
+        # ===== T12 RPM 限速（v2.11.40 内存滑窗：填补 RPM/TPM 触顶从未有回归的空洞）=====
+        r = chat("zzrpm", max_tokens=500)
+        check("T12a rpm_limit=1 第1次200", r.status_code == 200, r.status_code)
+        r = chat("zzrpm", max_tokens=500)
+        check("T12b rpm触顶第2次被拒(503)", r.status_code == 503, r.status_code)
+        r = httpx.get(f"{BASE}/admin/decisions?limit=5", headers=ADMIN, timeout=15)
+        j = r.json()
+        arr = j.get("decisions") if isinstance(j, dict) else j
+        zz = next((x for x in (arr or []) if x.get("pool_name") == "zzrpm"), None)
+        check("T12c 决策记录rpm_limited原因(内存滑窗驱动预检)",
+              zz is not None and any(s.get("reason") == "rpm_limited" for s in (zz.get("steps") or [])),
+              (zz or {}).get("steps"))
 
         # ===== T11 余额返还制（火山/Ark 供应商自动识别）=====
         r = httpx.get(f"{BASE}/admin/models", headers=ADMIN, timeout=15)

@@ -1,4 +1,5 @@
 import aiosqlite
+from collections import deque
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 import asyncio
@@ -564,42 +565,68 @@ async def set_gift_balance(model_name: str, balance: int):
         await _commit(db)
 
 
-async def log_request(model_name: str, tokens: int):
+# ── RPM/TPM 60 秒滑窗（v2.11.40 内存化：request_log 表退役）───────────────
+# request_log 表只为 60 秒滑窗计数而存在（消费方仅 get_rpm/get_tpm），改为每模型
+# 内存双端队列：每请求省 1 INSERT + 1 全表扫 DELETE（timestamp 无索引），
+# get_rpm/get_tpm 零锁零查询。语义差异仅一点：网关重启后 60 秒窗口清零
+# （RPM/TPM 限额判定逻辑不变）。单事件循环内操作原子，无需加锁。
+_req_win: dict[str, "deque[tuple[float, int]]"] = {}
+_REQ_WIN_SECONDS = 60.0
+
+
+def _req_win_prune(dq, now: float):
+    head = dq.popleft
+    cutoff = now - _REQ_WIN_SECONDS
+    while dq and dq[0][0] <= cutoff:
+        head()
+
+
+def log_request(model_name: str, tokens: int):
+    """记录一次请求到 60 秒滑窗（RPM/TPM 统计与限速预检；v2.11.40 起为内存实现，同步函数）。"""
     now = time.time()
-    async with _maybe_lock():
-        db = await _get_conn()
-        await db.execute(
-            "INSERT INTO request_log (model_name, timestamp, tokens) VALUES (?, ?, ?)",
-            (model_name, now, tokens),
-        )
-        await db.execute(
-            "DELETE FROM request_log WHERE timestamp < ?", (now - 60,)
-        )
-        await _commit(db)
+    dq = _req_win.get(model_name)
+    if dq is None:
+        dq = _req_win[model_name] = deque()
+    _req_win_prune(dq, now)
+    dq.append((now, tokens))
 
 
-async def get_rpm(model_name: str) -> int:
-    cutoff = time.time() - 60
-    async with _maybe_lock():
-        db = await _get_conn()
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM request_log WHERE model_name = ? AND timestamp > ?",
-            (model_name, cutoff),
-        )
-        row = await cursor.fetchone()
-        return row[0] if row else 0
+def get_rpm(model_name: str) -> int:
+    dq = _req_win.get(model_name)
+    if not dq:
+        return 0
+    _req_win_prune(dq, time.time())
+    return len(dq)
 
 
-async def get_tpm(model_name: str) -> int:
-    cutoff = time.time() - 60
-    async with _maybe_lock():
-        db = await _get_conn()
-        cursor = await db.execute(
-            "SELECT COALESCE(SUM(tokens), 0) FROM request_log WHERE model_name = ? AND timestamp > ?",
-            (model_name, cutoff),
-        )
-        row = await cursor.fetchone()
-        return row[0] if row else 0
+def get_tpm(model_name: str) -> int:
+    dq = _req_win.get(model_name)
+    if not dq:
+        return 0
+    _req_win_prune(dq, time.time())
+    return sum(t for _, t in dq)
+
+
+def sweep_req_windows():
+    """全量清扫过期滑窗条目与空队列（scheduler 维护任务低频调用，防删除模型的残留驻留）。"""
+    now = time.time()
+    for name in [n for n, dq in _req_win.items() if not dq or dq[-1][0] <= now - _REQ_WIN_SECONDS]:
+        dq = _req_win.get(name)
+        if dq is None:
+            continue
+        _req_win_prune(dq, now)
+        if not dq:
+            _req_win.pop(name, None)
+
+
+async def get_rpm_tpm_all() -> dict[str, tuple[int, int]]:
+    """全部模型的 (rpm, tpm) 一次性聚合（/stats 批量化用，纯内存）。"""
+    now = time.time()
+    out = {}
+    for name, dq in _req_win.items():
+        _req_win_prune(dq, now)
+        out[name] = (len(dq), sum(t for _, t in dq))
+    return out
 
 
 # ── 模型调用统计（请求次数 / token 用量，与计费量 token_usage 分离）────
@@ -737,11 +764,34 @@ async def log_decision(pool_name: str, requested: str | None, selected: str | No
             (time.time(), pool_name, requested or "", selected or "", estimated, actual_tokens, json.dumps(steps, ensure_ascii=False), caller),
         )
         decision_id = cursor.lastrowid
-        await db.execute(
-            "DELETE FROM decision_log WHERE id NOT IN (SELECT id FROM decision_log ORDER BY id DESC LIMIT 500)"
-        )
+        # 有界性由 trim_decision_log 低频批量裁剪保证（v2.11.40 起不再逐笔 DELETE）
         await _commit(db)
     return decision_id
+
+
+async def trim_decision_log(keep: int = 500):
+    """裁剪 decision_log 至最近 keep 条（scheduler 维护任务每 60s 批量调用）。"""
+    async with _maybe_lock():
+        db = await _get_conn()
+        await db.execute(
+            "DELETE FROM decision_log WHERE id NOT IN (SELECT id FROM decision_log ORDER BY id DESC LIMIT ?)",
+            (keep,),
+        )
+        await _commit(db)
+
+
+async def trim_call_metrics(keep_per_model: int = 500):
+    """裁剪 call_metrics 每模型至最近 keep_per_model 条（scheduler 维护任务每 60s 批量调用）。"""
+    async with _maybe_lock():
+        db = await _get_conn()
+        models = [r[0] for r in await (await db.execute("SELECT DISTINCT model_name FROM call_metrics")).fetchall()]
+        for m in models:
+            await db.execute(
+                "DELETE FROM call_metrics WHERE model_name = ? AND id NOT IN "
+                "(SELECT id FROM call_metrics WHERE model_name = ? ORDER BY id DESC LIMIT ?)",
+                (m, m, keep_per_model),
+            )
+        await _commit(db)
 
 
 async def update_decision_actual_tokens(decision_id: int, actual_tokens: int | None):
@@ -765,12 +815,7 @@ async def add_call_metric(model_name: str, estimated_tokens: int | None, prompt_
             "INSERT INTO call_metrics (model_name, ts, estimated_tokens, prompt_tokens, completion_tokens, total_tokens, max_tokens, latency_ms) VALUES (?,?,?,?,?,?,?,?)",
             (model_name, time.time(), estimated_tokens, prompt_tokens, completion_tokens, total_tokens, max_tokens, latency_ms),
         )
-        # 全量保留但控制体积：仅裁剪最老的样本，保留每个模型最近 500 条
-        await db.execute(
-            "DELETE FROM call_metrics WHERE model_name = ? AND id NOT IN "
-            "(SELECT id FROM call_metrics WHERE model_name = ? ORDER BY id DESC LIMIT 500)",
-            (model_name, model_name),
-        )
+        # 每模型有界性由 trim_call_metrics 低频批量裁剪保证（v2.11.40 起不再逐笔 DELETE）
         await _commit(db)
 
 

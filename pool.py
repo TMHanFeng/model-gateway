@@ -472,12 +472,12 @@ class ModelPool:
 
 
         if entry.rpm_limit > 0:
-            rpm = await db.get_rpm(entry.id)
+            rpm = db.get_rpm(entry.id)
             if rpm >= entry.rpm_limit:
                 return False, "rpm_limited", {"current": rpm, "limit": entry.rpm_limit}
 
         if entry.tpm_limit > 0:
-            tpm = await db.get_tpm(entry.id)
+            tpm = db.get_tpm(entry.id)
             if tpm >= entry.tpm_limit:
                 return False, "tpm_limited", {"current": tpm, "limit": entry.tpm_limit}
 
@@ -864,7 +864,7 @@ class ModelPool:
         self._invalidate_quota_cache(entry.id)
         # v2.10.8 写合并：log_request/model_call/配额入账/校准样本 单一事务（5 commit → 1）
         async with db.bulk():
-            await db.log_request(entry.id, tokens_used)
+            db.log_request(entry.id, tokens_used)
             await db.add_model_call(entry.id, tokens_used)
             # 问题22：写校准样本（成功调用）；失败不影响主流程与事务
             try:
@@ -969,7 +969,7 @@ class ModelPool:
                     # 问题24：上游全程未返回 usage——绝不静默丢，至少记调用次数并告警
                     logger.warning(f"[流式缺失usage] 流式请求未返回 usage，未计 token，需核查 (模型={entry.id}, 估算={estimated}tok)")
                     try:
-                        await db.log_request(entry.id, 0)
+                        db.log_request(entry.id, 0)
                         self._invalidate_quota_cache(entry.id)
                         await db.add_model_call(entry.id, 0)
                     except Exception:
@@ -1002,7 +1002,7 @@ class ModelPool:
         finally 兜底重试不会再叠加重复的 log_request。
         """
         async with db.bulk():
-            await db.log_request(entry.id, tokens)
+            db.log_request(entry.id, tokens)
             self._invalidate_quota_cache(entry.id)
             await db.add_model_call(entry.id, tokens)
             charge = 1 if entry.billing_mode == "request" else tokens
@@ -1033,7 +1033,7 @@ class ModelPool:
 
         usage = response.get("usage") or {}
         tokens_used = int(usage.get("prompt_tokens", 0) or usage.get("total_tokens", 0))
-        await db.log_request(entry.id, tokens_used)
+        db.log_request(entry.id, tokens_used)
         self._invalidate_quota_cache(entry.id)
         await db.add_model_call(entry.id, tokens_used)
 
@@ -1069,7 +1069,7 @@ class ModelPool:
 
         usage = response.get("usage") or {}
         tokens_used = int(usage.get("total_tokens", 0) or usage.get("prompt_tokens", 0))
-        await db.log_request(entry.id, tokens_used)
+        db.log_request(entry.id, tokens_used)
         self._invalidate_quota_cache(entry.id)
         await db.add_model_call(entry.id, tokens_used)
 
@@ -1623,8 +1623,8 @@ class ModelPool:
                 "tpm_limit": entry.tpm_limit,
                 "max_concurrency": entry.max_concurrency,
                 "cooldown_until": entry.cooldown_until,
-                "current_rpm": await db.get_rpm(entry.id),
-                "current_tpm": await db.get_tpm(entry.id),
+                "current_rpm": db.get_rpm(entry.id),
+                "current_tpm": db.get_tpm(entry.id),
                 "latency_ms": entry.latency_ms,
             }
             daily_stats = await db.get_model_daily_stats(entry.id)
