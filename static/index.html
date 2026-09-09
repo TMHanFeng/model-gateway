@@ -712,6 +712,7 @@ function switchTab(name, el) {
   el.classList.add('active');
   ['models','pools','stats','logs','keys'].forEach(t => document.getElementById('tab-' + t).classList.toggle('hidden', t !== name));
   clearInterval(statsTimer); clearInterval(logsTimer);
+  window.scrollTo(0, 0);   // 切页回顶部：否则沿用上一页的滚动偏移，短页面会直接落在底部
   if (name === 'models') loadModels();
   if (name === 'pools') loadPools();
   if (name === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 5000); }
