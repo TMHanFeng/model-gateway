@@ -676,6 +676,7 @@ let statsTimer = null;
 let logsTimer = null;
 let statDim = 'billing';
 // 标签页不可见时暂停 5s 轮询（后台页签白白打后端），回前台按当前页签立即恢复
+// （null 守卫：重复 shown 事件不会叠加定时器）
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     clearInterval(statsTimer); statsTimer = null;
@@ -683,8 +684,8 @@ document.addEventListener('visibilitychange', () => {
   } else {
     const cur = document.querySelector('.tab.active');
     const name = cur ? cur.dataset.tab : null;
-    if (name === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 5000); }
-    if (name === 'logs') { populateLogFilter(); loadDecisions(); logsTimer = setInterval(loadDecisions, 5000); }
+    if (name === 'stats' && statsTimer === null) { loadStats(); statsTimer = setInterval(loadStats, 5000); }
+    if (name === 'logs' && logsTimer === null) { populateLogFilter(); loadDecisions(); logsTimer = setInterval(loadDecisions, 5000); }
   }
 });
 // 触屏设备（手机/平板）不支持 HTML5 拖拽：启用「点一下上移一格」的替代排序交互
@@ -724,6 +725,7 @@ function switchTab(name, el) {
   el.classList.add('active');
   ['models','pools','stats','logs','keys'].forEach(t => document.getElementById('tab-' + t).classList.toggle('hidden', t !== name));
   clearInterval(statsTimer); clearInterval(logsTimer);
+  statsTimer = null; logsTimer = null;
   window.scrollTo(0, 0);   // 切页回顶部：否则沿用上一页的滚动偏移，短页面会直接落在底部
   if (name === 'models') loadModels();
   if (name === 'pools') loadPools();
