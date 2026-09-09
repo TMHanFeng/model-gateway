@@ -1,5 +1,6 @@
 import aiosqlite
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import asyncio
 import time
 import json
@@ -46,37 +47,66 @@ _conn: aiosqlite.Connection | None = None
 _lock = asyncio.Lock()
 
 
-_bulk = 0  # >0 时各写函数的 commit 被抑制，由 bulk() 上下文统一提交（v2.10.8 写合并）
+# bulk() 事务深度（任务本地）：>0 表示当前任务处于 bulk 窗口——写函数跳过加锁与
+# commit，由 bulk() 统一提交（v2.10.8 写合并）。用 ContextVar 而非全局计数：
+# 并发下其它请求的普通写不受影响（照常排队拿锁），不再被吞进 bulk 的事务
+# （修复 v2.10.8 全局 _bulk 计数的"延迟持久/回滚越界/部分提交/取消悬空"四缺陷）。
+_bulk_depth: ContextVar[int] = ContextVar("_bulk_depth", default=0)
 
 
 async def _commit(conn):
-    if _bulk == 0:
+    if _bulk_depth.get() == 0:
         await conn.commit()
+
+
+@asynccontextmanager
+async def _maybe_lock():
+    """bulk() 持有 _lock 期间（本任务 _bulk_depth>0）免锁直进（asyncio.Lock 不可重入）；
+    平时与 async with _lock 等价——非 bulk 任务的写照常串行排队。"""
+    if _bulk_depth.get() > 0:
+        yield
+    else:
+        await _lock.acquire()
+        try:
+            yield
+        finally:
+            _lock.release()
 
 
 @asynccontextmanager
 async def bulk():
     """把多个既有写函数合并为单一事务：各自内部的 commit 被抑制，退出时统一提交。
 
-    异常时整体回滚（原子性比原分步提交更强）。嵌套安全。
+    并发语义（v2.11.38 修复）：最外层进门获取 _lock 并全程持有，退出最外层才提交/回滚——
+    bulk 窗口内其它协程的 DB 操作一律排队到事务外，本任务内的嵌套调用免锁直进。
+    - 延迟持久：本 bulk 的写由自己 commit，不再依赖他人顺手提交；
+    - 回滚越界：rollback 只影响本窗口内的写（他人在窗口外排队）；
+    - 部分提交：嵌套层异常向上传播，由最外层统一回滚；
+    - 取消悬空：BaseException 接住 CancelledError（客户端断连），回滚后重抛。
+    嵌套安全（同任务内深度计数）。约束：bulk 窗口只应包含 DB 语句，
+    绝不跨上游 HTTP 调用（会长时间持有全局锁阻塞所有 DB 操作）。
     """
-    global _bulk
-    _bulk += 1
+    depth = _bulk_depth.get()
+    if depth == 0:
+        await _lock.acquire()
+    token = _bulk_depth.set(depth + 1)
     conn = None
     try:
         conn = await _get_conn()
         yield conn
-        if _bulk == 1:
+        if depth == 0:
             await conn.commit()
-    except Exception:
-        if _bulk == 1:
+    except BaseException:
+        if depth == 0 and conn is not None:
             try:
                 await conn.rollback()
             except Exception:
                 pass
         raise
     finally:
-        _bulk -= 1
+        _bulk_depth.reset(token)
+        if depth == 0:
+            _lock.release()
 
 
 async def _get_conn() -> aiosqlite.Connection:
@@ -97,7 +127,7 @@ async def close_db():
 
 
 async def init_db():
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute("""
             CREATE TABLE IF NOT EXISTS token_usage (
@@ -279,7 +309,7 @@ async def get_daily_usage(model_name: str) -> int:
     - last_reset_date != 逻辑日期: 自动 UPDATE used_tokens=0, last_reset_date=逻辑日期，返回 0
     - 无记录: 返回 0
     _lock 保证并发安全；多次调用跨窗口后只产生一次 UPDATE。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT used_tokens, last_reset_date, refresh_time FROM token_usage WHERE model_name = ?",
@@ -300,7 +330,7 @@ async def get_daily_usage(model_name: str) -> int:
 
 
 async def add_daily_usage(model_name: str, tokens: int):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT last_reset_date, refresh_time FROM token_usage WHERE model_name = ?",
@@ -327,7 +357,7 @@ async def add_daily_usage(model_name: str, tokens: int):
 async def reset_daily_usage(model_name: str):
     """显式重置某个 daily 模型的用量（由 scheduler 14:00 触发 / 手动调用）。
     用逻辑日期作为窗口锚点，保证 14:00 触发后 last_reset_date 立即切换到新窗口日期。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT refresh_time FROM token_usage WHERE model_name = ?",
@@ -347,7 +377,7 @@ async def reset_daily_usage(model_name: str):
 
 async def sync_model_refresh_time(model_name: str, refresh_time: str):
     """同步 config 中模型的 refresh_time 到 token_usage 表（供 init_db / scheduler 使用）。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "UPDATE token_usage SET refresh_time = ? WHERE model_name = ?",
@@ -357,7 +387,7 @@ async def sync_model_refresh_time(model_name: str, refresh_time: str):
 
 
 async def reset_all_daily():
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "UPDATE token_usage SET used_tokens = 0, last_reset_date = date('now')"
@@ -384,7 +414,7 @@ async def get_gift_balance(model_name: str, cap: int, refresh_time: str = "", gr
     gcap = int(grant_cap or 0) or GIFT_GRANT_CAP
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
         today = now.date().isoformat()
@@ -447,7 +477,7 @@ def gift_logical_today(refresh_time: str = "") -> str:
 
 async def get_gift_last_grant_amount(model_name: str) -> int:
     """最近一次到账的补账额度（供卡片"已补 X"展示）。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT last_grant_amount FROM gift_state WHERE model_name = ?", (model_name,))
@@ -457,7 +487,7 @@ async def get_gift_last_grant_amount(model_name: str) -> int:
 
 async def get_gift_window_start(model_name: str) -> int:
     """本窗口起始可用量（统计进度条分母）。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT window_start_balance FROM gift_state WHERE model_name = ?", (model_name,))
@@ -467,7 +497,7 @@ async def get_gift_window_start(model_name: str) -> int:
 
 async def add_gift_usage(model_name: str, tokens: int):
     """赠还余额扣减（预检 get_gift_balance 先行，保证 gift_state 行已存在）。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute("UPDATE gift_state SET balance = balance - ? WHERE model_name = ?",
                          (tokens, model_name))
@@ -476,7 +506,7 @@ async def add_gift_usage(model_name: str, tokens: int):
 
 async def get_gift_state(model_name: str):
     """读取 gift_state 原始行（人工校准用）。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT balance, window_start_balance, last_grant_amount, last_grant_date, "
@@ -495,7 +525,7 @@ async def set_gift_state(model_name: str, balance: int, window_start_balance: in
                          last_grant_date: str, yesterday_leftover: int = None, grant_date: str = None,
                          snapshot_date: str = None):
     """整行写回 gift_state（人工校准用）；未提供的可选列保持原值。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "UPDATE gift_state SET balance=?, window_start_balance=?, last_grant_amount=?, last_grant_date=?, "
@@ -512,7 +542,7 @@ async def set_model_daily_usage(model_name: str, tokens: int, date: str = None):
     from zoneinfo import ZoneInfo
     if not date:
         date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             """INSERT INTO model_daily_stats (model_name, date, request_count, total_tokens)
@@ -524,7 +554,7 @@ async def set_model_daily_usage(model_name: str, tokens: int, date: str = None):
 
 async def set_gift_balance(model_name: str, balance: int):
     """手动校准赠还余额（对齐上游真实剩余 / 测试用）。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             """INSERT INTO gift_state (model_name, balance, last_grant_date, window_start_balance)
@@ -536,7 +566,7 @@ async def set_gift_balance(model_name: str, balance: int):
 
 async def log_request(model_name: str, tokens: int):
     now = time.time()
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "INSERT INTO request_log (model_name, timestamp, tokens) VALUES (?, ?, ?)",
@@ -550,7 +580,7 @@ async def log_request(model_name: str, tokens: int):
 
 async def get_rpm(model_name: str) -> int:
     cutoff = time.time() - 60
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT COUNT(*) FROM request_log WHERE model_name = ? AND timestamp > ?",
@@ -562,7 +592,7 @@ async def get_rpm(model_name: str) -> int:
 
 async def get_tpm(model_name: str) -> int:
     cutoff = time.time() - 60
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT COALESCE(SUM(tokens), 0) FROM request_log WHERE model_name = ? AND timestamp > ?",
@@ -578,7 +608,7 @@ async def add_model_call(model_name: str, tokens: int):
     """记录一次模型调用：当日 request_count+1、total_tokens+tokens。
     日期用北京时间自然日（_bj_today），与配额刷新（scheduler Asia/Shanghai）对齐；
     tokens 为该次调用实际 token 数，可为 0。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             """INSERT INTO model_daily_stats (model_name, date, request_count, total_tokens)
@@ -596,7 +626,7 @@ async def get_model_daily_stats(model_name: str, date_str: str | None = None) ->
     {"request_count": n, "total_tokens": n}，无记录时返回 {"request_count": 0, "total_tokens": 0}。"""
     if date_str is None:
         date_str = _bj_today()
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT request_count, total_tokens FROM model_daily_stats WHERE model_name = ? AND date = ?",
@@ -609,7 +639,7 @@ async def get_model_daily_stats(model_name: str, date_str: str | None = None) ->
 
 
 async def init_one_time(model_name: str):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             """INSERT OR IGNORE INTO one_time_state (model_name, used_tokens, created_at, expired)
@@ -620,7 +650,7 @@ async def init_one_time(model_name: str):
 
 
 async def get_one_time_state(model_name: str) -> dict | None:
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT used_tokens, created_at, expired FROM one_time_state WHERE model_name = ?",
@@ -633,7 +663,7 @@ async def get_one_time_state(model_name: str) -> dict | None:
 
 
 async def add_one_time_usage(model_name: str, tokens: int):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "UPDATE one_time_state SET used_tokens = used_tokens + ? WHERE model_name = ?",
@@ -643,7 +673,7 @@ async def add_one_time_usage(model_name: str, tokens: int):
 
 
 async def expire_one_time(model_name: str):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "UPDATE one_time_state SET expired = 1 WHERE model_name = ?",
@@ -653,7 +683,7 @@ async def expire_one_time(model_name: str):
 
 
 async def init_5h_state(model_name: str):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             """INSERT OR IGNORE INTO rolling5h_state (model_name, used_amount, window_start)
@@ -664,7 +694,7 @@ async def init_5h_state(model_name: str):
 
 
 async def get_5h_state(model_name: str) -> dict | None:
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT used_amount, window_start FROM rolling5h_state WHERE model_name = ?",
@@ -677,7 +707,7 @@ async def get_5h_state(model_name: str) -> dict | None:
 
 
 async def add_5h_usage(model_name: str, amount: int):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "UPDATE rolling5h_state SET used_amount = used_amount + ? WHERE model_name = ?",
@@ -687,7 +717,7 @@ async def add_5h_usage(model_name: str, amount: int):
 
 
 async def reset_5h_window(model_name: str):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             """INSERT INTO rolling5h_state (model_name, used_amount, window_start)
@@ -700,7 +730,7 @@ async def reset_5h_window(model_name: str):
 
 async def log_decision(pool_name: str, requested: str | None, selected: str | None, estimated: int, steps: list, caller: str = "", actual_tokens: int | None = None) -> int:
     """写入调用决策。流式请求可先写 actual_tokens=0，usage 到达后调用 update_decision_actual_tokens 补真实值。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "INSERT INTO decision_log (ts, pool_name, requested, selected, estimated_tokens, actual_tokens, steps, caller) VALUES (?,?,?,?,?,?,?,?)",
@@ -716,7 +746,7 @@ async def log_decision(pool_name: str, requested: str | None, selected: str | No
 
 async def update_decision_actual_tokens(decision_id: int, actual_tokens: int | None):
     """流式请求 usage 到达后补写真实 usage.total_tokens；decision_id 来自 log_decision。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "UPDATE decision_log SET actual_tokens = ? WHERE id = ?",
@@ -729,7 +759,7 @@ async def add_call_metric(model_name: str, estimated_tokens: int | None, prompt_
                           completion_tokens: int | None, total_tokens: int | None,
                           max_tokens: int | None, latency_ms: float | None):
     """问题22：写入一条成功调用校准样本（call_metrics 全量保留）。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "INSERT INTO call_metrics (model_name, ts, estimated_tokens, prompt_tokens, completion_tokens, total_tokens, max_tokens, latency_ms) VALUES (?,?,?,?,?,?,?,?)",
@@ -746,7 +776,7 @@ async def add_call_metric(model_name: str, estimated_tokens: int | None, prompt_
 
 async def get_model_metrics(model_name: str, last_n: int = 50) -> dict:
     """问题22：取该模型最近 N 条校准样本的聚合（供 EMA 冷启动与面板 live 展示）。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         rows = await db.execute(
             "SELECT total_tokens, latency_ms, completion_tokens FROM call_metrics "
@@ -785,7 +815,7 @@ async def get_model_metrics(model_name: str, last_n: int = 50) -> dict:
 
 
 async def get_decisions(pool_name: str | None = None, limit: int = 100) -> list[dict]:
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         if pool_name:
             cursor = await db.execute(
@@ -813,7 +843,7 @@ async def get_decisions(pool_name: str | None = None, limit: int = 100) -> list[
 async def create_api_key(name: str, secret: str, ktype: str, allowed_pools: list,
                          token_type: str, billing_mode: str, limit_amount: int,
                          expire_seconds: int = 0) -> int:
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             """INSERT INTO api_keys (name, secret, type, allowed_pools, token_type, billing_mode, limit_amount, expire_seconds, created_at)
@@ -826,7 +856,7 @@ async def create_api_key(name: str, secret: str, ktype: str, allowed_pools: list
 
 
 async def list_api_keys() -> list[dict]:
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT * FROM api_keys ORDER BY id DESC"
@@ -844,7 +874,7 @@ async def list_api_keys() -> list[dict]:
 
 
 async def get_api_key_by_secret(secret: str) -> dict | None:
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT * FROM api_keys WHERE secret = ?", (secret,)
@@ -863,7 +893,7 @@ async def get_api_key_by_secret(secret: str) -> dict | None:
 async def get_api_key_by_secret_or_previous(secret: str) -> dict | None:
     """认证查找：优先匹配当前 secret，其次匹配宽限期内的 previous_secret。
     返回记录与 get_api_key_by_secret 同构（allowed_pools 已解析）；均不匹配返回 None。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT * FROM api_keys WHERE secret = ?", (secret,)
@@ -888,7 +918,7 @@ async def get_api_key_by_secret_or_previous(secret: str) -> dict | None:
 
 
 async def get_api_key_by_id(key_id: int) -> dict | None:
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT * FROM api_keys WHERE id = ?", (key_id,)
@@ -911,7 +941,7 @@ async def rotate_key_secret(key_id: int, old_secret: str, new_secret: str, grace
     保留 api_key_usage 用量累计（按 key_id 继续累计，跨轮换延续限额周期，不删除）。
     CAS（WHERE secret = ?）：并发两个请求都判定过期时，仅第一个真正轮换成功（返回 True）；
     第二个因 secret 已被替换而影响 0 行（返回 False），避免旧 secret 宽限期被二次覆盖丢失。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             """UPDATE api_keys
@@ -926,7 +956,7 @@ async def rotate_key_secret(key_id: int, old_secret: str, new_secret: str, grace
 
 async def log_key_rotation(key_id: int, old_prefix: str, new_prefix: str, note: str = "") -> None:
     """记录密钥轮换审计日志（只存 secret 前 8 字符前缀，绝不含明文）。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "INSERT INTO key_rotation_log (key_id, old_prefix, new_prefix, ts, note) VALUES (?, ?, ?, ?, ?)",
@@ -937,7 +967,7 @@ async def log_key_rotation(key_id: int, old_prefix: str, new_prefix: str, note: 
 
 async def get_key_rotations(key_id: int, limit: int = 20) -> list[dict]:
     """查询某密钥的轮换记录（按时间倒序，新到旧）。"""
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT * FROM key_rotation_log WHERE key_id = ? ORDER BY ts DESC LIMIT ?",
@@ -962,7 +992,7 @@ async def update_api_key(key_id: int, fields: dict):
     if not sets:
         return
     vals.append(key_id)
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             f"UPDATE api_keys SET {', '.join(sets)} WHERE id = ?", vals
@@ -971,7 +1001,7 @@ async def update_api_key(key_id: int, fields: dict):
 
 
 async def delete_api_key(key_id: int):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
         await db.execute("DELETE FROM api_key_usage WHERE key_id = ?", (key_id,))
@@ -983,7 +1013,7 @@ async def delete_api_key(key_id: int):
 # ── API Key 用量（daily / rolling_5h / one_time 语义，与模型一致）──────
 
 async def get_key_usage(key_id: int) -> dict | None:
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT * FROM api_key_usage WHERE key_id = ?", (key_id,)
@@ -995,7 +1025,7 @@ async def get_key_usage(key_id: int) -> dict | None:
 
 
 async def init_key_usage(key_id: int):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             """INSERT OR IGNORE INTO api_key_usage (key_id, used_amount, last_reset_date)
@@ -1006,7 +1036,7 @@ async def init_key_usage(key_id: int):
 
 
 async def add_key_usage(key_id: int, amount: int):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "UPDATE api_key_usage SET used_amount = used_amount + ? WHERE key_id = ?",
@@ -1019,7 +1049,7 @@ async def reset_key_usage(key_id: int):
     from datetime import datetime
     from zoneinfo import ZoneInfo
     today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             """INSERT INTO api_key_usage (key_id, used_amount, window_start, created_at, expired, last_reset_date)
@@ -1033,7 +1063,7 @@ async def reset_key_usage(key_id: int):
 
 
 async def expire_key_usage(key_id: int):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             "UPDATE api_key_usage SET expired = 1 WHERE key_id = ?", (key_id,)
@@ -1044,7 +1074,7 @@ async def expire_key_usage(key_id: int):
 # ── 用户（预留：未来普通用户账号体系）──────────────────────────────────
 
 async def create_user(username: str, password_hash: str, role: str = "user") -> int:
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
@@ -1055,7 +1085,7 @@ async def create_user(username: str, password_hash: str, role: str = "user") -> 
 
 
 async def list_users() -> list[dict]:
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute("SELECT id, username, role, created_at FROM users ORDER BY id")
         rows = await cursor.fetchall()
@@ -1063,7 +1093,7 @@ async def list_users() -> list[dict]:
 
 
 async def delete_user(user_id: int):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
         await _commit(db)
@@ -1072,7 +1102,7 @@ async def delete_user(user_id: int):
 # ── API Key 用量按小时记录（1h 粒度，可查询任意日期）──────────────────
 
 async def add_hourly_usage(key_id: int, hour_key: str, amount: int):
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         await db.execute(
             """INSERT INTO api_key_hourly_usage (key_id, hour_key, used_amount)
@@ -1086,7 +1116,7 @@ async def add_hourly_usage(key_id: int, hour_key: str, amount: int):
 async def get_hourly_usage(key_id: int, date_str: str) -> dict[str, int]:
     """返回某日期(YYYY-MM-DD)的 24 小时用量 { 'HH': amount }，无记录的小时返回 0"""
     prefix = date_str + "-"
-    async with _lock:
+    async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
             "SELECT hour_key, used_amount FROM api_key_hourly_usage WHERE key_id = ? AND hour_key LIKE ?",
