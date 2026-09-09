@@ -100,7 +100,8 @@ def _wrap_key_stream(stream, key: dict, billing_mode: str):
         nonlocal captured
         try:
             async for chunk in stream:
-                if isinstance(chunk, str) and chunk.startswith("data: ") and "[DONE]" not in chunk:
+                # 仅 usage 行需要解析：'"usage"' 子串预筛后其余行直接透传，零解析（对齐 pool._wrap_stream）
+                if isinstance(chunk, str) and chunk.startswith("data: ") and "[DONE]" not in chunk and '"usage"' in chunk:
                     try:
                         obj = json.loads(chunk[6:].strip())
                         u = obj.get("usage")
@@ -481,13 +482,24 @@ async def version_info():
     return {"version": GATEWAY_VERSION, "commit": GATEWAY_COMMIT}
 
 
+# hfadmin 页面缓存（v2.11.42）：169KB read_text 是同步阻塞 IO，原先每次刷新都在事件循环内全量重读；
+# 改 mtime 缓存——文件未变时零 IO，手工改 HTML 后自动失效（no-cache 响应头语义不变）
+_hfadmin_html_cache = {"mtime": None, "html": ""}
+
+
 @app.get("/hfadmin", response_class=HTMLResponse)
 async def hfadmin_page():
     """HF 科技感管理面板：与 /admin 共用同一套后端 API（verify_admin 认证），
     页面本身无需认证（与原 /admin 一致），所有 /admin/* API 均受 Bearer 保护。"""
-    html = (Path(__file__).parent / "static" / "hfadmin.html").read_text(encoding="utf-8")
+    try:
+        mtime = (Path(__file__).parent / "static" / "hfadmin.html").stat().st_mtime
+    except OSError:
+        mtime = None
+    if _hfadmin_html_cache["html"] == "" or mtime != _hfadmin_html_cache["mtime"]:
+        _hfadmin_html_cache["html"] = (Path(__file__).parent / "static" / "hfadmin.html").read_text(encoding="utf-8")
+        _hfadmin_html_cache["mtime"] = mtime
     # no-cache：面板迭代频繁，禁止浏览器拿旧 HTML（曾因缓存旧版导致"加载慢"的 canvas 全屏重绘长期滞留）
-    return HTMLResponse(content=html.replace("__GATEWAY_VERSION__", get_gateway_version()),
+    return HTMLResponse(content=_hfadmin_html_cache["html"].replace("__GATEWAY_VERSION__", get_gateway_version()),
                         headers={"Cache-Control": "no-cache"})
 
 

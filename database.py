@@ -801,7 +801,7 @@ async def reset_5h_window(model_name: str):
 
 
 async def log_decision(pool_name: str, requested: str | None, selected: str | None, estimated: int, steps: list, caller: str = "", actual_tokens: int | None = None) -> int:
-    """写入调用决策。流式请求可先写 actual_tokens=0，usage 到达后调用 update_decision_actual_tokens 补真实值。"""
+    """写入调用决策。actual_tokens 直接随行写入（流式在流结束时一次性写入含真实值）。"""
     async with _maybe_lock():
         db = await _get_conn()
         cursor = await db.execute(
@@ -812,6 +812,17 @@ async def log_decision(pool_name: str, requested: str | None, selected: str | No
         # 有界性由 trim_decision_log 低频批量裁剪保证（v2.11.40 起不再逐笔 DELETE）
         await _commit(db)
     return decision_id
+
+
+async def wal_checkpoint():
+    """WAL 截断 checkpoint（scheduler 每 10 分钟调用）。
+
+    网关持续有读者（面板 5s 轮询），sqlite 被动 checkpoint 长期凑不齐"无活跃读者"窗口，
+    WAL 会单调膨胀（实测 4.2MB > 库本体 1.4MB）；定期显式 TRUNCATE 回收。
+    临界区拿锁执行：MB 级 WAL 毫秒级完成，对请求路径无可感知影响。"""
+    async with _maybe_lock():
+        db = await _get_conn()
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
 async def trim_decision_log(keep: int = 500):
@@ -836,17 +847,6 @@ async def trim_call_metrics(keep_per_model: int = 500):
                 "(SELECT id FROM call_metrics WHERE model_name = ? ORDER BY id DESC LIMIT ?)",
                 (m, m, keep_per_model),
             )
-        await _commit(db)
-
-
-async def update_decision_actual_tokens(decision_id: int, actual_tokens: int | None):
-    """流式请求 usage 到达后补写真实 usage.total_tokens；decision_id 来自 log_decision。"""
-    async with _maybe_lock():
-        db = await _get_conn()
-        await db.execute(
-            "UPDATE decision_log SET actual_tokens = ? WHERE id = ?",
-            (actual_tokens, decision_id),
-        )
         await _commit(db)
 
 

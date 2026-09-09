@@ -299,7 +299,15 @@ class ModelPool:
 
     def reload(self):
         old_latency = {mid: e.latency_ms for mid, e in self.registry.items()}
+        # 旧 provider 的 httpx 连接池后台关闭（v2.11.42）：此前 clear() 直接丢弃，
+        # 连接要等 GC 才释放，每次热加载泄漏一轮连接池
+        old_providers = list(self.providers_cache.values())
         self.providers_cache.clear()
+        if old_providers:
+            try:
+                asyncio.get_running_loop().create_task(self._aclose_providers(old_providers))
+            except RuntimeError:
+                pass  # 无运行中事件循环（极端调用场景）：退回 GC 回收，不影响正确性
         self._quota_cache.clear()
         self.config = load_config()
         self.registry.clear()
@@ -310,6 +318,14 @@ class ModelPool:
         for mid, e in self.registry.items():
             if mid in old_latency:
                 e.latency_ms = old_latency[mid]
+
+    @staticmethod
+    async def _aclose_providers(providers):
+        for p in providers:
+            try:
+                await p.close()
+            except Exception:
+                pass
 
     def _get_provider(self, entry: ModelEntry):
         if entry.id not in self.providers_cache:
@@ -387,13 +403,26 @@ class ModelPool:
         return est_input + (getattr(req, "max_tokens", 0) or 0)
 
     def _has_images(self, req) -> bool:
+        # 结果缓存到请求实例：main._chat_handler 与 fallback 循环会各调一次，
+        # 多模态请求避免重复遍历全部 content 块（同 _est_input_cache 模式）
+        cached = getattr(req, "_has_images_cache", None)
+        if cached is not None:
+            return cached
+        result = False
         for m in getattr(req, "messages", None) or []:
             content = m.content
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") in ("image_url", "image"):
-                        return True
-        return False
+                        result = True
+                        break
+            if result:
+                break
+        try:
+            req._has_images_cache = result
+        except Exception:
+            pass
+        return result
 
     async def _quota_check(self, entry: ModelEntry, now: float) -> tuple[bool, str, dict | None]:
         """配额与限速预检（读 sqlite 的部分，由 _check_available 短缓存包装）。

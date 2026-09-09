@@ -23,6 +23,15 @@ async def db_maintenance():
         logger.exception("[DB维护] 裁剪/清扫失败")
 
 
+async def db_wal_checkpoint():
+    """定期 WAL 截断（每 10 分钟）：持续读者使被动 checkpoint 长期完不成、WAL 单调膨胀
+    （实测 4.2MB > 库本体 1.4MB），空闲时显式 TRUNCATE 回收。"""
+    try:
+        await db.wal_checkpoint()
+    except Exception:
+        logger.exception("[DB维护] WAL checkpoint 失败")
+
+
 async def refresh_model(model_id: str):
     # 先同步 config 的 refresh_time 到 DB（防热加载后 DB 滞后）
     try:
@@ -136,6 +145,12 @@ def _add_jobs():
         db_maintenance,
         IntervalTrigger(seconds=60),
         id="db_maintenance",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        db_wal_checkpoint,
+        IntervalTrigger(seconds=600),
+        id="db_wal_checkpoint",
         replace_existing=True,
     )
 

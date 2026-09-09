@@ -675,6 +675,18 @@ let editingId = null;
 let statsTimer = null;
 let logsTimer = null;
 let statDim = 'billing';
+// 标签页不可见时暂停 5s 轮询（后台页签白白打后端），回前台按当前页签立即恢复
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    clearInterval(statsTimer); statsTimer = null;
+    clearInterval(logsTimer); logsTimer = null;
+  } else {
+    const cur = document.querySelector('.tab.active');
+    const name = cur ? cur.dataset.tab : null;
+    if (name === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 5000); }
+    if (name === 'logs') { populateLogFilter(); loadDecisions(); logsTimer = setInterval(loadDecisions, 5000); }
+  }
+});
 // 触屏设备（手机/平板）不支持 HTML5 拖拽：启用「点一下上移一格」的替代排序交互
 const isTouchDevice = window.matchMedia && window.matchMedia('(hover: none), (pointer: coarse)').matches;
 

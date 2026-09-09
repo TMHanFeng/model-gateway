@@ -70,11 +70,22 @@ def verify_admin(request: Request):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+# 面板页面缓存（v2.11.42）：148KB read_text 是同步阻塞 IO，原先每次刷新都在事件循环内全量重读；
+# 改 mtime 缓存——文件未变时零 IO，手工改 HTML 后自动失效（no-cache 响应头语义不变）
+_admin_html_cache = {"mtime": None, "html": ""}
+
+
 @router.get("/", response_class=HTMLResponse)
 async def admin_page():
-    html = FRONTEND_PATH.read_text(encoding="utf-8")
+    try:
+        mtime = FRONTEND_PATH.stat().st_mtime
+    except OSError:
+        mtime = None
+    if _admin_html_cache["html"] == "" or mtime != _admin_html_cache["mtime"]:
+        _admin_html_cache["html"] = FRONTEND_PATH.read_text(encoding="utf-8")
+        _admin_html_cache["mtime"] = mtime
     # no-cache：面板迭代频繁，禁止浏览器拿旧 HTML（同 /hfadmin）
-    return HTMLResponse(content=html.replace("__GATEWAY_VERSION__", get_gateway_version()),
+    return HTMLResponse(content=_admin_html_cache["html"].replace("__GATEWAY_VERSION__", get_gateway_version()),
                         headers={"Cache-Control": "no-cache"})
 
 

@@ -16,7 +16,9 @@ class AnthropicProvider:
         _t = 120 if timeout_seconds is None else (None if timeout_seconds == 0 else timeout_seconds)
         kwargs = dict(
             timeout=httpx.Timeout(_t, connect=10),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            # keepalive_expiry：httpx 默认 5s 即关空闲连接，低频调用每次重新 TCP+TLS 握手；
+            # 放宽到 300s 复用长连接
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=300),
         )
         if proxy_url:
             kwargs["proxy"] = proxy_url
