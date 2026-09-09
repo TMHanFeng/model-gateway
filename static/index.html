@@ -1498,8 +1498,8 @@ async function loadStats() {
     }))
     .sort((a, b) => {
       // 剩余百分比越少越靠前；不限量（未设限额）固定在最后
-      const ar = a._limit > 0 ? Math.max(0, 100 - Math.min(100, (a._used || 0) / a._limit * 100)) : (a.m._gift ? -Infinity : Infinity);
-      const br = b._limit > 0 ? Math.max(0, 100 - Math.min(100, (b._used || 0) / b._limit * 100)) : (b.m._gift ? -Infinity : Infinity);
+      const ar = a._limit > 0 ? Math.max(0, 100 - Math.min(100, (a._used || 0) / a._limit * 100)) : (a._gift ? -Infinity : Infinity);
+      const br = b._limit > 0 ? Math.max(0, 100 - Math.min(100, (b._used || 0) / b._limit * 100)) : (b._gift ? -Infinity : Infinity);
       return ar - br;
     })
     .map((m, i) => {
@@ -1600,10 +1600,10 @@ function statRender(grid, items) {
   if (!Object.keys(prev).length) {
     grid.innerHTML = items.map((x, i) => statCardHTML(x, i)).join('');
   } else {
-    const ids = new Set(items.map(x => x.m.id));
+    const ids = new Set(items.map(x => x.id));
     Object.keys(prev).forEach(id => { if (!ids.has(id)) { prev[id].remove(); delete prev[id]; } });
     items.forEach((x, i) => {
-      let el = prev[x.m.id];
+      let el = prev[x.id];
       if (!el) {
         const tmp = document.createElement('div');
         tmp.innerHTML = statCardHTML(x, i);
@@ -1613,8 +1613,8 @@ function statRender(grid, items) {
       }
       el.style.order = i;
       el.className = 'stat-card ' + x.cls;
-      setStatTxt(el, '.stat-id', x.m.id);
-      setStatTxt(el, '.stat-name', x.m.name + ' · ' + x.billing);
+      setStatTxt(el, '.stat-id', x.id);
+      setStatTxt(el, '.stat-name', x.name + ' · ' + x.billing);
       const bd = el.querySelector('.stat-badges');
       if (bd && bd.innerHTML !== x.freeBadge + x.typeBadge) bd.innerHTML = x.freeBadge + x.typeBadge;
       setStatTxt(el, '.stat-used', x.used.toLocaleString());
