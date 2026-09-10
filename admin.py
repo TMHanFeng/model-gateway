@@ -359,6 +359,10 @@ async def add_model(request: Request, _=Depends(verify_admin)):
         "smart_estimate": bool(body.get("smart_estimate", False)),
         "no_stream_options": bool(body.get("no_stream_options", False)),
     }
+    try:
+        entry["valve_pct"] = max(0, min(100, int(body.get("valve_pct", 100))))  # 使用量安全阀 k（%）
+    except (TypeError, ValueError):
+        entry["valve_pct"] = 100
     if pid:
         entry["provider_id"] = pid
     else:
@@ -404,6 +408,25 @@ async def add_model(request: Request, _=Depends(verify_admin)):
             probe_status = "skipped"  # 探测失败不影响模型本身的使用（默认思考行为）
 
     return {"ok": True, "model": entry, "probe": probe_status}
+
+
+@router.get("/model/{model_id:path}/load")
+async def get_model_load(model_id: str, _=Depends(verify_admin)):
+    """v2.11.44：查询单个模型（而非模型池）的当前并发负载。
+
+    active = 正在上游处理中（持有 max_concurrency 槽位）；waiting = 排队等槽。
+    max_concurrency=0（不限）时 unlimited=True，active/waiting 照常给出。"""
+    from main import pool as _pool
+    entry = _pool.registry.get(model_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    return {
+        "model_id": model_id,
+        "max_concurrency": entry.max_concurrency,
+        "unlimited": entry.max_concurrency <= 0,
+        "active": entry.active_requests,
+        "waiting": entry.waiting_requests,
+    }
 
 
 @router.get("/model/{model_id:path}/metrics")
@@ -485,6 +508,11 @@ async def update_model(model_id: str, request: Request, _=Depends(verify_admin))
             int(body["timeout_seconds"])
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="timeout_seconds 必须为数字")
+    if "valve_pct" in body:
+        try:
+            body["valve_pct"] = max(0, min(100, int(body["valve_pct"])))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="valve_pct 必须为 0-100 的整数")
 
     for key, value in body.items():
         if key == "id":

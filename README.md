@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.11.43-orange)](#-版本)
+[![Version](https://img.shields.io/badge/version-v2.12.0-orange)](#-版本)
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 
 对外暴露 **OpenAI 兼容**与 **Anthropic Messages** 接口，
@@ -41,7 +41,7 @@
 
 | 🚨 故障转移 | 📊 配额管理 | 🎯 智能择优 |
 |:---|:---|:---|
-| 用量耗尽 / 限流触顶 / 上游报错 → **自动切换下一个** | 每日 Token、用量、5h 滚动窗口、`one_time` 一次性令牌 | 顺序模式 或 **自动择优**（按实时延迟） |
+| 用量耗尽 / 限流触顶 / 上游报错 → **自动切换下一个** | 每日 Token、用量、5h 滚动窗口、`one_time` 一次性令牌、**使用量安全阀**（`已用+预估 ≥ k×上限` 即跳过路由，编辑界面滑块调节） | 顺序模式 或 **自动择优**（按实时延迟） |
 
 | 🪆 多提供商聚合 | 🔀 模型池嵌套 | 📷 多模态降级 |
 |:---|:---|:---|
@@ -61,7 +61,7 @@
 
 | 🧠 统一思考控制 | 🧪 计费回归安全网 | 📐 智能估算超时 |
 |:---|:---|:---|
-| `reasoning_effort` 六档 → 按模型 `reasoning_map` 换算上游思考参数；思考内容统一回传 `reasoning_content` / `thinking` | 50 断言计费回归套件（`test_billing_regression.py`）：流式/非流式/一次性/RPM 触顶/并发入账零丢失，任何改动先跑套件再上线 | `smart_estimate` 模型按 token 量动态计算超时（吞吐 EMA 校准），样本不足自动回退固定值 |
+| `reasoning_effort` 六档 → 按模型 `reasoning_map` 换算上游思考参数；思考内容统一回传 `reasoning_content` / `thinking` | 62 断言计费回归套件（`test_billing_regression.py`）：流式/非流式/一次性/RPM 触顶/安全阀/并发入账零丢失，任何改动先跑套件再上线 | `smart_estimate` 模型按 token 量动态计算超时（吞吐 EMA 校准），样本不足自动回退固定值 |
 
 | 📡 Embedding / Rerank | 🔑 用户密钥管理 | 📄 JSON 输出路由 |
 |:---|:---|:---|
@@ -299,6 +299,7 @@ Anthropic 适配器自动完成：
 - **连续余额账本**：每笔调用扣减余额；到 `refresh_time` 时刻补入 `min(昨日自然日用量, daily_token_limit)`——不再是"清零重置为满额"，消耗不均匀时也不会虚高
 - 每天花 ≤ 上限 → 余额恒满；某天花超 → 超出部分永久扣除（与平台真实语义一致）
 - 余额耗尽即预检拒绝（走兜底/下一候选），不会打到平台扣真实额度；网关停机错过到账时刻会按 `model_daily_stats` 历史惰性补账，不丢账
+- 安全阀口径（v2.12.0）：gift 模型的阀门分母 = **min(当前可用总额池, 用户设置上限)**——补账时刻前后自动跟随池变化，与统计卡片分母同源；已用取今日自然日消耗
 - `daily_token_limit` 复用为余额上限、`refresh_time` 复用为到账补账时刻；统计页大数字 = **今日自然日消耗**（真实值，不随补账窗口变化、不被上限钳制），进度条 = 今日消耗 / 当前可用量（14:00 前 = 上一日剩余；补账后 = 剩余 + 补账，随窗口变化），右下角 = 预计补账额度，完整明细见卡片 ⓘ 悬停
 - 状态存于 `gift_state` 表（首次自动初始化为满额；如需对齐当前真实剩余可手工修改该表）
 
@@ -343,6 +344,7 @@ Anthropic 适配器自动完成：
       "base_url": "https://api.openai.com/v1",
       "api_key": "sk-xxx",
       "daily_token_limit": 1000000,     // 每日上限（0=不限；按次计费时单位为次）
+      "valve_pct": 100,                 // 使用量安全阀 k（%）：已用+预估 ≥ k×上限 即跳过路由；0=停用该模型；上限 0（不限）不生效
       "rpm_limit": 60,                  // 每分钟请求上限（0=不限）
       "tpm_limit": 100000,              // 每分钟 Token 上限（0=不限）
       "context_window": 128000,         // 上下文窗口（0=不校验）
@@ -418,13 +420,14 @@ Anthropic 适配器自动完成：
 | 用量已尽 · 1,500/1,000 (150%) | 配额或限流排除 |
 | RPM 触顶 · 60/60 RPM | RPM 触发上限 |
 | TPM 触顶 · 120,000/100,000 TPM | TPM 触发上限 |
+| 安全阀触顶 · 已用 95,000 + 预估 5,020 ≥ k上限 80,000（k=80%） | 使用量安全阀：本请求预估消耗后将越过 k×最大量限制，跳过该模型 |
 | 冷却中 · 剩 45s | 上游刚报错，临时跳过 |
 | 超上下文窗口 · 请求估算 150,000 tok，上限 128,000 | 请求过长 |
 | 不支持图片 · 模型为 text，请求含图 | 纯文本模型遇到图片请求 |
 | 一次性已失效 · 已用 50,000/50,000 | 一次性模型到期/用完 |
 | 一次性已失效 · 已存活 3700s / TTL 3600s | 同上，TTL 触发 |
 | 子池无可用接口 | 嵌套子池内全部不可用 |
-| **上游限流 → 切换 · HTTP 429 · 234ms · 冷却 10s** | 上游 429 限流后切换 |
+| **上游限流 → 切换 · HTTP 429 · 234ms · 冷却 5s** | 上游 429 限流后切换 |
 | **上游错误 → 切换 · TimeoutError · HTTP 500 · 2300ms · 冷却 5s** | 上游错误后切换 |
 
 **`detail` 字段参考**：
@@ -434,6 +437,7 @@ Anthropic 适配器自动完成：
 | `quota_exhausted` (daily) | `{used, limit}` |
 | `quota_exhausted` (rolling_5h) | `{used, limit, window_remaining_sec}` |
 | `rpm_limited` / `tpm_limited` | `{current, limit}` |
+| `valve_exceeded` | `{used, estimated, limit, valve_pct, effective_limit, reason_detail}`（安全阀：已用+预估 ≥ k×上限） |
 | `cooldown` | `{remaining_sec}` |
 | `context_exceeded` | `{estimated, window}` |
 | `no_vision` | `{modality}` |
@@ -455,6 +459,7 @@ Anthropic 适配器自动完成：
 | `/v1/embeddings` | POST | OpenAI 兼容 embedding（仅路由到模态=embedding 的模型，响应透传上游） |
 | `/v1/rerank` | POST | 重排（Jina/Cohere/SiliconFlow 兼容；仅路由到模态=rerank 的模型，响应透传上游） |
 | `/v1/models` | GET | 模型与池列表 |
+| `/v1/model/load` | GET | 查询单个模型当前并发负载（active 处理中 / waiting 排队，见[并发负载查询说明](并发负载查询说明.md)） |
 | `/health` | GET | 健康检查 |
 | `/version` | GET | 网关版本号（从 git tag 读取） |
 | `/stats` | GET | 各模型用量统计 |
@@ -467,6 +472,7 @@ Anthropic 适配器自动完成：
 | `/admin/models` | GET/POST/PUT/DELETE | 模型 CRUD（编辑时 ID 不可变；PUT 为按键合并，显式提交的键才覆盖） |
 | `/admin/models/reorder` | PUT | 调整模型管理列表顺序 |
 | `/admin/model/{id}/metrics` | GET | 智能估算校准数据（样本数 / 吞吐 EMA / 平均输出） |
+| `/admin/model/{id}/load` | GET | 单模型并发负载（active / waiting / max_concurrency，见[并发负载查询说明](并发负载查询说明.md)） |
 | `/admin/providers` | GET/POST/PUT/DELETE | 供应商 CRUD（含 reorder） |
 | `/admin/pools` | GET/POST/PUT/DELETE | 池 CRUD（含 rename / reorder / fallback_targets） |
 | `/admin/pools/{name}/single_override` | POST/DELETE | auto 池"一键单模型"开关 |
@@ -575,6 +581,8 @@ SQLite（`gateway.db`）持久化以下表：
 ## 📜 版本
 
 ### 最新
+
+**`v2.12.0`** — **使用量安全阀（k 系数）+ 并发负载查询 + 流式占槽**：①安全阀：模型新增 `valve_pct`（0~100%，默认 100）——预检升级为 **`已用+预估 ≥ k×最大量限制` 即跳过路由**（k=100% 同样启用），预估 = 输入 + 输出 EMA×1.1（call_metrics 校准样本≥10 生效，未校准回退仅输入，规避 v2.10.6 max_tokens 虚高误杀死锁）；分母按类型同源：daily/rolling_5h=`daily_token_limit`、one_time=`max_tokens`、gift=min(当前可用总额池， 用户上限)（补账前后自动跟随）、按次计费预估记 1 次；阀门判定在 5s 配额缓存之外逐请求计算（快照入缓存值，不膨胀缓存键）②统计卡片：条刻度=原始上限，**红线画在 k% 处（= 可用上限 k×limit）**，红线右侧淡红"红区"为超出部分；fill 宽度与百分比按原上限口径、触及红线即用满可用额度；**颜色（warn/full）按可用上限判定**（用到可用额度即转红）；主数字=可用上限 k×limit + 小字"原值 × k%"；k=0 显示"已停用"（阀门停用该模型）③双面板编辑弹窗新增**安全阀滑块**（轨道按值填色、k 数字弹跳），实时显示可用上限；gift 按 min(当前余额池， 用户上限) 动态预览、随补账变化，以统计卡片实时为准 ④决策原因新增 `valve_exceeded`（安全阀触顶，detail 含 used/estimated/effective_limit），双面板调用记录徽标+detail 格式化 ⑤**并发负载查询**：`active/waiting` 精确计数 + `_gate` 占槽封装，**修复流式完全不受 `max_concurrency` 限制的缺口**（流全程占槽，aclose 传播释放）；新增三查询端点 `GET /admin/model/{id}/load`、`GET /v1/model/load?model=`（用户 Key）、`/stats` 附带字段，面板卡片显示"负载 x/n · 排队 m"，详见[并发负载查询说明.md](并发负载查询说明.md) ⑥冷却统一 **5s**（原 429→10s，其余本为 5s；上下文超限 400 不冷却）⑦边界防护：上限 0（不限量）阀门不生效、`valve_pct=0` 即停用该模型、四入口（load/POST/PUT/前端）钳位 0-100 ⑧回归 50→62 断言全绿（新增 T13：k=100 计入预估/未校准不误杀/k=80 触线/k=0 停用/上限 0 放行/EMA 提前拦截/stats 带出）；UI 实测双面板+390px，修复 hfadmin `.stat-bar` 缺 `position:relative`（标线贯穿卡片）与增量新增卡 fill 宽度永空两个既有 bug
 
 **`v2.11.43`** — **轮询暂停守卫加固**：switchTab 清除定时器后同步置 null；visibilitychange 显示分支加 null 守卫防重复叠加定时器；UI 实测 hfadmin 五页签+密钥 CRUD 全链路、admin 五页签、390px 手机端无横向滚动
 

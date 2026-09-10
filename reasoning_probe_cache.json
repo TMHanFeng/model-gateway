@@ -3684,5 +3684,57 @@
    }
   },
   "notes": []
+ },
+ "openai|https://ark.cn-beijing.volces.com/api/v3|安全阀演示": {
+  "ts": "2026-09-10 12:20:49",
+  "protocol": "openai",
+  "name": "安全阀演示",
+  "calls": [
+   {
+    "fragment": null,
+    "status": 404,
+    "error": "{\"error\":{\"code\":\"InvalidEndpointOrModel.NotFound\",\"message\":\"The model or endpoint 安全阀演示 does not exist or you do not have access to it. Request id: 0217890140",
+    "reasoning_len": 0,
+    "content_len": 0,
+    "completion_tokens": 0
+   }
+  ],
+  "baseline_reasoning": 0,
+  "default_thinking": "不可用(404)",
+  "family": "",
+  "off_fragment": null,
+  "on_fragment": null,
+  "level_lens": {},
+  "levels_effective": false,
+  "suggested": {},
+  "notes": [
+   "基线请求失败，跳过该组合"
+  ]
+ },
+ "openai|https://ark.cn-beijing.volces.com/api/v3|gift演示": {
+  "ts": "2026-09-10 15:12:50",
+  "protocol": "openai",
+  "name": "gift演示",
+  "calls": [
+   {
+    "fragment": null,
+    "status": 404,
+    "error": "{\"error\":{\"code\":\"InvalidEndpointOrModel.NotFound\",\"message\":\"The model or endpoint gift演示 does not exist or you do not have access to it. Request id: 021789024",
+    "reasoning_len": 0,
+    "content_len": 0,
+    "completion_tokens": 0
+   }
+  ],
+  "baseline_reasoning": 0,
+  "default_thinking": "不可用(404)",
+  "family": "",
+  "off_fragment": null,
+  "on_fragment": null,
+  "level_lens": {},
+  "levels_effective": false,
+  "suggested": {},
+  "notes": [
+   "基线请求失败，跳过该组合"
+  ]
  }
 }

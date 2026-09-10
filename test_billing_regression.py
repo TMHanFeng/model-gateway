@@ -98,6 +98,11 @@ TEST_MODELS = [
      "is_free": True, "token_type": "gift", "daily_token_limit": 266},
     {"id": "zzbt/echo-rpm", "name": "mock-echo-rpm", "provider_id": "zzmock", "modality": "text",
      "is_free": True, "daily_token_limit": 1000000000, "rpm_limit": 1},
+    # T13 安全阀（v2.11.44）：echo-valve 上限 1000 便于边界运算；echo-nolimit 无上限验证阀门不生效
+    {"id": "zzbt/echo-valve", "name": "mock-echo-valve", "provider_id": "zzmock", "modality": "text",
+     "is_free": True, "daily_token_limit": 1000},
+    {"id": "zzbt/echo-nolimit", "name": "mock-echo-nolimit", "provider_id": "zzmock", "modality": "text",
+     "is_free": True},
 ]
 TEST_IDS = [m["id"] for m in TEST_MODELS]
 
@@ -114,7 +119,7 @@ def deep_clean():
     c["models"] = [m for m in c.get("models", []) if not str(m.get("id", "")).startswith("zzbt/")]
     c.get("pools", {}).pop("zzall", None)
     c.get("pools", {}).pop("zzdef", None)  # v2.11.19 曾漏清该测试池残留至生产配置
-    for pn in ("zzreq", "zzonce", "zzsmart", "zznso", "zzgift", "zzrpm"):
+    for pn in ("zzreq", "zzonce", "zzsmart", "zznso", "zzgift", "zzrpm", "zzvalve", "zzvnl"):
         c.get("pools", {}).pop(pn, None)
     json.dump(c, open(os.path.join(REPO, "config.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     q = " OR ".join([f"model_name='{i}'" for i in TEST_IDS])
@@ -176,6 +181,8 @@ def main():
     c["pools"]["zznso"] = {"model_ids": ["zzbt/echo-nso"], "strategy": "sequential"}
     c["pools"]["zzgift"] = {"model_ids": ["zzbt/echo-gift"], "strategy": "sequential"}
     c["pools"]["zzrpm"] = {"model_ids": ["zzbt/echo-rpm"], "strategy": "sequential"}
+    c["pools"]["zzvalve"] = {"model_ids": ["zzbt/echo-valve"], "strategy": "sequential"}
+    c["pools"]["zzvnl"] = {"model_ids": ["zzbt/echo-nolimit"], "strategy": "sequential"}
     json.dump(c, open(os.path.join(REPO, "config.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
     # 启动隔离实例
@@ -416,6 +423,91 @@ def main():
               {k: row.get(k) for k in ("gift_usage_today", "today_tokens")})
         check("T11h 当前可用总额池=昨日剩余+今日已补(400+133=533)",
               row.get("gift_pool") == 533, row.get("gift_pool"))
+
+        # ===== T13 使用量安全阀（v2.11.44：已用+预估 ≥ k×最大量限制 → 跳过路由）=====
+        def set_used(model, used):
+            # 直写 token_usage 并对齐懒重置的 last_reset_date（否则 get_daily_usage 会清零）
+            _tdy = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+            db_exec("""INSERT INTO token_usage (model_name, used_tokens, last_reset_date, refresh_time)
+                       VALUES (?, ?, ?, '')
+                       ON CONFLICT(model_name) DO UPDATE SET used_tokens = excluded.used_tokens,
+                                                            last_reset_date = excluded.last_reset_date""",
+                    (model, used, _tdy))
+            httpx.post(f"{BASE}/admin/reload", headers=ADMIN, timeout=30)  # 清 5s 配额预检缓存
+            time.sleep(0.5)
+
+        def reject_steps(pool):
+            r = httpx.get(f"{BASE}/admin/decisions?limit=5", headers=ADMIN, timeout=15)
+            j = r.json()
+            arr = j.get("decisions") if isinstance(j, dict) else j
+            zz = next((x for x in (arr or []) if x.get("pool_name") == pool), None)
+            return (zz or {}).get("steps") or []
+
+        # T13a k=100（缺省）即计入预估：used=950<1000 旧线不触发，中文 est=101 越线 → 纯阀门拦截
+        set_used("zzbt/echo-valve", 950)
+        r = chat("zzvalve", content="测" * 100)  # est_input=101 → (950+101)*100 ≥ 1000*100
+        check("T13a k=100计入预估(used+est越线503)", r.status_code == 503, r.status_code)
+        check("T13a2 决策记录valve_exceeded",
+              any(s.get("reason") == "valve_exceeded" for s in reject_steps("zzvalve")),
+              [s.get("reason") for s in reject_steps("zzvalve")])
+
+        # T13b 未校准=仅输入口径（防 max_tokens 虚高误杀，v2.10.6 教训）：est=2 不越线 → 放行
+        set_used("zzbt/echo-valve", 950)
+        r = chat("zzvalve", content="hi")  # (950+2)*100=95200 < 100000；输出 133 不计入预估
+        check("T13b 未校准仅输入口径不误杀(200)", r.status_code == 200, r.status_code)
+
+        # T13c k=80 红线语义：线内放行、触线拒绝（used<1000 旧线未触发，纯阀门）
+        r = httpx.put(f"{BASE}/admin/models/zzbt/echo-valve", headers=ADMIN, json={"valve_pct": 80}, timeout=15)
+        check("T13c0 PUT valve_pct=80 保存生效",
+              r.status_code == 200 and r.json().get("model", {}).get("valve_pct") == 80, r.text[:80])
+        httpx.post(f"{BASE}/admin/reload", headers=ADMIN, timeout=30)
+        time.sleep(0.5)
+        set_used("zzbt/echo-valve", 700)
+        r = chat("zzvalve", content="hi")  # (700+2)*100=70200 < 80000
+        check("T13c1 k=80 线内放行(702<800)", r.status_code == 200, r.status_code)
+        r = chat("zzvalve", content="hi")  # used=833 → (833+2)*100=83500 ≥ 80000
+        check("T13c2 k=80 触线拒绝(833+est≥800)", r.status_code == 503, r.status_code)
+        check("T13c3 触线原因=valve_exceeded(非quota_exhausted)",
+              any(s.get("reason") == "valve_exceeded" for s in reject_steps("zzvalve")),
+              [s.get("reason") for s in reject_steps("zzvalve")])
+
+        # T13d 校准 EMA×1.1：注入 12 条 completion=50 样本 → est=2+55=57，used=950 时被拦
+        # （未校准同状态 95200<100000 会放行——T13b 已证——差异即校准贡献）
+        db_exec("DELETE FROM call_metrics WHERE model_name='zzbt/echo-valve'")
+        for _ in range(12):
+            db_exec("""INSERT INTO call_metrics (model_name, ts, estimated_tokens, prompt_tokens,
+                       completion_tokens, total_tokens, max_tokens, latency_ms)
+                       VALUES ('zzbt/echo-valve', 0, 0, 0, 50, 150, 0, 100)""")
+        httpx.put(f"{BASE}/admin/models/zzbt/echo-valve", headers=ADMIN, json={"valve_pct": 100}, timeout=15)
+        httpx.post(f"{BASE}/admin/reload", headers=ADMIN, timeout=30)
+        time.sleep(0.5)
+        set_used("zzbt/echo-valve", 950)
+        r = chat("zzvalve", content="hi")  # (950+2+55)*100=100700 ≥ 100000
+        check("T13d 校准EMA×1.1提前拦截(957≥1000)", r.status_code == 503, r.status_code)
+
+        # T13e k=0 = 停用（任何请求都拒绝）
+        httpx.put(f"{BASE}/admin/models/zzbt/echo-valve", headers=ADMIN, json={"valve_pct": 0}, timeout=15)
+        httpx.post(f"{BASE}/admin/reload", headers=ADMIN, timeout=30)
+        time.sleep(0.5)
+        set_used("zzbt/echo-valve", 0)
+        r = chat("zzvalve", content="hi")
+        check("T13e k=0 停用该模型(503)", r.status_code == 503, r.status_code)
+
+        # T13f 上限 0（不限量）阀门不生效：无 snap，valve_pct=0 也不拦（防 k×0=0 全拦误杀）
+        r = httpx.put(f"{BASE}/admin/models/zzbt/echo-nolimit", headers=ADMIN, json={"valve_pct": 0}, timeout=15)
+        check("T13f0 nolimit PUT生效", r.status_code == 200, r.status_code)
+        httpx.post(f"{BASE}/admin/reload", headers=ADMIN, timeout=30)
+        time.sleep(0.5)
+        r = chat("zzvnl", content="hi")
+        check("T13f 上限0不限量阀门不生效(200)", r.status_code == 200, r.status_code)
+
+        # T13g /stats 带出 valve_pct（统计卡片画红线/显示系数的数据源）
+        r = httpx.get(f"{BASE}/stats", headers=ADMIN, timeout=15)
+        rows = {x.get("id"): x for x in r.json().get("models", [])}
+        check("T13g /stats返回valve_pct",
+              rows.get("zzbt/echo-valve", {}).get("valve_pct") == 0
+              and rows.get("zzbt/echo-nolimit", {}).get("valve_pct") == 0,
+              {k: rows.get(k, {}).get("valve_pct") for k in ("zzbt/echo-valve", "zzbt/echo-nolimit")})
 
     finally:
         try:

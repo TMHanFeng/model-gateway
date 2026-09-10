@@ -278,6 +278,26 @@ async def list_models(auth: dict = Depends(verify_key)):
     return {"object": "list", "data": data}
 
 
+@app.get("/v1/model/load")
+async def model_load(model: str = "", auth: dict = Depends(verify_key)):
+    """v2.11.44：调用方查询单个模型（而非模型池）的当前并发负载。
+
+    GET /v1/model/load?model=模型ID → {model_id, max_concurrency, unlimited, active, waiting}
+    active = 正在上游处理中（持有并发槽）；waiting = 排队等槽。"""
+    if not model:
+        raise HTTPException(status_code=400, detail="缺少 model 参数")
+    entry = pool.registry.get(model)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Model '{model}' not found")
+    return {
+        "model_id": model,
+        "max_concurrency": entry.max_concurrency,
+        "unlimited": entry.max_concurrency <= 0,
+        "active": entry.active_requests,
+        "waiting": entry.waiting_requests,
+    }
+
+
 @app.post("/v1/embeddings")
 async def embeddings_handler(request: Request, auth: dict = Depends(verify_key)):
     """OpenAI 兼容 embedding 端点：仅匹配 modality=embedding 的模型，响应完全透传上游。"""

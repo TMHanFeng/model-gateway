@@ -339,6 +339,12 @@ select { max-width: 100%; }
 /* ⓘ 即时气泡（全局浮层，悬停立即显示，无原生 title 的系统延迟） */
 .tip-pop { position: fixed; z-index: 9999; display: none; max-width: 340px; padding: 10px 14px; border-radius: 12px; background: rgba(255, 255, 255, 0.98); border: 1px solid var(--line-hi); color: var(--text); font-size: 12px; line-height: 1.9; white-space: pre-line; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16); pointer-events: none; }
 .hint { font-size: 12.5px; color: var(--muted); }
+/* 使用量安全阀滑块（v2.11.44）：自定义细轨道 + 主题色填充（onValveInput 同步渐变）+ 圆形拇指 */
+#valve-fields input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 3px; background: rgba(120, 120, 128, 0.16); outline: none; padding: 0; border: none; cursor: pointer; box-shadow: none; }
+#valve-fields input[type="range"]:focus { outline: none; box-shadow: none; }
+#valve-fields input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--teal); border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .2); }
+#valve-fields input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--teal); border: 2px solid #fff; }
+#valve-pct-val { display: inline-block; transition: transform .15s var(--ease-out, ease-out); }
 .hidden { display: none !important; }
 
 /* 统计 */
@@ -357,8 +363,39 @@ select { max-width: 100%; }
 .stat-sep { color: rgba(0, 0, 0, 0.2); font-size: 14px; }
 .stat-limit { font-family: var(--mono); font-size: 14px; color: var(--muted); }
 .stat-unit { font-size: 11px; color: var(--muted); margin-left: 2px; }
-.stat-bar { height: 6px; border-radius: 4px; background: rgba(120, 120, 128, 0.14); overflow: hidden; }
-.stat-fill { height: 100%; width: 0; border-radius: 4px; transition: width 600ms var(--ease-out); background: var(--grad); }
+/* 安全阀红线（v2.11.44）：bar 内 k% 处竖线 + 原上限×k 小字注记 */
+.stat-card.warn .stat-fill { background: linear-gradient(90deg, #ff9f0a, #ff6b22); }
+.stat-card.full .stat-fill { background: linear-gradient(90deg, #ff3b30, #ff6482); }
+/* ─── v2.11.44 进度条动态美化（合成器友好：仅 opacity/filter/transform，作用于 warn/full 卡）─── */
+/* 安全阀红线：顶端小三角旗 + 静态光晕；红区 = 可用上限之外的超出部分；触及满格（full）时红线呼吸闪烁 */
+.stat-redzone { position: absolute; top: 0; bottom: 0; right: 0; background: rgba(255, 59, 48, .14); z-index: 1; }
+.stat-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--red); z-index: 3; border-radius: 1px; box-shadow: 0 0 5px rgba(255, 59, 48, .45); }
+.stat-fill { z-index: 2; }
+.stat-mark::before {
+  content: ''; position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+  border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 4px solid var(--red);
+}
+.stat-card.full .stat-mark { animation: valveMarkPulse 1.2s var(--ease-out) infinite; }
+@keyframes valveMarkPulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+/* warn：fill 亮度缓慢呼吸（filter 合成）；full：入场一次扫光（伪元素 translateX） */
+.stat-card.warn .stat-fill { animation: fillWarnBreath 2.4s ease-in-out infinite; }
+@keyframes fillWarnBreath { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.14); } }
+.stat-card.full .stat-fill { position: relative; overflow: hidden; }
+.stat-card.full .stat-fill::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: -40%; width: 40%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, .5), transparent);
+  animation: fillSheen 1.8s var(--ease-out) 1 forwards;
+}
+@keyframes fillSheen { to { transform: translateX(350%); } }
+/* 并发负载小字（v2.11.44，仅 max_concurrency>0 的模型显示） */
+.stat-load { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+/* 可访问性：用户偏好减弱动效时关闭全部循环动画 */
+@media (prefers-reduced-motion: reduce) {
+  .stat-card.full .stat-mark, .stat-card.warn .stat-fill, .stat-card.full .stat-fill::after { animation: none; }
+}
+.stat-bar { height: 6px; border-radius: 4px; background: rgba(120, 120, 128, 0.14); overflow: hidden; position: relative; }
+.stat-fill { height: 100%; width: 0; border-radius: 4px; transition: width 600ms var(--ease-out); background: var(--grad); animation: fillIn .6s var(--ease-out) backwards; transform-origin: left; }
+@keyframes fillIn { from { transform: scaleX(0); } }
 .stat-card.warn .stat-fill { background: linear-gradient(90deg, #ff9f0a, #ff6b22); }
 .stat-card.full .stat-fill { background: linear-gradient(90deg, #ff3b30, #ff6482); }
 .stat-meta { display: flex; justify-content: space-between; margin-top: 8px; font-size: 11.5px; color: var(--muted); }
@@ -794,6 +831,11 @@ select { max-width: 100%; }
         <div class="fg"><label>模型模态</label><select name="modality" onchange="onModalityChange()"><option value="text">纯文本</option><option value="vision">多模态</option><option value="embedding">embedding（嵌入模型）</option><option value="rerank">rerank（重排模型）</option></select></div>
         <div class="fg" id="limit-fields"><label id="limit-label">每日 Token 上限（0=不限）</label><input name="daily_token_limit" type="number" value="0"></div>
         <div class="fg"><label>上下文窗口（0=不校验）</label><input name="context_window" type="number" value="0"></div>
+      </div>
+      <div class="fg" id="valve-fields">
+        <label>使用量安全阀 k：<span id="valve-pct-val" style="color:var(--teal)">100%</span></label>
+        <input name="valve_pct" type="range" min="0" max="100" step="1" value="100" oninput="onValveInput()">
+        <div class="hint" id="valve-hint">已用 + 预估 ≥ k×最大量限制 时跳过该模型；当前可用最大限制：—</div>
       </div>
       <div class="form-sec">配额与限流</div>
       <div class="f3">
@@ -1403,6 +1445,61 @@ function onTokenTypeChange() {
   if (_lf) _lf.classList.toggle('hidden', ttype === 'one_time');
   updateGiftHint();
   onBillingChange();
+  // gift 模型：拉取当前可用总额池（安全阀分母 = min(池, 用户上限)×k，随补账变化）
+  if (ttype === 'gift' && editingId) refreshValveGiftPool(editingId);
+  onValveInput();  // 安全阀实时预览跟随令牌类型切换（分母源 one_time→max_tokens / 其余→daily_token_limit）
+}
+
+/* gift 安全阀动态预览：/stats 的 gift_pool 页面缓存（编辑弹窗打开期间有效；拖动滑块只读缓存不重复请求） */
+let valveGiftPool = null;        // 当前可用总额池（昨日剩余+今日已补）
+let valveGiftPoolFor = '';       // 缓存对应的模型 id（''=无效/新建模式）
+function refreshValveGiftPool(modelId) {
+  if (valveGiftPoolFor === modelId) return;  // 该模型已拉取过/拉取中
+  valveGiftPoolFor = modelId;
+  valveGiftPool = null;
+  api('/stats').then(d => {
+    const m = d && (d.models || []).find(x => x.id === modelId);
+    valveGiftPool = m ? (m.gift_pool ?? null) : null;
+    if (editingId === modelId) onValveInput();  // 弹窗仍开着该模型才刷新预览
+  }).catch(() => { valveGiftPool = null; });
+}
+
+function onValveInput() {
+  const f = document.getElementById('mform');
+  const pct = parseInt(f.valve_pct.value);  // range 值恒为合法数字串；0 是合法值（=停用），不可用 || 写法
+  if (!Number.isFinite(pct)) return;
+  const ttype = f.token_type.value;
+  // 分母与统计卡片/后端预检同源：one_time 用一次性 max_tokens，其余用 daily_token_limit
+  const src = ttype === 'one_time' ? f.max_tokens : f.daily_token_limit;
+  let base = parseInt(src && src.value) || 0;
+  const pctEl = document.getElementById('valve-pct-val');
+  const hint = document.getElementById('valve-hint');
+  // 轨道按当前值填充主题色（一次 style 更新，无动画循环）
+  f.valve_pct.style.background = `linear-gradient(to right, var(--teal) ${pct}%, rgba(120, 120, 128, 0.16) ${pct}%)`;
+  if (pctEl) {
+    pctEl.textContent = pct + '%';
+    pctEl.style.transform = 'scale(1.22)';  // k 数字轻弹跳（单次过渡，非循环）
+    clearTimeout(onValveInput._popT);
+    onValveInput._popT = setTimeout(() => { pctEl.style.transform = ''; }, 140);
+  }
+  if (!hint) return;
+  // gift（余额返还制）：分母 = min(当前可用总额池, 用户上限)，随补账变化
+  let giftNote = '';
+  let giftPoolOk = false;
+  if (ttype === 'gift' && base > 0 && valveGiftPoolFor === editingId && valveGiftPool != null && valveGiftPool > 0) {
+    if (valveGiftPool < base) {
+      giftNote = '余额池 ' + valveGiftPool.toLocaleString() + ' 与上限 ' + base.toLocaleString() + ' 取小';
+      base = valveGiftPool;
+    } else {
+      giftPoolOk = true;
+    }
+  }
+  if (base <= 0) { hint.textContent = '已用 + 预估 ≥ k×最大量限制 时跳过该模型；最大量限制为 0（不限量），安全阀不生效'; return; }
+  if (pct <= 0) { hint.textContent = '当前可用最大限制：0（k=0%，该模型停用，不再路由）'; return; }
+  const eff = Math.floor(base * pct / 100);
+  let note = '当前可用最大限制：' + eff.toLocaleString() + '（' + (giftNote ? giftNote + ' × ' + pct + '%' : '原 ' + base.toLocaleString() + ' × ' + pct + '%') + (giftPoolOk ? '；余额池充足' : '') + '）';
+  if (ttype === 'gift') note += giftNote ? '；随补账变化，以统计卡片实时为准' : '；实际还受当日余额池限制（见统计卡片）';
+  hint.textContent = '已用 + 预估 ≥ k×最大量限制 时跳过该模型；' + note;
 }
 function updateGiftHint() {
   const ttype = (document.getElementById('f-token-type') || {}).value || 'daily';
@@ -1557,6 +1654,7 @@ async function editModel(id) {
   f.gift_grant_cap.value = m.gift_grant_cap || 5000000;
   f.max_tokens.value = m.max_tokens || 0; f.ttl_seconds.value = m.ttl_seconds || 0;
   f.expire_date.value = m.expire_date || '';
+  f.valve_pct.value = m.valve_pct ?? 100;  // 安全阀回填（缺省 100%，onTokenTypeChange→onValveInput 刷新预览）
   onTokenTypeChange(); onSmartToggle();
   document.getElementById('f-model-id').disabled = true;
   await populateProviderSelect(m.provider_id || '');
@@ -1570,6 +1668,9 @@ async function submitModel(e) {
   const body = Object.fromEntries(new FormData(document.getElementById('mform')).entries());
   ['daily_token_limit','rpm_limit','tpm_limit','context_window','max_concurrency','max_tokens','ttl_seconds'].forEach(k => body[k] = parseInt(body[k]) || 0);
   body.gift_grant_cap = parseInt(body.gift_grant_cap) || 5000000;  // 每日返还上限（默认 500 万）
+  // 安全阀：0=停用是合法值，不能用 || 写法吞掉
+  const _vp = parseInt(body.valve_pct);
+  body.valve_pct = Number.isFinite(_vp) ? Math.max(0, Math.min(100, _vp)) : 100;
   // 超时时间：120=系统默认；0=无限等待；其余为秒数（旧配置 null 编辑保存后落为显式 120，行为不变）
   body.timeout_seconds = parseInt(body.timeout_seconds) || 0;
   body.is_free = body.is_free === 'true';
@@ -2260,10 +2361,36 @@ async function loadStats() {
       numsTitle = '使用量=今日自然日消耗；分母=min(昨日剩余+今日已补, 用户设置上限)，两者取小';
     }
     if (isBilling && windowModel && !isGift) numsTitle = `当前窗口用量（自 ${m.refresh_time} 起）`;
-    let pct = isBilling && limit > 0 ? Math.min(100, used / limit * 100) : 0;
+    // 安全阀（v2.11.44）：条刻度 = 原始上限，fill 与百分比均按原上限口径。红线 .stat-mark 画在
+    // 条宽 k% 处（= 可用上限 k×limit），红线右侧 .stat-redzone 红区 = 可用上限之外的超出部分。
+    // limitText 主数字 = k×上限（可用额度）+ 小字原值×k。
+    let pct = isBilling && limit > 0 ? Math.min(100, used / limit * 100) : 0;   // fill 几何与百分比（原上限口径）
     if (isBilling && isGift && limit <= 0) pct = 100;   // 可用量耗尽：进度条满格
-    const cls = !isBilling ? '' : (m.expired ? 'full' : (pct >= 100 ? 'full' : pct >= 75 ? 'warn' : ''));
-    const pctText = !isBilling ? '—' : (m.expired ? '已失效' : (isGift && limit <= 0 ? '已用尽' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量')));
+    const valve = Math.max(0, Math.min(100, m.valve_pct ?? 100));
+    let limitNote = '';
+    if (isBilling && limit > 0 && valve > 0 && valve < 100) {
+      limitNote = '原 ' + limit.toLocaleString() + ' × ' + valve + '%';
+      limitText = Math.floor(limit * valve / 100).toLocaleString();
+      numsTitle += '；安全阀 k=' + valve + '%：红线为可用上限 ' + Math.floor(limit * valve / 100).toLocaleString() + '，红线右侧红区为超出部分';
+    } else if (isBilling && limit > 0 && valve <= 0) {
+      pct = 100;
+      limitNote = 'k=0% 已停用';
+      limitText = '0';
+      numsTitle += '；安全阀 k=0%：该模型已停用（不再路由）';
+    }
+    const mark = (isBilling && limit > 0 && valve > 0 && valve < 100) ? valve : null;
+    // 并发负载小字（仅设了 max_concurrency 的模型显示）
+    const loadText = (m.max_concurrency > 0 && isBilling)
+      ? '负载 ' + (m.active_requests || 0) + '/' + m.max_concurrency + ((m.waiting_requests || 0) > 0 ? ' · 排队 ' + m.waiting_requests : '')
+      : '';
+    // 颜色（warn/full）按真实可用上限 k×limit 判定：用到可用额度即"用完"转红，≥75%×可用额度转橙；
+    // fill 宽度与百分比文本仍按原上限口径。
+    let effPct = pct;
+    if (isBilling && limit > 0 && valve > 0 && valve < 100) {
+      effPct = Math.min(100, used / (limit * valve / 100) * 100);
+    }
+    const cls = !isBilling ? '' : (m.expired ? 'full' : (effPct >= 100 ? 'full' : effPct >= 75 ? 'warn' : ''));
+    const pctText = !isBilling ? '—' : (m.expired ? '已失效' : (isBilling && limit > 0 && valve <= 0 ? '已停用' : (isGift && limit <= 0 ? '已用尽' : (limit > 0 ? pct.toFixed(1) + '%' : '不限量'))));
     const billing = m.billing_mode === 'request' ? '按次计费' : '按 Token 计费';
     const typeBadge = m.token_type === 'one_time' ? '<span class="badge b-once">一次性</span>'
       : m.token_type === 'rolling_5h' ? '<span class="badge b-5h">5h限额</span>'
@@ -2282,12 +2409,16 @@ async function loadStats() {
     if (windowModel && !isGift && isBilling && (m.today_tokens || 0) > 0) {
       refresh += ` · 自然日 ${(m.today_tokens || 0).toLocaleString()} tok`;
     }
-    return { m, used, limit, unit, numsTitle, limitText, pct, cls, pctText, billing, typeBadge, freeBadge, refresh, _used: used, _limit: limit, _wused: wUsed };
+    return { m, used, limit, unit, numsTitle, limitText, pct, cls, pctText, billing, typeBadge, freeBadge, refresh, _used: used, _limit: limit, _wused: wUsed, _valve: valve, mark, limitNote, loadText };
   }).sort((a, b) => {
-    // 剩余百分比越少越靠前；不限量（未设限额）固定在最后
-    const ar = a._limit > 0 ? Math.max(0, 100 - Math.min(100, (a._wused || 0) / a._limit * 100)) : (a.m.token_type === 'gift' ? -Infinity : Infinity);
-    const br = b._limit > 0 ? Math.max(0, 100 - Math.min(100, (b._wused || 0) / b._limit * 100)) : (b.m.token_type === 'gift' ? -Infinity : Infinity);
-    return ar - br;
+    // 剩余百分比越少越靠前（按有效上限 k×limit 口径，安全阀收得越紧越靠前）；
+    // 不限量（未设限额）固定在最后；k=0（停用）剩余为 0 排最前
+    const rem = x => {
+      if (x._limit <= 0) return x.m.token_type === 'gift' ? -Infinity : Infinity;
+      if (x._valve <= 0) return 100;
+      return Math.max(0, 100 - Math.min(100, (x._wused || 0) / (x._limit * x._valve / 100) * 100));
+    };
+    return rem(a) - rem(b);
   });
 
   statRender(grid, items);
@@ -2313,10 +2444,12 @@ function statCardHTML(x, i) {
         <span class="stat-sep">/</span>
         <span class="stat-limit">${x.limitText}</span>
         <span class="stat-unit">${x.unit}</span>
+        ${x.limitNote ? `<span class="stat-limit-note">${x.limitNote}</span>` : ''}
       </div>
-      <div class="stat-bar"><div class="stat-fill" data-pct="${x.pct}"></div></div>
+      <div class="stat-bar">${x.mark != null ? `<div class="stat-redzone" style="left:${x.mark}%"></div><div class="stat-mark" style="left:calc(${x.mark}% - 1px)" data-k="${x.mark}"></div>` : ''}<div class="stat-fill" data-pct="${x.pct}" style="width:${x.pct}%"></div></div>
       <div class="stat-meta">
         <span class="stat-pct">${x.pctText}</span>
+        ${x.loadText ? `<span class="stat-load">${x.loadText}</span>` : ''}
         <span class="stat-refresh">${x.refresh}</span>
       </div>
     </div>`;
@@ -2339,6 +2472,9 @@ function statRender(grid, items) {
         const tmp = document.createElement('div');
         tmp.innerHTML = statCardHTML(x, i);
         el = tmp.firstElementChild;
+        // v2.11.44 修既有 bug：增量新增的卡片 fill 宽度原来无人设置（data-pct 已相同被后续轮次跳过）——落卡即设宽
+        const nf = el.querySelector('.stat-fill');
+        if (nf) nf.style.width = x.pct + '%';
         grid.appendChild(el);
         return;
       }
@@ -2355,10 +2491,52 @@ function statRender(grid, items) {
       if (nums && nums.getAttribute('title') !== x.numsTitle) nums.setAttribute('title', x.numsTitle);
       const fill = el.querySelector('.stat-fill');
       if (fill && fill.dataset.pct !== String(x.pct)) { fill.dataset.pct = x.pct; fill.style.width = x.pct + '%'; }
+      // 安全阀红线/红区/小字注记：增量分支必须三态（增/改/删），否则改 k 后旧卡片标线不动
+      const mark = el.querySelector('.stat-mark');
+      if (x.mark != null) {
+        if (mark) {
+          if (mark.dataset.k !== String(x.mark)) { mark.dataset.k = x.mark; mark.style.left = 'calc(' + x.mark + '% - 1px)'; }
+        } else {
+          const d = document.createElement('div');
+          d.className = 'stat-mark'; d.dataset.k = x.mark; d.style.left = 'calc(' + x.mark + '% - 1px)';
+          el.querySelector('.stat-bar').prepend(d);
+        }
+        const rz = el.querySelector('.stat-redzone');
+        if (rz) { if (rz.dataset.k !== String(x.mark)) { rz.dataset.k = x.mark; rz.style.left = x.mark + '%'; } }
+        else {
+          const d2 = document.createElement('div');
+          d2.className = 'stat-redzone'; d2.dataset.k = x.mark; d2.style.left = x.mark + '%';
+          el.querySelector('.stat-bar').prepend(d2);
+        }
+      } else if (mark) {
+        mark.remove();
+        el.querySelector('.stat-redzone')?.remove();
+      }
+      const noteEl = el.querySelector('.stat-limit-note');
+      if (x.limitNote) {
+        if (noteEl) { if (noteEl.textContent !== x.limitNote) noteEl.textContent = x.limitNote; }
+        else {
+          const sp = document.createElement('span');
+          sp.className = 'stat-limit-note'; sp.textContent = x.limitNote;
+          const un = el.querySelector('.stat-unit');
+          if (un) un.after(sp); else el.querySelector('.stat-nums').appendChild(sp);
+        }
+      } else if (noteEl) noteEl.remove();
       const pctEl = el.querySelector('.stat-pct');
       if (pctEl && pctEl.textContent !== x.pctText) pctEl.textContent = x.pctText;
       const rf = el.querySelector('.stat-refresh');
       if (rf && rf.innerHTML !== x.refresh) rf.innerHTML = x.refresh;
+      // 并发负载小字：三态（增/改/删），仅 max_concurrency>0 的模型有
+      const loadEl = el.querySelector('.stat-load');
+      if (x.loadText) {
+        if (loadEl) { if (loadEl.textContent !== x.loadText) loadEl.textContent = x.loadText; }
+        else {
+          const sp = document.createElement('span');
+          sp.className = 'stat-load'; sp.textContent = x.loadText;
+          const pf = el.querySelector('.stat-pct');
+          if (pf) pf.after(sp); else el.querySelector('.stat-meta')?.prepend(sp);
+        }
+      } else if (loadEl) loadEl.remove();
     });
     return;
   }
@@ -2381,6 +2559,7 @@ const REASON_BASE = {
   quota_exhausted: ['用量已尽', 'rsn-skip'],
   rpm_limited: ['RPM 触顶', 'rsn-skip'],
   tpm_limited: ['TPM 触顶', 'rsn-skip'],
+  valve_exceeded: ['安全阀触顶', 'rsn-skip'],
   cooldown: ['冷却中', 'rsn-warn'],
   context_exceeded: ['超上下文窗口', 'rsn-skip'],
   context_overflow: ['上下文超限·不冷却透传', 'rsn-warn'],
@@ -2413,6 +2592,12 @@ function formatDetail(reason, d) {
       return d.current != null ? tail(`${fmtNum(d.current)}/${fmtNum(d.limit)} RPM`) : '';
     case 'tpm_limited':
       return d.current != null ? tail(`${fmtNum(d.current)}/${fmtNum(d.limit)} TPM`) : '';
+    case 'valve_exceeded':
+      if (d.used != null && d.estimated != null && d.effective_limit != null) {
+        return tail(`已用 ${fmtNum(d.used)} + 预估 ${fmtNum(d.estimated)} ≥ k上限 ${fmtNum(d.effective_limit)}（k=${d.valve_pct}%）`);
+      }
+      if (d.reason_detail) return tail(d.reason_detail);
+      return '';
     case 'cooldown':
       return d.remaining_sec != null ? tail(`剩 ${d.remaining_sec}s`) : '';
     case 'context_exceeded':
