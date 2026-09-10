@@ -1,13 +1,13 @@
 <div align="center">
 
-# 🚀 Model Gateway
+# 🚀 Hello My Gateway
 
-### 本地 LLM 自动切换网关 · 聚合多上游 · 配额保护 · 可视化管控
+### Model Gateway · 本地 LLM 自动切换网关 · 聚合多上游 · 配额保护 · 可视化管控
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.11.1-orange)](#-版本)
+[![Version](https://img.shields.io/badge/version-v2.11.43-orange)](#-版本)
 [![Status](https://img.shields.io/badge/status-stable-brightgreen)](#)
 
 对外暴露 **OpenAI 兼容**与 **Anthropic Messages** 接口，
@@ -61,11 +61,15 @@
 
 | 🧠 统一思考控制 | 🧪 计费回归安全网 | 📐 智能估算超时 |
 |:---|:---|:---|
-| `reasoning_effort` 六档 → 按模型 `reasoning_map` 换算上游思考参数；思考内容统一回传 `reasoning_content` / `thinking` | 33 断言计费回归套件（`test_billing_regression.py`）：流式/非流式/一次性/并发入账零丢失，任何改动先跑套件再上线 | `smart_estimate` 模型按 token 量动态计算超时（吞吐 EMA 校准），样本不足自动回退固定值 |
+| `reasoning_effort` 六档 → 按模型 `reasoning_map` 换算上游思考参数；思考内容统一回传 `reasoning_content` / `thinking` | 50 断言计费回归套件（`test_billing_regression.py`）：流式/非流式/一次性/RPM 触顶/并发入账零丢失，任何改动先跑套件再上线 | `smart_estimate` 模型按 token 量动态计算超时（吞吐 EMA 校准），样本不足自动回退固定值 |
 
 | 📡 Embedding / Rerank | 🔑 用户密钥管理 | 📄 JSON 输出路由 |
 |:---|:---|:---|
 | `/v1/embeddings`、`/v1/rerank` 独立端点，仅路由到对应模态的模型 | 用户密钥可设限额（daily / 5h / 一次性）、计费模式、可用池，1 小时粒度用量历史，到期自动轮换 | 勾选 `json_output` 的模型组成硬门槛：带 `response_format(json)` 的请求只路由到支持的模型 |
+
+| ⚡ 高性能数据层 | 🔒 并发事务安全 | 🪶 轻量运行 |
+|:---|:---|:---|
+| `/stats` 单快照聚合（面板轮询 ~250 次查询 → 4 条 SQL）、流式结算合并单事务、RPM/TPM 内存滑窗零查询、上游长连接复用 | bulk 事务任务本地化：并发计费不互相捆绑，回滚不越界、崩溃不丢账，"响应返回前计费已落盘" | WAL 定期回收防膨胀、面板页面 mtime 缓存零重复读、后台标签页自动暂停轮询 |
 
 ---
 
@@ -140,9 +144,18 @@ python main.py
 
 ### 🔁 开机自启（Windows）
 
-已内置启动器脚本：`start_gateway.ps1`（开窗显示启动进度 → 健康检查通过后自动关窗，主程序隐藏窗口后台静默运行；失败则窗口停留提示日志）与 `stop_gateway.ps1`（按 8650 端口停止）。
+已内置启动器脚本：`start_gateway.ps1`（开窗显示启动进度 → 健康检查通过后自动关窗，主程序隐藏窗口后台静默运行；失败则窗口停留提示日志）与 `stop_gateway.ps1`（按 8650 端口停止）。脚本幂等：网关已在运行时直接退出，不会重复拉起。
 
-注册当前用户开机自启（无需管理员，登录后自动运行启动器）：
+**方式一（推荐，当前使用）**：启动文件夹放置静默启动器（当前用户登录时自动拉起一次；只自启、不守护不保活）：
+
+```bat
+:: 文件：%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\model_gateway_autostart.vbs
+CreateObject("Wscript.Shell").Run "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""D:\AIcoding\model-gateway\start_gateway.ps1""", 0, False
+```
+
+删除该 .vbs 即取消自启。
+
+**方式二**：注册表 Run 键（效果等同）：
 
 ```bat
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v ModelGateway /t REG_SZ /d "powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\AIcoding\model-gateway\start_gateway.ps1" /f
@@ -153,20 +166,21 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v ModelGateway /t 
 ## 📂 项目结构
 
 ```
-model-gateway/
+hello-my-gateway/
 ├── main.py                   # FastAPI 入口，对外 API 路由
 ├── admin.py                  # 管理后台 API（模型/供应商/池/密钥 CRUD + 拖拽 reorder + 决策查询）
 ├── pool.py                   # 核心：模型池、可用性判定、择优、切换、计费
 ├── models.py                 # 请求/响应 Pydantic 模型
-├── database.py               # SQLite 持久化（用量/决策/校准样本/密钥），WAL 单连接 + bulk 事务
+├── database.py               # SQLite 持久化（用量/决策/校准样本/密钥），WAL 单连接 + bulk 事务 + 统计快照
 ├── keyauth.py                # 用户 API 密钥鉴权、限额、计费与轮换
-├── scheduler.py              # 每模型独立定时刷新（APScheduler）
+├── scheduler.py              # 每模型独立定时刷新 + DB 维护（批量裁剪 / WAL checkpoint）
 ├── format_adapter.py         # Anthropic ↔ OpenAI 格式双向转换
 ├── reasoning.py              # reasoning_effort 归一化与 reasoning_map 档位回落
-├── probe_reasoning.py        # 思考档位探测：实测各上游写法并生成报告（--apply 写入配置）
+├── probe_reasoning.py        # 思考档位探测：实测各上游思考参数写法并缓存映射（--apply 写入配置）
 ├── updater.py                # 更新服务：GitHub/Gitee 拉取更新、停旧起新、存活监控自动重启（含守护面板）
 ├── logging_config.py         # 统一日志（时间戳 + 控制台 + 文件）
-├── test_billing_regression.py # 计费回归套件（33 断言，隔离实例 + mock 上游，python 直接运行）
+├── test_billing_regression.py # 计费回归套件（50 断言，隔离实例 + mock 上游，python 直接运行）
+├── 优化改造计划.md            # 性能改造的问题清单 / 分批方案 / 验证标准（v2.11.38~43 已实施）
 ├── config.json               # 全部配置：服务、模型注册、池定义
 ├── requirements.txt
 ├── start_gateway.ps1         # Windows 启动器（后台静默运行 + 健康检查）
@@ -561,6 +575,12 @@ SQLite（`gateway.db`）持久化以下表：
 ## 📜 版本
 
 ### 最新
+
+**`v2.11.43`** — **轮询暂停守卫加固**：switchTab 清除定时器后同步置 null；visibilitychange 显示分支加 null 守卫防重复叠加定时器；UI 实测 hfadmin 五页签+密钥 CRUD 全链路、admin 五页签、390px 手机端无横向滚动
+
+**`v2.11.38~42`** — **性能与并发改造五批次（详见《优化改造计划.md》）**：①bulk() 写合并并发语义修复——全局计数改 ContextVar 任务本地深度，修"延迟持久/回滚越界/部分提交/取消悬空"四缺陷，bulk 全程持锁、他协程 DB 操作排队到事务外 ②流式结算写合并——收尾四段（入账兜底/缺失usage补记/校准样本/决策日志）+ `_settle_stream_tokens` 整组 + 流建立预扣合并为单事务（6~8 commit → 1~2），修中途半写失败后兜底重试重复记账的隐性边界 ③RPM/TPM 内存化——request_log 表退役改每模型 60 秒内存滑窗（每请求省 1 INSERT + 1 全表扫 DELETE），decision_log/call_metrics 逐笔裁剪移至每 60s 批量；新增 RPM 触顶回归（回归 46→50 断言）④/stats 批量化——单临界区快照（token_usage 懒重置 + 今昨统计 + 状态小表），面板轮询 ~250 次锁内查询 → 4 条 SQL，实测净耗时 41ms → ≈0ms ⑤传输层——上游 keepalive_expiry=300（空闲 5s 断连致重复 TLS 握手 → 长连接复用）、key 流 usage 子串预筛、_has_images 请求级缓存、reload 后台关闭旧连接池（修泄漏）、每 10 分钟 WAL TRUNCATE 回收、面板 HTML mtime 缓存读、前端 visibilitychange 暂停后台轮询、删除死代码
+
+**`v2.11.31~37`** — 余额返还制账本/展示/校准多轮收尾：昨日剩余落库快照（yesterday_leftover）、人工校准优先级（同步改写自然日统计）、当前可用总额池口径（min(池,用户上限)）、预计补账按每日返还上限计算、切页回顶部等 UI 修复
 
 **`v2.11.1`** — **管理面板模型编辑重构 + JSON 徽章 + 手机适配修复**：①双面板（admin/hfadmin）模型列表新增 `JSON` 徽章标识 `json_output` 能力（embedding/rerank 不显示），无需逐个点开查看 ②编辑弹窗移除"自定义参数名/值"（`extra_params` 废弃，保存时显式提交空对象避免 PUT 合并语义保留旧值；现网无模型使用该字段）③编辑弹窗重构：按"计费与额度/配额与限流/流式与输出选项"分组带标题分隔，智能估算/不发 stream_options/支持 JSON 三选项改为勾选高亮的选项卡片（原挤在超时时间/模型模态标签内），底部操作栏吸底（桌面/手机双档内边距贴合）④手机适配根因修复：index.html 的 `@media(max-width:640px)` 块原写在基础样式之前，`.f2` 单列等规则被后置同权重规则覆盖致手机版布局从未生效——移至样式表末尾 ⑤交互提速：点击"编辑"改为复用页面已加载数据 0 请求直开（原为 2 个串行请求先行），卡片入场动画延迟封顶 400ms（50 模型时原最长 2s 才显完），修复 hfadmin 编辑模式按钮文字（添加→保存）与重复 `onSmartToggle` 调用 ⑥计费回归套件 33/33 全绿（改动前后各跑一遍），UI 层经浏览器实测两面板桌面+手机视图
 
